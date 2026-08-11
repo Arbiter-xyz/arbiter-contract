@@ -18,6 +18,6 @@ jobs:
       - name: cargo test
         run: cargo test
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --features opt
+        run: cargo install --locked stellar-cli
       - name: Build contract to WASM
         run: stellar contract build
