@@ -17,9 +17,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test
-      - name: Install system dependencies for stellar-cli
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli
+        # Prebuilt .deb instead of cargo install: building from source pulls
+        # in hardware-wallet support (dbus, then libudev/hidapi) and takes
+        # 10+ minutes. Pinned to the version this project was built against.
+        run: |
+          curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - name: Build contract to WASM
         run: stellar contract build
