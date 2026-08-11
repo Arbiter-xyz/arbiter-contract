@@ -3,7 +3,7 @@
 The Soroban/Rust escrow contract for **Arbiter**, a pay-per-question
 human-intelligence oracle settled on Stellar. Custodies USDC per question
 and is the only component allowed to move funds — the backend
-([arbiter-backend](https://github.com/rudeus112266/arbiter-backend)) is the
+([arbiter-backend](https://github.com/Arbiter-xyz/arbiter-backend)) is the
 sole caller of its admin-gated methods.
 
 Split out of the original `arbiter` monorepo as a standalone crate (no
