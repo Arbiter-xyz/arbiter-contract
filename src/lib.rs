@@ -65,6 +65,12 @@ pub enum DataKey {
     /// network fee (via withdraw()) instead of receiving N separate
     /// incoming transfers.
     Owed(Address),
+    /// Payer's prepaid balance, mirror image of Owed: deposit() locks funds
+    /// in once (one signature, one network fee), then charge() — admin-only,
+    /// no payer signature per call — draws down against it to open questions
+    /// exactly as submit() does. Lets a metered integrator pay like an API
+    /// key + invoice instead of signing a transaction per question.
+    Balance(Address),
 }
 
 #[contracterror]
@@ -83,6 +89,7 @@ pub enum ContractError {
     InsufficientStake = 10,
     NothingOwed = 11,
     InvalidWorkerLists = 12,
+    InsufficientBalance = 13,
 }
 
 #[contract]
@@ -128,9 +135,24 @@ impl OracleEscrow {
             return Err(ContractError::InvalidAmount);
         }
 
-        let key = DataKey::Question(question_id);
-        if env.storage().persistent().has(&key) {
-            return Err(ContractError::QuestionAlreadyExists);
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(ContractError::NotInitialized)?;
+        token::Client::new(&env, &token_addr).transfer(&payer, &env.current_contract_address(), &amount);
+
+        Self::open_question(&env, payer, question_id, amount)
+    }
+
+    /// Payer locks `amount` into a standing prepaid balance — one signature,
+    /// one network fee, no per-question interaction from here on. Same
+    /// underlying custody as submit()'s escrow; the money just isn't
+    /// earmarked for a specific question yet.
+    pub fn deposit(env: Env, payer: Address, amount: i128) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
         }
 
         let token_addr: Address = env
@@ -138,8 +160,80 @@ impl OracleEscrow {
             .instance()
             .get(&DataKey::Token)
             .ok_or(ContractError::NotInitialized)?;
-        let token_client = token::Client::new(&env, &token_addr);
-        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+        token::Client::new(&env, &token_addr).transfer(&payer, &env.current_contract_address(), &amount);
+
+        let key = DataKey::Balance(payer);
+        let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(existing + amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+
+        Ok(())
+    }
+
+    /// Payer reclaims unused prepaid balance at any time, for any amount up
+    /// to what's left — deposited funds are never locked in beyond what's
+    /// actually been charged against real questions.
+    pub fn withdraw_balance(env: Env, payer: Address, amount: i128) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let key = DataKey::Balance(payer.clone());
+        let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount > existing {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(ContractError::NotInitialized)?;
+        token::Client::new(&env, &token_addr).transfer(&env.current_contract_address(), &payer, &amount);
+
+        env.storage().persistent().set(&key, &(existing - amount));
+        Ok(())
+    }
+
+    pub fn get_balance(env: Env, payer: Address) -> i128 {
+        env.storage().persistent().get(&DataKey::Balance(payer)).unwrap_or(0)
+    }
+
+    /// Admin-only. Draws `amount` out of `payer`'s already-deposited balance
+    /// and opens `question_id` exactly as submit() would — same Question
+    /// struct, same resolve()/refund()/refund_timeout() machinery — but
+    /// with no signature from `payer` on this call. This is what makes
+    /// metered billing possible: the payer authorized the *funds* once at
+    /// deposit() time, not each individual question.
+    pub fn charge(env: Env, payer: Address, question_id: u64, amount: i128) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let key = DataKey::Balance(payer.clone());
+        let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount > existing {
+            return Err(ContractError::InsufficientBalance);
+        }
+        env.storage().persistent().set(&key, &(existing - amount));
+
+        Self::open_question(&env, payer, question_id, amount)
+    }
+
+    /// Shared by submit() (fresh transfer) and charge() (drawn from an
+    /// existing balance) — both end with the identical escrowed, Pending
+    /// question that resolve()/refund()/refund_timeout() already know how
+    /// to settle. Funds have already moved into the contract by the time
+    /// this runs; this only ever records the question.
+    fn open_question(env: &Env, payer: Address, question_id: u64, amount: i128) -> Result<(), ContractError> {
+        let key = DataKey::Question(question_id);
+        if env.storage().persistent().has(&key) {
+            return Err(ContractError::QuestionAlreadyExists);
+        }
 
         let timeout_ledgers: u32 = env
             .storage()

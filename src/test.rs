@@ -628,3 +628,133 @@ fn resolve_with_disjoint_valid_lists_still_succeeds() {
     assert_eq!(c.get_owed(&winner), 2_000_000);
     assert_eq!(c.get_stake(&loser), 190_000);
 }
+
+#[test]
+fn deposit_locks_funds_and_get_balance_reflects_it() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+
+    assert_eq!(c.get_balance(&f.payer), AMOUNT);
+    assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT);
+}
+
+#[test]
+fn deposit_zero_or_negative_amount_fails() {
+    let f = setup();
+    let c = client(&f);
+    assert_eq!(c.try_deposit(&f.payer, &0), Err(Ok(ContractError::InvalidAmount)));
+    assert_eq!(c.try_deposit(&f.payer, &-1), Err(Ok(ContractError::InvalidAmount)));
+}
+
+#[test]
+fn deposits_accumulate_across_calls() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+    c.deposit(&f.payer, &AMOUNT);
+    assert_eq!(c.get_balance(&f.payer), AMOUNT * 2);
+}
+
+#[test]
+fn withdraw_balance_returns_funds_and_decrements_balance() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+    let payer_before = token_client(&f).balance(&f.payer);
+
+    c.withdraw_balance(&f.payer, &400_000);
+
+    assert_eq!(c.get_balance(&f.payer), AMOUNT - 400_000);
+    assert_eq!(token_client(&f).balance(&f.payer), payer_before + 400_000);
+}
+
+#[test]
+fn withdraw_balance_more_than_deposited_fails() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+    let res = c.try_withdraw_balance(&f.payer, &(AMOUNT + 1));
+    assert_eq!(res, Err(Ok(ContractError::InsufficientBalance)));
+}
+
+#[test]
+fn payer_with_no_deposit_has_zero_balance() {
+    let f = setup();
+    let c = client(&f);
+    assert_eq!(c.get_balance(&f.payer), 0);
+}
+
+#[test]
+fn charge_draws_down_balance_and_opens_a_normal_question() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &(AMOUNT * 3));
+
+    c.charge(&f.payer, &1, &AMOUNT);
+
+    assert_eq!(c.get_balance(&f.payer), AMOUNT * 2);
+    let q = c.get_question(&1);
+    assert_eq!(q.amount, AMOUNT);
+    assert_eq!(q.payer, f.payer);
+    assert_eq!(q.status, Status::Pending);
+    // Balance was already in the contract from deposit() — charge() moves
+    // none of its own, so the contract's total token balance is unchanged.
+    assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT * 3);
+}
+
+#[test]
+fn charge_more_than_balance_fails_and_opens_no_question() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+
+    let res = c.try_charge(&f.payer, &1, &(AMOUNT + 1));
+    assert_eq!(res, Err(Ok(ContractError::InsufficientBalance)));
+    assert_eq!(c.get_balance(&f.payer), AMOUNT);
+    assert!(c.try_get_question(&1).is_err());
+}
+
+#[test]
+fn charged_question_settles_through_resolve_exactly_like_submit() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+    c.charge(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [winner.clone()]), &Vec::new(&f.env));
+
+    assert_eq!(c.get_question(&1).status, Status::Resolved);
+    assert_eq!(c.get_owed(&winner), 2_000_000); // 80% of AMOUNT, same math as submit()
+}
+
+#[test]
+fn charged_question_can_still_be_refunded_and_refund_timed_out() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &(AMOUNT * 2));
+    c.charge(&f.payer, &1, &AMOUNT);
+    c.charge(&f.payer, &2, &AMOUNT);
+
+    c.refund(&1);
+    assert_eq!(c.get_question(&1).status, Status::Refunded);
+
+    f.env.ledger().set_sequence_number(f.env.ledger().sequence() + TIMEOUT_LEDGERS + 1);
+    c.refund_timeout(&2);
+    assert_eq!(c.get_question(&2).status, Status::Refunded);
+}
+
+#[test]
+fn charge_same_question_id_twice_fails_like_duplicate_submit() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &(AMOUNT * 2));
+    c.charge(&f.payer, &1, &AMOUNT);
+
+    let res = c.try_charge(&f.payer, &1, &AMOUNT);
+    assert_eq!(res, Err(Ok(ContractError::QuestionAlreadyExists)));
+    // Balance was already debited by the first charge only, not double-spent
+    // by the failed second attempt.
+    assert_eq!(c.get_balance(&f.payer), AMOUNT);
+}
