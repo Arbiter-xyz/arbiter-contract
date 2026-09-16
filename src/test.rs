@@ -447,7 +447,7 @@ fn withdraw_pays_out_full_accrued_balance_and_zeroes_it() {
     c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
-    let withdrawn = c.withdraw(&w1);
+    let withdrawn = c.withdraw(&w1, &2_000_000);
 
     assert_eq!(withdrawn, 2_000_000);
     assert_eq!(c.get_owed(&w1), 0);
@@ -469,7 +469,7 @@ fn withdraw_accumulates_across_multiple_resolved_questions_before_a_single_payou
     assert_eq!(c.get_owed(&w1), 4_000_000);
     assert_eq!(token_client(&f).balance(&w1), 0);
 
-    let withdrawn = c.withdraw(&w1);
+    let withdrawn = c.withdraw(&w1, &4_000_000);
     assert_eq!(withdrawn, 4_000_000);
     assert_eq!(token_client(&f).balance(&w1), 4_000_000);
 }
@@ -479,7 +479,7 @@ fn withdraw_with_nothing_owed_fails() {
     let f = setup();
     let c = client(&f);
     let w1 = Address::generate(&f.env);
-    let res = c.try_withdraw(&w1);
+    let res = c.try_withdraw(&w1, &1);
     assert_eq!(res, Err(Ok(ContractError::NothingOwed)));
 }
 
@@ -491,9 +491,118 @@ fn withdraw_twice_in_a_row_fails_the_second_time() {
     let w1 = Address::generate(&f.env);
     c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
 
-    c.withdraw(&w1);
-    let res = c.try_withdraw(&w1);
+    c.withdraw(&w1, &2_000_000);
+    let res = c.try_withdraw(&w1, &1);
     assert_eq!(res, Err(Ok(ContractError::NothingOwed)));
+}
+
+#[test]
+fn withdraw_zero_or_negative_amount_fails() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+
+    let res = c.try_withdraw(&w1, &0);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
+}
+
+#[test]
+fn withdraw_more_than_owed_fails_without_touching_the_balance() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+
+    let res = c.try_withdraw(&w1, &2_000_001);
+    assert_eq!(res, Err(Ok(ContractError::InsufficientOwed)));
+    assert_eq!(c.get_owed(&w1), 2_000_000);
+}
+
+#[test]
+fn partial_withdrawal_leaves_the_remainder_claimable_later() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    assert_eq!(c.get_owed(&w1), 2_000_000);
+
+    let first = c.withdraw(&w1, &500_000);
+    assert_eq!(first, 500_000);
+    assert_eq!(c.get_owed(&w1), 1_500_000);
+    assert_eq!(token_client(&f).balance(&w1), 500_000);
+
+    let second = c.withdraw(&w1, &1_500_000);
+    assert_eq!(second, 1_500_000);
+    assert_eq!(c.get_owed(&w1), 0);
+    assert_eq!(token_client(&f).balance(&w1), 2_000_000);
+}
+
+#[test]
+fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    let beneficiary = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+
+    let withdrawn = c.withdraw_to(&w1, &beneficiary, &2_000_000);
+
+    assert_eq!(withdrawn, 2_000_000);
+    assert_eq!(c.get_owed(&w1), 0);
+    assert_eq!(token_client(&f).balance(&w1), 0);
+    assert_eq!(token_client(&f).balance(&beneficiary), 2_000_000);
+}
+
+#[test]
+fn touch_is_a_harmless_no_op_for_a_worker_with_no_owed_or_stake() {
+    let f = setup();
+    let c = client(&f);
+    let w1 = Address::generate(&f.env);
+    // Must not error for an address that's never interacted with the
+    // contract at all — permissionless means anyone can call this for
+    // anyone, including by mistake.
+    c.touch(&w1);
+    assert_eq!(c.get_owed(&w1), 0);
+    assert_eq!(c.get_stake(&w1), 0);
+}
+
+#[test]
+fn touch_does_not_change_owed_or_stake_amounts() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    fund_worker(&f, &w1, 1_000_000);
+    c.stake(&w1, &1_000_000);
+
+    c.touch(&w1);
+
+    assert_eq!(c.get_owed(&w1), 2_000_000);
+    assert_eq!(c.get_stake(&w1), 1_000_000);
+}
+
+#[test]
+fn touch_requires_no_authorization_from_anyone() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+
+    c.touch(&w1);
+    // env.auths() reflects only the most recent invocation. mock_all_auths()
+    // alone can't prove permissionlessness (it approves everything, so it
+    // would hide a require_auth() call just as easily as its absence) — an
+    // empty auths list here is the real proof touch() never called
+    // require_auth() on anyone.
+    assert!(f.env.auths().is_empty());
+    assert_eq!(c.get_owed(&w1), 2_000_000);
 }
 
 // --- Admin key rotation ---

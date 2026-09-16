@@ -55,9 +55,13 @@ pub enum DataKey {
     Question(u64),
     /// Worker's posted USDC bond. Staking is opt-in — a worker who never
     /// stakes is never slashed, they just don't carry the credibility a
-    /// stake signals. This is intentionally NOT a participation gate (that
-    /// would require an on-chain read on every dispatch decision); it's a
-    /// punitive-only phase one.
+    /// stake signals. This contract never reads Stake to gate participation
+    /// (that would mean an on-chain read on every dispatch decision, which
+    /// doesn't scale) — the backend does that off-chain instead, via a
+    /// periodically-refreshed cache of get_stake() (see dispatch.js's
+    /// stakeGateAllows/WORKER_MIN_STAKE_STROOPS), closing the "unstake to
+    /// zero, then misbehave for free" gap without adding a live chain read
+    /// to the hot path.
     Stake(Address),
     /// Worker's accrued-but-unwithdrawn earnings from resolve() calls.
     /// resolve() credits this instead of transferring USDC to each worker
@@ -90,6 +94,7 @@ pub enum ContractError {
     NothingOwed = 11,
     InvalidWorkerLists = 12,
     InsufficientBalance = 13,
+    InsufficientOwed = 14,
 }
 
 #[contract]
@@ -380,17 +385,39 @@ impl OracleEscrow {
         env.storage().persistent().get(&DataKey::Stake(worker)).unwrap_or(0)
     }
 
-    /// Worker withdraws their full accrued balance from past resolve()
-    /// calls in one transaction, regardless of how many questions it came
-    /// from — this is what turns "N on-chain payouts" into "N credits, 1
-    /// withdrawal," at the worker's own discretion.
-    pub fn withdraw(env: Env, worker: Address) -> Result<i128, ContractError> {
+    /// Worker withdraws up to `amount` of their accrued balance from past
+    /// resolve() calls, regardless of how many questions it came from —
+    /// this is what turns "N on-chain payouts" into "N credits, as few
+    /// withdrawals as the worker wants," at their own discretion. Pass the
+    /// full get_owed() value to withdraw everything in one call, same as
+    /// before this method took an amount at all.
+    pub fn withdraw(env: Env, worker: Address, amount: i128) -> Result<i128, ContractError> {
         worker.require_auth();
+        Self::do_withdraw(&env, &worker, &worker, amount)
+    }
+
+    /// Same as withdraw(), but sends the funds to `beneficiary` instead of
+    /// `worker` — the worker still signs and still owns the balance being
+    /// drawn down, they're just routing the payout elsewhere (an exchange
+    /// deposit address, a cold wallet) instead of receiving into the
+    /// signing key first and forwarding manually.
+    pub fn withdraw_to(env: Env, worker: Address, beneficiary: Address, amount: i128) -> Result<i128, ContractError> {
+        worker.require_auth();
+        Self::do_withdraw(&env, &worker, &beneficiary, amount)
+    }
+
+    fn do_withdraw(env: &Env, worker: &Address, recipient: &Address, amount: i128) -> Result<i128, ContractError> {
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
 
         let key = DataKey::Owed(worker.clone());
         let owed: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         if owed <= 0 {
             return Err(ContractError::NothingOwed);
+        }
+        if amount > owed {
+            return Err(ContractError::InsufficientOwed);
         }
 
         let token_addr: Address = env
@@ -398,14 +425,45 @@ impl OracleEscrow {
             .instance()
             .get(&DataKey::Token)
             .ok_or(ContractError::NotInitialized)?;
-        token::Client::new(&env, &token_addr).transfer(&env.current_contract_address(), &worker, &owed);
+        token::Client::new(env, &token_addr).transfer(&env.current_contract_address(), recipient, &amount);
 
-        env.storage().persistent().set(&key, &0i128);
-        Ok(owed)
+        env.storage().persistent().set(&key, &(owed - amount));
+        Ok(amount)
     }
 
     pub fn get_owed(env: Env, worker: Address) -> i128 {
         env.storage().persistent().get(&DataKey::Owed(worker)).unwrap_or(0)
+    }
+
+    /// Permissionless — anyone (typically the backend, on a periodic sweep)
+    /// can refresh TTL on a worker's Owed/Stake entries without the
+    /// worker's signature. Storage TTLs only extend on a write that touches
+    /// the entry (see credit_owed/stake), so a worker who earns once and
+    /// never returns has no way to keep their own balance from archiving —
+    /// this closes that gap the same way refund_timeout() is permissionless
+    /// so a payer is never dependent on the backend's cooperation. A worker
+    /// with neither entry is a harmless no-op, not an error — same
+    /// philosophy as slash() skipping a worker with no stake.
+    pub fn touch(env: Env, worker: Address) -> Result<(), ContractError> {
+        let owed_key = DataKey::Owed(worker.clone());
+        if env.storage().persistent().has(&owed_key) {
+            let owed: i128 = env.storage().persistent().get(&owed_key).unwrap_or(0);
+            env.storage().persistent().set(&owed_key, &owed);
+            env.storage()
+                .persistent()
+                .extend_ttl(&owed_key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+        }
+
+        let stake_key = DataKey::Stake(worker);
+        if env.storage().persistent().has(&stake_key) {
+            let stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
+            env.storage().persistent().set(&stake_key, &stake);
+            env.storage()
+                .persistent()
+                .extend_ttl(&stake_key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+        }
+
+        Ok(())
     }
 
     /// Admin-only discretionary refund (e.g. low reconciliation confidence).
