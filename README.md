@@ -29,16 +29,41 @@ not a history-preserving split — full history lives in the original
 
 ## Methods
 
-`initialize` · `submit` · `resolve` · `refund` · `refund_timeout` ·
-`set_admin` · `set_timeout_ledgers` · `stake` · `unstake` · `withdraw` ·
-`get_question` · `get_owed` · `get_stake` · `get_timeout_ledgers`
+`initialize` · `submit` · `deposit` · `withdraw_balance` · `get_balance` ·
+`charge` · `resolve` · `stake` · `unstake` · `get_stake` · `withdraw` ·
+`withdraw_to` · `get_owed` · `touch` · `refund` · `refund_timeout` ·
+`set_admin` · `set_timeout_ledgers` · `get_question` · `get_timeout_ledgers`
 
 ## Running it
 
 ```sh
-cargo test        # 38 tests, no chain needed
+cargo test        # no chain needed
 stellar contract build   # produces a real deployable WASM binary
 ```
+
+## Deploying a fresh instance
+
+With a funded Stellar testnet identity named `admin` and existing token and
+platform contract addresses, build and deploy the contract. The deploy command
+also calls `initialize` with the supplied arguments:
+
+```sh
+stellar contract build
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/oracle_escrow.wasm \
+  --source-account admin \
+  --network testnet \
+  --alias oracle_escrow \
+  -- \
+  --admin admin \
+  --token <TOKEN_CONTRACT_ID> \
+  --platform <PLATFORM_ADDRESS> \
+  --timeout_ledgers 120
+```
+
+Replace `<TOKEN_CONTRACT_ID>` with the token contract address and
+`<PLATFORM_ADDRESS>` with the platform's Stellar address. The command prints
+the deployed contract ID and saves the `oracle_escrow` alias for later CLI calls.
 
 Verified deployed and exercised end to end on Stellar testnet — see the
 "Round 6" section of the original monorepo's README for the live run
