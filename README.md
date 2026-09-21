@@ -29,14 +29,15 @@ not a history-preserving split — full history lives in the original
 
 ## Methods
 
-`initialize` · `submit` · `resolve` · `refund` · `refund_timeout` ·
-`set_admin` · `set_timeout_ledgers` · `stake` · `unstake` · `withdraw` ·
-`get_question` · `get_owed` · `get_stake` · `get_timeout_ledgers`
+`initialize` · `submit` · `deposit` · `withdraw_balance` · `charge` · `resolve` · `refund` · `refund_timeout` ·
+`stake` · `unstake` · `withdraw` · `withdraw_to` · `touch` ·
+`set_admin` · `set_timeout_ledgers` ·
+`get_question` · `get_owed` · `get_stake` · `get_balance` · `get_timeout_ledgers`
 
 ## Running it
 
 ```sh
-cargo test        # 38 tests, no chain needed
+cargo test        # 61 tests, no chain needed
 stellar contract build   # produces a real deployable WASM binary
 ```
 
@@ -44,3 +45,8 @@ Verified deployed and exercised end to end on Stellar testnet — see the
 "Round 6" section of the original monorepo's README for the live run
 (real `submit()`/`resolve()`/`withdraw()` calls, fee math confirmed
 on-chain down to the dust stroop).
+
+## Security and Bug Bounty
+
+The contract operates under a defined bug bounty scope and severity/reward table. See [SECURITY.md](SECURITY.md) for target asset boundaries, severity classifications, economic reward tiers, reproduction criteria, and coordinated disclosure procedures.
+
