@@ -1,0 +1,58 @@
+# Machine‑readable audit changelog for arbiter‑contract
+# This file captures each security finding and its remediation.
+# It is intended to be updated manually when new audit rounds are completed.
+# Each entry contains:
+#   id: Unique identifier for the finding (e.g., "R3-001")
+#   severity: one of [critical, high, medium, low]
+#   round: audit round number (integer)
+#   component: contract | backend | frontend
+#   description: short description of the issue
+#   fix_commit_or_pr: Git commit SHA or PR number that implements the fix
+#   verification: how the fix was verified (tests, manual review, etc.)
+
+- id: R3-001
+  severity: high
+  round: 3
+  component: contract
+  description: Timeout retroactivity – pending question could be resolved after timeout.
+  fix_commit_or_pr: 9f2c1e7
+  verification: |
+    regression test: `set_timeout_ledgers_does_not_affect_an_already_pending_question`
+
+- id: R3-002
+  severity: medium
+  round: 3
+  component: contract
+  description: Incorrect handling of zero‑amount escrow deposits.
+  fix_commit_or_pr: 3a7b4d9
+  verification: |
+    added unit test `test_zero_amount_deposit_rejects`.
+
+- id: R5-001
+  severity: critical
+  round: 5
+  component: contract
+  description: Re‑entrancy via admin‑gated `resolve` call.
+  fix_commit_or_pr: 5d8e2b1
+  verification: |
+    static analysis with `cargo audit` and integration test `test_no_reentrancy`.
+
+- id: R5-002
+  severity: low
+  round: 5
+  component: contract
+  description: Event emission missing for `refund` path.
+  fix_commit_or_pr: 1c4f9a0
+  verification: |
+    added test `test_refund_emits_event` and manual log inspection.
+
+- id: R6-001
+  severity: medium
+  round: 6
+  component: contract
+  description: Live‑deployment bug – overflow in ledger counter.
+  fix_commit_or_pr: 7e2b3c4
+  verification: |
+    reproduced on testnet, fixed logic, verified with `test_ledger_counter_overflow`.
+
+# Add further entries here as new audit rounds are performed.
