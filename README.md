@@ -6,11 +6,12 @@ and is the only component allowed to move funds — the backend
 ([arbiter-backend](https://github.com/Arbiter-xyz/arbiter-backend)) is the
 sole caller of its admin-gated methods.
 
-Split out of the original `arbiter` monorepo as a standalone crate (no
-longer a Cargo workspace member) so it has its own build/release lifecycle,
-independent of the Node services around it. This is a fresh single commit,
-not a history-preserving split — full history lives in the original
-[`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+Originally split out of a monorepo as a standalone crate so it could have
+its own build/release lifecycle, independent of the Node services around
+it. That monorepo is now retired — this repo is the sole source of truth
+for the contract's code going forward (see #133 for adopting tagged
+releases that `arbiter-backend` can pin against). Pre-split history lives
+in the archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
 
 ## Design
 
@@ -40,7 +41,9 @@ cargo test        # 38 tests, no chain needed
 stellar contract build   # produces a real deployable WASM binary
 ```
 
-Verified deployed and exercised end to end on Stellar testnet — see the
-"Round 6" section of the original monorepo's README for the live run
-(real `submit()`/`resolve()`/`withdraw()` calls, fee math confirmed
-on-chain down to the dust stroop).
+Verified deployed and exercised end to end on Stellar testnet — real
+`submit()`/`resolve()`/`withdraw()` calls, fee math confirmed on-chain
+down to the dust stroop. (That run predates this repo's split; see
+"Round 6" in the archived
+[`arbiter`](https://github.com/rudeus112266/arbiter) monorepo README for
+the full write-up.)
