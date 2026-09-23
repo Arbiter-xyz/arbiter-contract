@@ -27,18 +27,49 @@ in the archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
 - **Accrued-balance settlement**: matching workers are credited, not paid
   directly — `withdraw()` collects everything in one transaction whenever
   they choose, instead of one payout per question.
+- **Prepaid balances + metered billing**: callers can `deposit()` USDC up
+  front and have per-question charges drawn from that balance (`charge()`),
+  with `withdraw_balance()`/`withdraw_to()` to pull the remainder back out.
 
 ## Methods
 
 `initialize` · `submit` · `resolve` · `refund` · `refund_timeout` ·
 `set_admin` · `set_timeout_ledgers` · `stake` · `unstake` · `withdraw` ·
-`get_question` · `get_owed` · `get_stake` · `get_timeout_ledgers`
+`deposit` · `withdraw_balance` · `charge` · `get_balance` · `withdraw_to` ·
+`touch` · `get_question` · `get_owed` · `get_stake` · `get_timeout_ledgers`
 
 ## Running it
 
 ```sh
-cargo test        # 38 tests, no chain needed
+cargo test        # no chain needed
 stellar contract build   # produces a real deployable WASM binary
+```
+
+### Deploying a fresh instance
+
+Deploy the built WASM, then call `initialize()` once to populate the
+contract's config (admin, USDC token, platform fee recipient, and the
+timeout window in ledgers). Every other repo assumes an already-populated
+`ORACLE_CONTRACT_ID` — this is where that value comes from.
+
+```sh
+# 1. Deploy the WASM and capture the new contract id.
+CONTRACT_ID=$(stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --source <ADMIN_SECRET_KEY> \
+  --network testnet)
+echo "ORACLE_CONTRACT_ID=$CONTRACT_ID"
+
+# 2. Initialize it (constructor-style args: admin, token, platform, timeout_ledgers).
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source <ADMIN_SECRET_KEY> \
+  --network testnet \
+  -- initialize \
+  --admin <ADMIN_ADDRESS> \
+  --token <USDC_TOKEN_CONTRACT_ID> \
+  --platform <PLATFORM_FEE_ADDRESS> \
+  --timeout_ledgers 17280
 ```
 
 Verified deployed and exercised end to end on Stellar testnet — real
