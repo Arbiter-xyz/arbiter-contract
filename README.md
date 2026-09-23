@@ -83,3 +83,6 @@ the full write-up.)
 
 <!-- handsoff-issue-25 -->
 - #25: touch()'s TTL sweep never reaches a worker who only ever calls stake() — their Stake entry has no renewal path
+
+<!-- handsoff-issue-27 -->
+- #27: No test proves an admin-gated function actually rejects a non-admin caller — mock_all_auths() hides a dropped require_auth()
