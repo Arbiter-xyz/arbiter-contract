@@ -86,3 +86,6 @@ the full write-up.)
 
 <!-- handsoff-issue-27 -->
 - #27: No test proves an admin-gated function actually rejects a non-admin caller — mock_all_auths() hides a dropped require_auth()
+
+<!-- handsoff-issue-28 -->
+- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
