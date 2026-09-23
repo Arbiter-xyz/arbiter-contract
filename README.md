@@ -47,3 +47,8 @@ down to the dust stroop. (That run predates this repo's split; see
 "Round 6" in the archived
 [`arbiter`](https://github.com/rudeus112266/arbiter) monorepo README for
 the full write-up.)
+
+## Handsoff notes
+
+<!-- handsoff-issue-25 -->
+- #25: touch()'s TTL sweep never reaches a worker who only ever calls stake() — their Stake entry has no renewal path
