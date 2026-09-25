@@ -34,3 +34,10 @@ debug-assertions = false
 panic = "abort"
 codegen-units = 1
 lto = true
+
+# The economics simulations drive the v0.2.0 Wasm through thousands of
+# invocations; an unoptimized wasmi/host makes that take minutes. Optimizing
+# dependencies (not this crate) keeps `cargo test` fast without changing what
+# the tests compile.
+[profile.dev.package."*"]
+opt-level = 2

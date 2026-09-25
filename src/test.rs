@@ -6,19 +6,43 @@ use soroban_sdk::{
     Env,
 };
 
-const AMOUNT: i128 = 2_500_000; // 0.25 USDC at 7 decimals
-const TIMEOUT_LEDGERS: u32 = 100;
-
-struct Fixture {
-    env: Env,
-    contract_id: Address,
-    admin: Address,
-    platform: Address,
-    payer: Address,
-    token_address: Address,
+/// The v0.2.0 contract exactly as it was deployed before the TTL, migration
+/// and slashing changes (built from commit 7e5c893). Tests run it side by
+/// side with the current contract to show what each fix changes on the real
+/// compiled code, not on a hand-written model of it.
+pub(crate) mod legacy {
+    soroban_sdk::contractimport!(file = "fixtures/oracle_escrow_v0.2.0.wasm");
 }
 
-fn setup() -> Fixture {
+/// Testnet's live state-archival settings (stellar network settings,
+/// protocol 28, fetched 2026-09-24). The SDK's defaults (min persistent TTL
+/// 4096) hide the old threshold bug, so anything asserting real TTLs uses
+/// these instead.
+pub(crate) const TESTNET_MIN_PERSISTENT_TTL: u32 = 120_960;
+pub(crate) const TESTNET_MAX_ENTRY_TTL: u32 = 3_110_400;
+
+pub(crate) fn use_testnet_archival_params(env: &Env) {
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 4_852_551;
+        li.min_persistent_entry_ttl = TESTNET_MIN_PERSISTENT_TTL;
+        li.min_temp_entry_ttl = 720;
+        li.max_entry_ttl = TESTNET_MAX_ENTRY_TTL;
+    });
+}
+
+pub(crate) const AMOUNT: i128 = 2_500_000; // 0.25 USDC at 7 decimals
+pub(crate) const TIMEOUT_LEDGERS: u32 = 100;
+
+pub(crate) struct Fixture {
+    pub(crate) env: Env,
+    pub(crate) contract_id: Address,
+    pub(crate) admin: Address,
+    pub(crate) platform: Address,
+    pub(crate) payer: Address,
+    pub(crate) token_address: Address,
+}
+
+pub(crate) fn setup() -> Fixture {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -49,15 +73,15 @@ fn setup() -> Fixture {
     }
 }
 
-fn client(f: &Fixture) -> OracleEscrowClient<'_> {
+pub(crate) fn client(f: &Fixture) -> OracleEscrowClient<'_> {
     OracleEscrowClient::new(&f.env, &f.contract_id)
 }
 
-fn token_client(f: &Fixture) -> token::Client<'_> {
+pub(crate) fn token_client(f: &Fixture) -> token::Client<'_> {
     token::Client::new(&f.env, &f.token_address)
 }
 
-fn token_admin_client(f: &Fixture) -> token::StellarAssetClient<'_> {
+pub(crate) fn token_admin_client(f: &Fixture) -> token::StellarAssetClient<'_> {
     token::StellarAssetClient::new(&f.env, &f.token_address)
 }
 
@@ -114,7 +138,11 @@ fn resolve_splits_pool_and_pays_fee() {
     assert_eq!(c.get_owed(&w2), 1_000_000);
     assert_eq!(tc.balance(&w1), 0, "not paid directly, only credited");
     assert_eq!(tc.balance(&w2), 0, "not paid directly, only credited");
-    assert_eq!(tc.balance(&f.contract_id), AMOUNT - 500_000, "worker share stays escrowed until withdraw()");
+    assert_eq!(
+        tc.balance(&f.contract_id),
+        AMOUNT - 500_000,
+        "worker share stays escrowed until withdraw()"
+    );
 
     let q = c.get_question(&1);
     assert_eq!(q.status, Status::Resolved);
@@ -323,7 +351,7 @@ fn token_admin_client_can_mint_additional_funds() {
 // Opt-in credibility bonds. A worker who never stakes is never slashed —
 // this is a punitive-only phase, not a participation gate.
 
-fn fund_worker(f: &Fixture, worker: &Address, amount: i128) {
+pub(crate) fn fund_worker(f: &Fixture, worker: &Address, amount: i128) {
     token_admin_client(f).mint(worker, &amount);
 }
 
@@ -352,17 +380,48 @@ fn stake_zero_or_negative_fails() {
 }
 
 #[test]
-fn unstake_returns_funds_and_decrements_balance() {
+fn begin_unstake_moves_stake_to_unbonding_without_paying_out() {
     let f = setup();
     let c = client(&f);
     let w1 = Address::generate(&f.env);
     fund_worker(&f, &w1, 1_000_000);
     c.stake(&w1, &400_000);
 
-    c.unstake(&w1, &150_000);
+    let release_at = c.begin_unstake(&w1, &150_000);
 
     assert_eq!(c.get_stake(&w1), 250_000);
+    assert_eq!(c.get_stake_info(&w1).unbonding, 150_000);
+    assert_eq!(
+        token_client(&f).balance(&w1),
+        600_000,
+        "nothing paid until complete_unstake()"
+    );
+    assert!(release_at > f.env.ledger().sequence());
+}
+
+#[test]
+fn complete_unstake_pays_out_only_after_the_release_ledger() {
+    let f = setup();
+    let c = client(&f);
+    let w1 = Address::generate(&f.env);
+    fund_worker(&f, &w1, 1_000_000);
+    c.stake(&w1, &400_000);
+    let release_at = c.begin_unstake(&w1, &150_000);
+
+    f.env.ledger().set_sequence_number(release_at - 1);
+    assert_eq!(
+        c.try_complete_unstake(&w1),
+        Err(Ok(ContractError::UnbondingNotElapsed))
+    );
+
+    f.env.ledger().set_sequence_number(release_at);
+    assert_eq!(c.complete_unstake(&w1), 150_000);
     assert_eq!(token_client(&f).balance(&w1), 750_000);
+    assert_eq!(c.get_stake(&w1), 250_000);
+    assert_eq!(
+        c.try_complete_unstake(&w1),
+        Err(Ok(ContractError::NothingUnbonding))
+    );
 }
 
 #[test]
@@ -373,7 +432,7 @@ fn unstake_more_than_staked_fails() {
     fund_worker(&f, &w1, 1_000_000);
     c.stake(&w1, &100_000);
 
-    let res = c.try_unstake(&w1, &100_001);
+    let res = c.try_begin_unstake(&w1, &100_001);
     assert_eq!(res, Err(Ok(ContractError::InsufficientStake)));
 }
 
@@ -407,7 +466,10 @@ fn resolve_slashes_losing_workers_stake_to_the_platform() {
     // slash = 5% of 200_000 = 10_000
     assert_eq!(c.get_stake(&loser), 190_000);
     // fee(500_000) + slash(10_000) both land on the platform in the same call
-    assert_eq!(token_client(&f).balance(&f.platform), platform_before + 500_000 + 10_000);
+    assert_eq!(
+        token_client(&f).balance(&f.platform),
+        platform_before + 500_000 + 10_000
+    );
     // The loser was never in `workers`, so they accrue nothing.
     assert_eq!(c.get_owed(&loser), 0);
     assert_eq!(c.get_owed(&winner), 2_000_000);
@@ -431,7 +493,10 @@ fn resolve_slashing_an_unstaked_losing_worker_is_a_harmless_no_op() {
     );
 
     assert_eq!(c.get_stake(&unstaked_loser), 0);
-    assert_eq!(token_client(&f).balance(&f.platform), platform_before + 500_000);
+    assert_eq!(
+        token_client(&f).balance(&f.platform),
+        platform_before + 500_000
+    );
 }
 
 // --- Accrued-balance settlement (withdraw / get_owed) ---
@@ -444,7 +509,11 @@ fn withdraw_pays_out_full_accrued_balance_and_zeroes_it() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
     let withdrawn = c.withdraw(&w1, &2_000_000);
@@ -461,9 +530,17 @@ fn withdraw_accumulates_across_multiple_resolved_questions_before_a_single_payou
     let w1 = Address::generate(&f.env);
 
     c.submit(&f.payer, &1, &AMOUNT);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
     c.submit(&f.payer, &2, &AMOUNT);
-    c.resolve(&2, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &2,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
 
     // Two questions' worth of 80% share (2_000_000 each) credited before any transfer happened.
     assert_eq!(c.get_owed(&w1), 4_000_000);
@@ -489,7 +566,11 @@ fn withdraw_twice_in_a_row_fails_the_second_time() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
 
     c.withdraw(&w1, &2_000_000);
     let res = c.try_withdraw(&w1, &1);
@@ -502,7 +583,11 @@ fn withdraw_zero_or_negative_amount_fails() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
 
     let res = c.try_withdraw(&w1, &0);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
@@ -514,7 +599,11 @@ fn withdraw_more_than_owed_fails_without_touching_the_balance() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
 
     let res = c.try_withdraw(&w1, &2_000_001);
     assert_eq!(res, Err(Ok(ContractError::InsufficientOwed)));
@@ -527,7 +616,11 @@ fn partial_withdrawal_leaves_the_remainder_claimable_later() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
     let first = c.withdraw(&w1, &500_000);
@@ -548,7 +641,11 @@ fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
     let beneficiary = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
 
     let withdrawn = c.withdraw_to(&w1, &beneficiary, &2_000_000);
 
@@ -577,7 +674,11 @@ fn touch_does_not_change_owed_or_stake_amounts() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
     fund_worker(&f, &w1, 1_000_000);
     c.stake(&w1, &1_000_000);
 
@@ -593,7 +694,11 @@ fn touch_requires_no_authorization_from_anyone() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
 
     c.touch(&w1);
     // env.auths() reflects only the most recent invocation. mock_all_auths()
@@ -621,7 +726,11 @@ fn set_admin_rotates_authority_to_a_new_key() {
     // recognized as the authority for admin-gated calls.
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+    );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 }
 
@@ -698,7 +807,11 @@ fn resolve_rejects_duplicate_addresses_within_the_matching_list() {
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
 
-    let res = c.try_resolve(&1, &Vec::from_array(&f.env, [w1.clone(), w1]), &Vec::new(&f.env));
+    let res = c.try_resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone(), w1]),
+        &Vec::new(&f.env),
+    );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
 
@@ -752,8 +865,14 @@ fn deposit_locks_funds_and_get_balance_reflects_it() {
 fn deposit_zero_or_negative_amount_fails() {
     let f = setup();
     let c = client(&f);
-    assert_eq!(c.try_deposit(&f.payer, &0), Err(Ok(ContractError::InvalidAmount)));
-    assert_eq!(c.try_deposit(&f.payer, &-1), Err(Ok(ContractError::InvalidAmount)));
+    assert_eq!(
+        c.try_deposit(&f.payer, &0),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(
+        c.try_deposit(&f.payer, &-1),
+        Err(Ok(ContractError::InvalidAmount))
+    );
 }
 
 #[test]
@@ -832,7 +951,11 @@ fn charged_question_settles_through_resolve_exactly_like_submit() {
     c.charge(&f.payer, &1, &AMOUNT);
 
     let winner = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [winner.clone()]), &Vec::new(&f.env));
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [winner.clone()]),
+        &Vec::new(&f.env),
+    );
 
     assert_eq!(c.get_question(&1).status, Status::Resolved);
     assert_eq!(c.get_owed(&winner), 2_000_000); // 80% of AMOUNT, same math as submit()
@@ -849,7 +972,9 @@ fn charged_question_can_still_be_refunded_and_refund_timed_out() {
     c.refund(&1);
     assert_eq!(c.get_question(&1).status, Status::Refunded);
 
-    f.env.ledger().set_sequence_number(f.env.ledger().sequence() + TIMEOUT_LEDGERS + 1);
+    f.env
+        .ledger()
+        .set_sequence_number(f.env.ledger().sequence() + TIMEOUT_LEDGERS + 1);
     c.refund_timeout(&2);
     assert_eq!(c.get_question(&2).status, Status::Refunded);
 }

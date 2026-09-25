@@ -18,6 +18,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test
+      - name: Slashing model claims
+        # Asserts every number docs/economics/slashing-threat-model.md cites
+        # from the closed-form model, and that the committed tables are
+        # current.
+        run: |
+          python3 sim/slashing_model.py --check
+          python3 sim/slashing_model.py > /tmp/tables.md
+          diff <(tail -n +8 docs/economics/model-tables.md) /tmp/tables.md
+      - name: Migration tool syntax
+        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs
       - name: Install Stellar CLI
         # Prebuilt .deb instead of cargo install: building from source pulls
         # in hardware-wallet support (dbus, then libudev/hidapi) and takes
