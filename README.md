@@ -62,27 +62,35 @@ contract instance actually matches the tagged source.
 ## Running it
 
 ```sh
-cargo test        # 56 tests, no chain needed
+cargo test        # no chain needed
 stellar contract build   # produces a real deployable WASM binary
 ```
 
-The test suite:
+### Deploying a fresh instance
 
-| file | what it proves |
-|---|---|
-| `src/test.rs` | example tests for every entrypoint |
-| `src/test_fuzz.rs` | property-based fuzzing: random call sequences checked against an independent model, with escrow reconciliation after every call, and a final drain to exactly 0 with no admin help. `PROPTEST_CASES=2000 cargo test escrow_invariant` for a deep run |
-| `src/test_races.rs` | every order and landing ledger of competing settlements ([threat model](docs/SETTLEMENT_RACES.md)) |
-| `src/test_resources.rs` | the `MAX_QUORUM_SIZE` guard, and resolve() resource use vs. mainnet limits |
-| `src/test_upgrade.rs` | timelock, exit window, failed upgrades, pinned storage layout, and the v1 → v2 worked example |
-
-Tests that need real WASM (the resource gate, the benchmark sweep and the
-upgrade worked example) are `#[ignore]`d in a plain `cargo test`. CI runs
-them:
+Deploy the built WASM, then call `initialize()` once to populate the
+contract's config (admin, USDC token, platform fee recipient, and the
+timeout window in ledgers). Every other repo assumes an already-populated
+`ORACLE_CONTRACT_ID` — this is where that value comes from.
 
 ```sh
-scripts/build-wasm.sh                 # deployable WASM + two test-only fixture builds
-cargo test -- --ignored --nocapture   # WASM tests, prints resource tables
+# 1. Deploy the WASM and capture the new contract id.
+CONTRACT_ID=$(stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --source <ADMIN_SECRET_KEY> \
+  --network testnet)
+echo "ORACLE_CONTRACT_ID=$CONTRACT_ID"
+
+# 2. Initialize it (constructor-style args: admin, token, platform, timeout_ledgers).
+stellar contract invoke \
+  --id "$CONTRACT_ID" \
+  --source <ADMIN_SECRET_KEY> \
+  --network testnet \
+  -- initialize \
+  --admin <ADMIN_ADDRESS> \
+  --token <USDC_TOKEN_CONTRACT_ID> \
+  --platform <PLATFORM_FEE_ADDRESS> \
+  --timeout_ledgers 17280
 ```
 
 Verified deployed and exercised end to end on Stellar testnet — real
@@ -91,3 +99,14 @@ down to the dust stroop. (That run predates this repo's split; see
 "Round 6" in the archived
 [`arbiter`](https://github.com/rudeus112266/arbiter) monorepo README for
 the full write-up.)
+
+## Handsoff notes
+
+<!-- handsoff-issue-25 -->
+- #25: touch()'s TTL sweep never reaches a worker who only ever calls stake() — their Stake entry has no renewal path
+
+<!-- handsoff-issue-27 -->
+- #27: No test proves an admin-gated function actually rejects a non-admin caller — mock_all_auths() hides a dropped require_auth()
+
+<!-- handsoff-issue-28 -->
+- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
