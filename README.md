@@ -9,9 +9,18 @@ sole caller of its admin-gated methods.
 Originally split out of a monorepo as a standalone crate so it could have
 its own build/release lifecycle, independent of the Node services around
 it. That monorepo is now retired — this repo is the sole source of truth
-for the contract's code going forward (see #133 for adopting tagged
-releases that `arbiter-backend` can pin against). Pre-split history lives
-in the archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+for the contract's code going forward. Pre-split history lives in the
+archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+
+## Versioning
+
+Tagged releases (`vX.Y.Z`, [SemVer](https://semver.org/)) mark commits that
+change the deployed interface — see [CHANGELOG.md](CHANGELOG.md) for what
+changed at each version, and pin `arbiter-backend`/`arbiter-app` against a
+tag rather than a raw commit. Each [GitHub
+Release](https://github.com/nayt9/arbiter-contract/releases) records the
+sha256 hash of that version's built `.wasm`, so you can confirm a deployed
+contract instance actually matches the tagged source.
 
 ## Design
 
@@ -44,17 +53,16 @@ in the archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
 
 ## Methods
 
-`initialize` · `submit` · `deposit` · `withdraw_balance` · `charge` ·
-`resolve` · `refund` · `refund_timeout` · `stake` · `unstake` · `withdraw` ·
-`withdraw_to` · `touch` · `set_admin` · `set_timeout_ledgers` ·
-`propose_upgrade` · `cancel_upgrade` · `execute_upgrade` ·
-`get_question` · `get_balance` · `get_owed` · `get_stake` ·
-`get_timeout_ledgers` · `get_pending_upgrade` · `version`
+`initialize` · `submit` · `deposit` · `withdraw_balance` · `get_balance` ·
+`charge` · `resolve` · `refund` · `refund_timeout` · `set_admin` ·
+`set_timeout_ledgers` · `stake` · `unstake` · `get_stake` · `withdraw` ·
+`withdraw_to` · `get_owed` · `touch` · `get_question` ·
+`get_timeout_ledgers`
 
 ## Running it
 
 ```sh
-cargo test               # everything that needs no chain and no WASM build
+cargo test        # 56 tests, no chain needed
 stellar contract build   # produces a real deployable WASM binary
 ```
 
