@@ -9,9 +9,18 @@ sole caller of its admin-gated methods.
 Originally split out of a monorepo as a standalone crate so it could have
 its own build/release lifecycle, independent of the Node services around
 it. That monorepo is now retired — this repo is the sole source of truth
-for the contract's code going forward (see #133 for adopting tagged
-releases that `arbiter-backend` can pin against). Pre-split history lives
-in the archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+for the contract's code going forward. Pre-split history lives in the
+archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+
+## Versioning
+
+Tagged releases (`vX.Y.Z`, [SemVer](https://semver.org/)) mark commits that
+change the deployed interface — see [CHANGELOG.md](CHANGELOG.md) for what
+changed at each version, and pin `arbiter-backend`/`arbiter-app` against a
+tag rather than a raw commit. Each [GitHub
+Release](https://github.com/nayt9/arbiter-contract/releases) records the
+sha256 hash of that version's built `.wasm`, so you can confirm a deployed
+contract instance actually matches the tagged source.
 
 ## Design
 
@@ -27,16 +36,28 @@ in the archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
 - **Accrued-balance settlement**: matching workers are credited, not paid
   directly — `withdraw()` collects everything in one transaction whenever
   they choose, instead of one payout per question.
-- **Prepaid balances + metered billing**: callers can `deposit()` USDC up
-  front and have per-question charges drawn from that balance (`charge()`),
-  with `withdraw_balance()`/`withdraw_to()` to pull the remainder back out.
+- **Bounded quorum**: `resolve()` accepts at most `MAX_QUORUM_SIZE` (64)
+  workers + losing workers and rejects anything larger with
+  `QuorumTooLarge`. The cap comes from measuring the real WASM against
+  live mainnet limits; resolve() at the cap uses at most 34.5% of any
+  per-transaction limit. See [docs/RESOURCE_LIMITS.md](docs/RESOURCE_LIMITS.md).
+- **Race-safe settlement**: exactly one of `resolve()` / `refund()` /
+  `refund_timeout()` can ever win, in any order or ledger. Question
+  timeouts are capped at `MAX_TIMEOUT_LEDGERS` (7 days) so the escape
+  hatch can't be disabled. See [docs/SETTLEMENT_RACES.md](docs/SETTLEMENT_RACES.md).
+- **Timelocked in-place upgrades**: `propose_upgrade()` → 8-day delay →
+  `execute_upgrade()`. The contract's address, storage and funds never
+  move, and every pending question reaches its refund deadline before new
+  code can run. See [docs/UPGRADES.md](docs/UPGRADES.md) for the design and
+  the testnet/mainnet runbook.
 
 ## Methods
 
-`initialize` · `submit` · `resolve` · `refund` · `refund_timeout` ·
-`set_admin` · `set_timeout_ledgers` · `stake` · `unstake` · `withdraw` ·
-`deposit` · `withdraw_balance` · `charge` · `get_balance` · `withdraw_to` ·
-`touch` · `get_question` · `get_owed` · `get_stake` · `get_timeout_ledgers`
+`initialize` · `submit` · `deposit` · `withdraw_balance` · `get_balance` ·
+`charge` · `resolve` · `refund` · `refund_timeout` · `set_admin` ·
+`set_timeout_ledgers` · `stake` · `unstake` · `get_stake` · `withdraw` ·
+`withdraw_to` · `get_owed` · `touch` · `get_question` ·
+`get_timeout_ledgers`
 
 ## Running it
 

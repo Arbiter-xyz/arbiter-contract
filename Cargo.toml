@@ -1,6 +1,6 @@
 [package]
 name = "oracle-escrow"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -13,10 +13,17 @@ doctest = false
 soroban-sdk = "23"
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1"
 soroban-sdk = { version = "23", features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+# Test fixtures only, built by scripts/build-wasm.sh. Never deploy either.
+# The "v2" contract for the upgrade worked example (version() == 2).
+upgrade-test-v2 = []
+# Lifts MAX_QUORUM_SIZE so the resource sweep can measure past it.
+bench-uncapped-quorum = []
 
 [profile.release]
 opt-level = "z"
