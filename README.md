@@ -36,6 +36,20 @@ contract instance actually matches the tagged source.
 - **Accrued-balance settlement**: matching workers are credited, not paid
   directly — `withdraw()` collects everything in one transaction whenever
   they choose, instead of one payout per question.
+- **Bounded quorum**: `resolve()` accepts at most `MAX_QUORUM_SIZE` (64)
+  workers + losing workers and rejects anything larger with
+  `QuorumTooLarge`. The cap comes from measuring the real WASM against
+  live mainnet limits; resolve() at the cap uses at most 34.5% of any
+  per-transaction limit. See [docs/RESOURCE_LIMITS.md](docs/RESOURCE_LIMITS.md).
+- **Race-safe settlement**: exactly one of `resolve()` / `refund()` /
+  `refund_timeout()` can ever win, in any order or ledger. Question
+  timeouts are capped at `MAX_TIMEOUT_LEDGERS` (7 days) so the escape
+  hatch can't be disabled. See [docs/SETTLEMENT_RACES.md](docs/SETTLEMENT_RACES.md).
+- **Timelocked in-place upgrades**: `propose_upgrade()` → 8-day delay →
+  `execute_upgrade()`. The contract's address, storage and funds never
+  move, and every pending question reaches its refund deadline before new
+  code can run. See [docs/UPGRADES.md](docs/UPGRADES.md) for the design and
+  the testnet/mainnet runbook.
 
 ## Methods
 
@@ -50,6 +64,25 @@ contract instance actually matches the tagged source.
 ```sh
 cargo test        # 56 tests, no chain needed
 stellar contract build   # produces a real deployable WASM binary
+```
+
+The test suite:
+
+| file | what it proves |
+|---|---|
+| `src/test.rs` | example tests for every entrypoint |
+| `src/test_fuzz.rs` | property-based fuzzing: random call sequences checked against an independent model, with escrow reconciliation after every call, and a final drain to exactly 0 with no admin help. `PROPTEST_CASES=2000 cargo test escrow_invariant` for a deep run |
+| `src/test_races.rs` | every order and landing ledger of competing settlements ([threat model](docs/SETTLEMENT_RACES.md)) |
+| `src/test_resources.rs` | the `MAX_QUORUM_SIZE` guard, and resolve() resource use vs. mainnet limits |
+| `src/test_upgrade.rs` | timelock, exit window, failed upgrades, pinned storage layout, and the v1 → v2 worked example |
+
+Tests that need real WASM (the resource gate, the benchmark sweep and the
+upgrade worked example) are `#[ignore]`d in a plain `cargo test`. CI runs
+them:
+
+```sh
+scripts/build-wasm.sh                 # deployable WASM + two test-only fixture builds
+cargo test -- --ignored --nocapture   # WASM tests, prints resource tables
 ```
 
 Verified deployed and exercised end to end on Stellar testnet — real

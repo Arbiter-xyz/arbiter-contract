@@ -9,7 +9,7 @@ on:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -25,5 +25,13 @@ jobs:
         run: |
           curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
-      - name: Build contract to WASM
-        run: stellar contract build
+      - name: Build contract and test fixtures to WASM
+        run: scripts/build-wasm.sh
+      - name: WASM tests (mainnet resource-limit gate, upgrade worked example)
+        # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
+        # hand, not a gate. See docs/RESOURCE_LIMITS.md.
+        run: cargo test -- --ignored --skip bench_ --nocapture
+      - name: Deep property-based fuzz run
+        run: cargo test escrow_invariant_holds_for_every_call_sequence
+        env:
+          PROPTEST_CASES: "1000"
