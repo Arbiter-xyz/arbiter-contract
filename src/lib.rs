@@ -61,6 +61,44 @@ const MIN_UNBONDING_LEDGERS: u32 = 3 * DAY_LEDGERS;
 /// stays well inside every network's per-tx read limits.
 const MAX_PENDING_PAGE: u32 = 100;
 
+/// Upper bound on any question's refund_timeout() window: 7 days of ledgers
+/// at a 5s close time. Unbounded, a huge value would overflow
+/// `created_at + timeout_ledgers` and permanently disable the permissionless
+/// refund for every question snapshotting it. Bounding it is also what lets
+/// UPGRADE_DELAY_LEDGERS promise every payer an exit before new code runs.
+pub const MAX_TIMEOUT_LEDGERS: u32 = 120_960;
+
+/// Largest `workers.len() + losing_workers.len()` resolve() accepts. Derived
+/// from measured WASM resource use re-priced against live mainnet limits,
+/// see docs/RESOURCE_LIMITS.md; test_resources.rs fails CI if resolve() at
+/// this size stops fitting inside the safety margin.
+#[cfg(not(feature = "bench-uncapped-quorum"))]
+pub const MAX_QUORUM_SIZE: u32 = 64;
+/// Benchmark fixture only (never deploy): lifts the cap so the resource
+/// sweep can measure resolve() past the enforced limit.
+#[cfg(feature = "bench-uncapped-quorum")]
+pub const MAX_QUORUM_SIZE: u32 = u32::MAX;
+
+/// Ledgers between propose_upgrade() and the earliest execute_upgrade().
+/// Strictly longer than MAX_TIMEOUT_LEDGERS, so every question pending when
+/// an upgrade is proposed reaches its refund_timeout() deadline while the
+/// current code is still live, and open_question() clamps questions opened
+/// after the proposal the same way. Stakes, owed and prepaid balances are
+/// withdrawable at any time. Nobody's funds depend on trusting the new code.
+pub const UPGRADE_DELAY_LEDGERS: u32 = MAX_TIMEOUT_LEDGERS + 17_280;
+const _: () = assert!(UPGRADE_DELAY_LEDGERS > MAX_TIMEOUT_LEDGERS);
+// A pending question can't archive before its refund window opens either.
+const _: () = assert!(MAX_TIMEOUT_LEDGERS < PERSISTENT_TTL_EXTEND_TO);
+
+/// Reported by version(). Storage layout compatibility across versions is
+/// pinned by the golden-XDR tests in test_upgrade.rs.
+#[cfg(not(feature = "upgrade-test-v2"))]
+pub const CONTRACT_VERSION: u32 = 1;
+/// Upgrade test fixture only (never deploy): the "v2" in test_upgrade.rs's
+/// worked example.
+#[cfg(feature = "upgrade-test-v2")]
+pub const CONTRACT_VERSION: u32 = 2;
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -236,7 +274,7 @@ impl OracleEscrow {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
-        if timeout_ledgers == 0 {
+        if timeout_ledgers == 0 || timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
         admin.require_auth();
@@ -440,6 +478,11 @@ impl OracleEscrow {
         if workers.is_empty() {
             return Err(ContractError::NoWorkers);
         }
+        // Before validate_worker_lists(): that check is O(n^2), so an
+        // oversized call must be rejected before paying for it.
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
@@ -471,9 +514,6 @@ impl OracleEscrow {
         for loser in losing_workers.iter() {
             platform_take += Self::slash(&env, &loser, slash_cap);
         }
-
-        let this = env.current_contract_address();
-        token_client.transfer(&this, &platform, &platform_take);
         for worker in workers.iter() {
             Self::credit_owed(&env, &worker, share);
         }
@@ -739,7 +779,9 @@ impl OracleEscrow {
             return Err(ContractError::QuestionNotPending);
         }
 
-        let deadline = question.created_at + question.timeout_ledgers;
+        // saturating: an overflow panic here would make the question
+        // permanently un-refundable by anyone but the admin.
+        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
         if env.ledger().sequence() < deadline {
             return Err(ContractError::TooEarlyForTimeout);
         }
@@ -766,7 +808,7 @@ impl OracleEscrow {
     /// Question::timeout_ledgers for why that matters).
     pub fn set_timeout_ledgers(env: Env, new_timeout_ledgers: u32) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        if new_timeout_ledgers == 0 {
+        if new_timeout_ledgers == 0 || new_timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
         env.storage()
@@ -774,6 +816,70 @@ impl OracleEscrow {
             .set(&DataKey::TimeoutLedgers, &new_timeout_ledgers);
         Self::bump_instance(&env);
         Ok(())
+    }
+
+    /// Admin-only. Schedules an in-place code upgrade to `new_wasm_hash`
+    /// (already uploaded), executable UPGRADE_DELAY_LEDGERS from now. The
+    /// contract address, storage and token balance never move, so there is
+    /// no second contract that could also claim a question. The delay is the
+    /// exit window: see UPGRADE_DELAY_LEDGERS. Proposing again replaces the
+    /// pending upgrade and restarts the delay.
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let executable_at = env.ledger().sequence().saturating_add(UPGRADE_DELAY_LEDGERS);
+        let upgrade = PendingUpgrade {
+            wasm_hash: new_wasm_hash.clone(),
+            executable_at,
+        };
+        env.storage().instance().set(&DataKey::PendingUpgrade, &upgrade);
+        Self::extend_instance_ttl(&env);
+        UpgradeProposed {
+            wasm_hash: new_wasm_hash,
+            executable_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only. Drops the pending upgrade; the running code stays.
+    pub fn cancel_upgrade(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let upgrade = Self::pending_upgrade(&env)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Self::extend_instance_ttl(&env);
+        UpgradeCancelled {
+            wasm_hash: upgrade.wasm_hash,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only. Swaps in the proposed code once its delay has passed.
+    /// Atomic: if the hash was never uploaded the whole call fails and the
+    /// current code and pending proposal stay as they were. The new code
+    /// runs from the next invocation onward.
+    pub fn execute_upgrade(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let upgrade = Self::pending_upgrade(&env)?;
+        if env.ledger().sequence() < upgrade.executable_at {
+            return Err(ContractError::UpgradeNotReady);
+        }
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        Self::extend_instance_ttl(&env);
+        env.deployer().update_current_contract_wasm(upgrade.wasm_hash.clone());
+        UpgradeExecuted {
+            wasm_hash: upgrade.wasm_hash,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    pub fn version(_env: Env) -> u32 {
+        CONTRACT_VERSION
     }
 
     pub fn get_question(env: Env, question_id: u64) -> Result<Question, ContractError> {
@@ -1092,6 +1198,23 @@ impl OracleEscrow {
         let key = DataKey::Owed(worker.clone());
         let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         Self::set_persistent(env, &key, &(existing + amount));
+    }
+
+    fn pending_upgrade(env: &Env) -> Result<PendingUpgrade, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(ContractError::NoUpgradePending)
+    }
+
+    /// Instance storage (admin, token, timeout, pending upgrade) and the
+    /// contract code share one TTL, and nothing else ever extends it. Every
+    /// state-changing call keeps it alive so the contract, and with it every
+    /// escrowed question, never archives under steady use.
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
     }
 
     fn require_admin(env: &Env) -> Result<(), ContractError> {

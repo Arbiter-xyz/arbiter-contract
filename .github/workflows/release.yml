@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Stellar CLI
+        run: |
+          curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
+      - name: Build contract to WASM
+        run: stellar contract build
+      - name: Compute wasm hash
+        id: wasm
+        run: |
+          wasm_path=target/wasm32v1-none/release/oracle_escrow.wasm
+          hash=$(sha256sum "$wasm_path" | cut -d' ' -f1)
+          echo "path=$wasm_path" >> "$GITHUB_OUTPUT"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "### Wasm hash (sha256)" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$hash\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.wasm.outputs.path }}
+          body: |
+            **Wasm hash (sha256):** `${{ steps.wasm.outputs.hash }}`
+
+            This is the same hash Soroban uses to identify contract code
+            on-chain — compare it against a deployed instance's wasm hash
+            to confirm that instance matches this tag's source. See
+            [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)
+            for interface changes at this version.
+          generate_release_notes: true
