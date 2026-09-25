@@ -1,0 +1,151 @@
+# node tools/migrate/e2e-testnet.mjs — testnet, 2026-09-25, stellar-cli 26.0.0, protocol 28
+
+
+=== keys (prefix arbe2emugfc6lx)
+{
+  admin: 'GC3XMTHHBYUNTP4MBZ5M7SDRNCI4C6EJGQQ3RN5MLLCB5PHUISWEQXCP',
+  issuer: 'GBTLG4E2F6DOUAZ5ZKLCUGFF5ZOSPZKJRIHEUWKT2FEJ7BHDVXBDXSXY',
+  platform: 'GAEFXRV53TN5VTYU2OGR2AZBGQOQVJE5NM52E5VWPHUJI2ORCQ5JEBHF',
+  payer1: 'GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA',
+  payer2: 'GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR',
+  payer3: 'GDDBKRN4JLDYVOH45PE2T6RSWFQAXRR7YC7ZJLAW74WYNUPU3SMDR25K'
+}
+
+=== asset: AUSD issued by a fresh issuer, wrapped in its Stellar Asset Contract
+{ token: 'CB4QF6OHB6DAUVJYVOVZEUW3IQL5WZC7H7TAXPDDSQLUPCPTRWQMRXL4' }
+
+=== deploy old + new escrow instances (same Wasm)
+{
+  wasm_hash: '8d3b1a36dd1677a8fc0ccb7e3cf547b583e9f79c9863efd558dc4ea55121aa7f',
+  OLD: 'CD5LB2S7VWCSALYHKOJY5G565NOYFD7F2DO7AZVVIKGHFNNI42EETZT5',
+  NEW: 'CDTDQOEVEWNDSPWTA224GNPVWZMGZITX2VILFC3PEJQN36IXTHILLLKY'
+}
+
+=== open questions on OLD: 10 submitted, then 1 resolved and 1 refunded -> 8 pending
+  ✓ OLD has 8 pending
+  ✓ OLD holds pending escrow + owed (60000000 + 6000000)
+
+=== plan before the target has named its migration source: must report the problem and exit non-zero
+DRY RUN — nothing will be sent. testnet @ ledger 4857011
+source CD5LB2S7VWCSALYHKOJY5G565NOYFD7F2DO7AZVVIKGHFNNI42EETZT5
+target CDTDQOEVEWNDSPWTA224GNPVWZMGZITX2VILFC3PEJQN36IXTHILLLKY
+
+8 pending question(s), 6.0000000 total, in 3 batch(es):
+  #1001          0.2500000  payer GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA  refundable from ledger 4874265
+  #1002          0.5000000  payer GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR  refundable from ledger 4874267
+  #1004          1.0000000  payer GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA  refundable from ledger 4874271
+  #1005          0.2500000  payer GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR  refundable from ledger 4874273
+  #1006          1.2500000  payer GDDBKRN4JLDYVOH45PE2T6RSWFQAXRR7YC7ZJLAW74WYNUPU3SMDR25K  refundable from ledger 4874275
+  #1008          0.5000000  payer GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR  refundable from ledger 4874279
+  #1009          2.0000000  payer GDDBKRN4JLDYVOH45PE2T6RSWFQAXRR7YC7ZJLAW74WYNUPU3SMDR25K  refundable from ledger 4874281
+  #1010          0.2500000  payer GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA  refundable from ledger 4874283
+  batch 1: [1001, 1002, 1004]
+  batch 2: [1005, 1006, 1008]
+  batch 3: [1009, 1010]
+
+WOULD FAIL:
+  - target's migration source is unset; run set_migration_source(CD5LB2S7VWCSALYHKOJY5G565NOYFD7F2DO7AZVVIKGHFNNI42EETZT5) on the target as its admin first
+  ✓ dry run flags the missing handshake
+
+=== target admin: set_migration_source(OLD)
+
+=== dry run
+DRY RUN — nothing will be sent. testnet @ ledger 4857026
+source CD5LB2S7VWCSALYHKOJY5G565NOYFD7F2DO7AZVVIKGHFNNI42EETZT5
+target CDTDQOEVEWNDSPWTA224GNPVWZMGZITX2VILFC3PEJQN36IXTHILLLKY
+
+8 pending question(s), 6.0000000 total, in 3 batch(es):
+  #1001          0.2500000  payer GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA  refundable from ledger 4874265
+  #1002          0.5000000  payer GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR  refundable from ledger 4874267
+  #1004          1.0000000  payer GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA  refundable from ledger 4874271
+  #1005          0.2500000  payer GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR  refundable from ledger 4874273
+  #1006          1.2500000  payer GDDBKRN4JLDYVOH45PE2T6RSWFQAXRR7YC7ZJLAW74WYNUPU3SMDR25K  refundable from ledger 4874275
+  #1008          0.5000000  payer GCDMXNU7T7CWTHPHDNRRVE2GSEDHEYY7RMXB4OKHOPZ5Y3CRQJQADNAR  refundable from ledger 4874279
+  #1009          2.0000000  payer GDDBKRN4JLDYVOH45PE2T6RSWFQAXRR7YC7ZJLAW74WYNUPU3SMDR25K  refundable from ledger 4874281
+  #1010          0.2500000  payer GBX5HUKXKHMVTUN2EIP3H72CJBLJQXLKAQXLIYLLXSEXX5JHYCKLLVJA  refundable from ledger 4874283
+  batch 1: [1001, 1002, 1004]
+  batch 2: [1005, 1006, 1008]
+  batch 3: [1009, 1010]
+
+no problems found
+  ✓ dry run is clean
+  ✓ dry run reports exactly 8 questions / 6.0 AUSD / 3 batches
+  ✓ dry run moved nothing
+
+=== run, killed with SIGKILL right after batch 2 lands on-chain (before it is journaled)
+batch 1: [1001, 1002, 1010] -> 10000000
+
+*** simulated crash: after batch 2 landed, before journaling it (kill -9) ***
+  ✓ orchestrator died mid-migration
+  ✓ exactly two whole batches moved: 2 left on OLD, 6 on NEW
+  ✓ no funds created or destroyed across both contracts
+
+=== verify the half-finished state
+ok   #1001 moved exactly once  (target status Pending)
+ok   #1001 terms preserved
+ok   #1002 moved exactly once  (target status Pending)
+ok   #1002 terms preserved
+ok   #1004 still only on source  (not migrated yet)
+ok   #1005 still only on source  (not migrated yet)
+ok   #1006 moved exactly once  (target status Pending)
+ok   #1006 terms preserved
+ok   #1008 moved exactly once  (target status Pending)
+ok   #1008 terms preserved
+ok   #1009 moved exactly once  (target status Pending)
+ok   #1009 terms preserved
+ok   #1010 moved exactly once  (target status Pending)
+ok   #1010 terms preserved
+ok   target received exactly what was migrated  (target +4.7500000, migrated 4.7500000)
+ok   source released exactly what was migrated (plus any settlements)  (source -4.7500000, migrated 4.7500000, settled on source 0.0000000)
+ok   no question pending on both contracts
+
+all 17 checks passed
+  ✓ every question is in exactly one place, balances match
+
+=== replay: send batch 1 again by hand, as a retried in-flight tx would
+  ✓ replayed batch [1001,1002,1010] reverts with QuestionNotPending
+  ✓ replay changed nothing
+
+=== resume
+batch 1: [1005, 1004] -> 12500000
+source has no pending questions left
+  ✓ resumed run finished the job
+
+=== verify the finished migration
+ok   #1001 moved exactly once  (target status Pending)
+ok   #1001 terms preserved
+ok   #1002 moved exactly once  (target status Pending)
+ok   #1002 terms preserved
+ok   #1004 moved exactly once  (target status Pending)
+ok   #1004 terms preserved
+ok   #1005 moved exactly once  (target status Pending)
+ok   #1005 terms preserved
+ok   #1006 moved exactly once  (target status Pending)
+ok   #1006 terms preserved
+ok   #1008 moved exactly once  (target status Pending)
+ok   #1008 terms preserved
+ok   #1009 moved exactly once  (target status Pending)
+ok   #1009 terms preserved
+ok   #1010 moved exactly once  (target status Pending)
+ok   #1010 terms preserved
+ok   target received exactly what was migrated  (target +6.0000000, migrated 6.0000000)
+ok   source released exactly what was migrated (plus any settlements)  (source -6.0000000, migrated 6.0000000, settled on source 0.0000000)
+ok   no question pending on both contracts
+
+all 19 checks passed
+  ✓ all checks pass
+  ✓ NEW gained exactly the pending escrow (60000000)
+  ✓ OLD keeps only what it still owes workers
+
+=== a migrated question settles normally on NEW
+  ✓ refund on NEW pays the original payer
+
+E2E PASSED
+{
+  "network": "testnet",
+  "token": "CB4QF6OHB6DAUVJYVOVZEUW3IQL5WZC7H7TAXPDDSQLUPCPTRWQMRXL4",
+  "OLD": "CD5LB2S7VWCSALYHKOJY5G565NOYFD7F2DO7AZVVIKGHFNNI42EETZT5",
+  "NEW": "CDTDQOEVEWNDSPWTA224GNPVWZMGZITX2VILFC3PEJQN36IXTHILLLKY",
+  "wasm_hash": "8d3b1a36dd1677a8fc0ccb7e3cf547b583e9f79c9863efd558dc4ea55121aa7f",
+  "journal": "/var/folders/9m/q3lxl_t966d50t5rzk83sffr0000gn/T/arbiter-migrate-NyrgXC/journal.jsonl"
+}
