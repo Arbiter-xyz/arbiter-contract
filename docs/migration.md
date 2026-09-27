@@ -9,11 +9,11 @@ duplicated even if the process doing it is killed halfway.
 | piece | where | what it does |
 |---|---|---|
 | `pending_count()`, `list_pending(start, limit)` | contract | Enumerates every Pending question id from an O(1) swap-remove index (`PendingAt`/`PendingPos`/`PendingCount`) maintained by every open and settle path. Pages hold at most 100 ids. |
-| `question_opened` / `question_settled` / `question_migrated` events | contract | The same information as a stream, for an indexer. RPC keeps events for only ~7 days, so this complements the on-chain index rather than replacing it. |
+| `question_opened` / `question_settled` / `question_migrated` events | contract | Opened/migrated events include the bound token so indexers can preserve per-asset accounting. RPC keeps events for only ~7 days, so this complements the on-chain index rather than replacing it. |
 | `set_migration_source(source)` | contract (target admin) | Target's half of the handshake: names the only contract allowed to import. |
 | `migrate_pending(ids, target)` | contract (source admin) | Moves a batch atomically (see below). |
 | `import_question(...)` | contract (called by the source contract only) | Pulls the funds and records the question with its original deadline. |
-| `get_token()` | contract | Lets tooling check both instances escrow the same asset. |
+| `get_token()`, `get_question_token(id)` | contract | Reports the configured default and each question's bound asset. The target must allowlist every imported question token. |
 | [tools/migrate/migrate.mjs](../tools/migrate/migrate.mjs) | orchestrator | `plan` (dry run), `run`, `verify`. No npm dependencies; drives the `stellar` CLI, which holds the admin key. |
 | [tools/migrate/e2e-testnet.mjs](../tools/migrate/e2e-testnet.mjs) | test | The full procedure against real testnet, including a SIGKILL mid-migration. |
 
@@ -35,6 +35,10 @@ each id:
    and `timeout_ledgers`**. The payer's `refund_timeout()` deadline doesn't
    move by a single ledger.
 4. Mark it `Migrated` here and drop it from the index.
+
+The `migrate_pending()` return value is the sum of native integer amounts.
+For a batch containing tokens with different decimal scales, do not treat
+that aggregate as a value; verify amounts per question and per token.
 
 Because the target pulls rather than being pushed to, a question can only
 exist on the target backed by funds that actually arrived there. Nobody
@@ -105,7 +109,10 @@ BigInts, and treats a parse error as fatal, not as a revert.
 ## Running a real migration
 
 ```sh
-# 0. Deploy the new instance and initialize it with the SAME token.
+# 0. Deploy the new instance and initialize it with the same default token.
+#    For each additional source asset, allowlist it on the target before import:
+#    stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- \
+#      set_asset_allowed --token $ASSET --allowed true
 # 1. Target admin opens the door:
 stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- \
   set_migration_source --source $OLD
