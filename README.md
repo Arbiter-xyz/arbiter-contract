@@ -140,3 +140,6 @@ the full write-up.)
 
 <!-- handsoff-issue-76 -->
 - #76: Compliance blocklist registry
+
+<!-- handsoff-issue-77 -->
+- #77: Travel-rule metadata field
