@@ -206,3 +206,9 @@ build.
 
 <!-- handsoff-issue-64 -->
 - #64: WASM binary size optimization
+
+<!-- handsoff-issue-102 -->
+- #102: Third-party stake sponsorship
+
+<!-- handsoff-issue-103 -->
+- #103: Cooperative staking pools
