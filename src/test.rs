@@ -202,6 +202,56 @@ fn submit_locks_funds() {
 }
 
 #[test]
+fn submit_with_schema_hash_persists_it_on_the_question() {
+    let f = setup();
+    let c = client(&f);
+    let schema_hash = soroban_sdk::BytesN::from_array(&f.env, &[0x42; 32]);
+    c.submit_with_schema_hash(&f.payer, &1, &AMOUNT, &schema_hash);
+
+    assert_eq!(c.get_question(&1).schema_hash, Some(schema_hash));
+}
+
+#[test]
+fn submit_without_schema_hash_defaults_to_none() {
+    let f = setup();
+    client(&f).submit(&f.payer, &1, &AMOUNT);
+
+    assert_eq!(client(&f).get_question(&1).schema_hash, None);
+}
+
+#[test]
+fn submit_with_category_increments_the_matching_counter() {
+    let f = setup();
+    let c = client(&f);
+    let category = Symbol::new(&f.env, "science");
+    c.submit_with_category(&f.payer, &1, &AMOUNT, &category);
+
+    assert_eq!(c.get_category_count(&category), 1);
+}
+
+#[test]
+fn get_category_count_for_an_unused_category_returns_zero() {
+    let f = setup();
+    let category = Symbol::new(&f.env, "unused");
+
+    assert_eq!(client(&f).get_category_count(&category), 0);
+}
+
+#[test]
+fn category_counts_are_independent_across_categories() {
+    let f = setup();
+    let c = client(&f);
+    let science = Symbol::new(&f.env, "science");
+    let arts = Symbol::new(&f.env, "arts");
+    c.submit_with_category(&f.payer, &1, &AMOUNT, &science);
+    c.submit_with_category(&f.payer, &2, &AMOUNT, &arts);
+    c.submit_with_category(&f.payer, &3, &AMOUNT, &science);
+
+    assert_eq!(c.get_category_count(&science), 2);
+    assert_eq!(c.get_category_count(&arts), 1);
+}
+
+#[test]
 fn duplicate_submit_fails() {
     let f = setup();
     let c = client(&f);
@@ -831,6 +881,34 @@ fn resolve_slashes_multiple_losing_workers_independently() {
         total_slashed += slashed;
     }
     assert_eq!(total_slashed, 35_000);
+}
+
+#[test]
+fn resolve_emits_one_event_per_matching_worker_with_correct_share() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let first = Address::generate(&f.env);
+    let second = Address::generate(&f.env);
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [first.clone(), second.clone()]),
+        &Vec::new(&f.env),
+    );
+
+    let events = contract_events(&f);
+    let credits = events
+        .iter()
+        .filter(|(topics, _)| event_name(&f, topics) == Symbol::new(&f.env, "worker_credited"))
+        .collect::<std::vec::Vec<_>>();
+    assert_eq!(credits.len(), 2);
+    for (topics, data) in credits {
+        assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
+        let worker: Address = topics.get(2).unwrap().into_val(&f.env);
+        assert!(worker == first || worker == second);
+        let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.clone().into_val(&f.env);
+        assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), 1_000_000i128);
+    }
 }
 
 #[test]

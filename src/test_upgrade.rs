@@ -324,7 +324,7 @@ fn hex(b: &Bytes) -> String {
 fn storage_layout_is_pinned() {
     let env = Env::default();
     let addr = Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
-    let q = Question {
+    let q = StoredQuestion {
         payer: addr.clone(),
         amount: 2_500_000,
         status: Status::Pending,
