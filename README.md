@@ -143,3 +143,6 @@ the full write-up.)
 
 <!-- handsoff-issue-24 -->
 - #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
+
+<!-- handsoff-issue-51 -->
+- #51: Time-locked large withdrawals
