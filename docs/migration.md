@@ -4,6 +4,68 @@ Issue #9. This covers how to move every Pending question from a live
 escrow instance to a freshly deployed one, and why no funds can be lost or
 duplicated even if the process doing it is killed halfway.
 
+## Cross-chain settlement bridge (issue #71)
+
+This section is a design note only. No contract code changes land until
+the bridge-to-contract interface (what actually calls `submit()`/`charge()`,
+and from what address) is settled. It names the specific rail, traces a
+payer's funds from origin chain through to `open_question()` being called,
+and states what happens to a bridged payer's refund path.
+
+### Rail: Circle CCTP + a Stellar forwarder
+
+We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
+Stellar, not Axelar GMP. CCTP is a burn-and-mint rail for USDC only, which
+matches the escrow token this contract already settles in; its trust model
+is Circle's attestation set plus the destination chain's mint authority,
+and its latency is a single attestation round (minutes), not a general
+message-passing consensus round. Axelar GMP is the better fit only if we
+later need to move arbitrary payloads or non-USDC assets, which is out of
+scope here. The forwarder is required because CCTP's Stellar recipient is
+an address, not a contract call: the mint lands at the forwarder, which
+then invokes the escrow contract.
+
+### Trace: origin chain → `open_question()`
+
+1. Payer burns USDC on the origin chain via CCTP's `depositForBurn`, with
+the **forwarder's Stellar address** as the recipient and a payload naming
+the escrow contract, the question parameters, and the payer's Stellar
+address of record.
+2. Circle attests the burn; the CCTP message is submitted on Stellar and
+   the minted USDC is delivered to the forwarder.
+3. The forwarder calls `submit()` (or `charge()`) on the escrow contract
+   **as itself**, forwarding the payer's Stellar address of record as the
+   `payer` argument. The escrow contract's existing `payer.require_auth()`
+   is satisfied by the forwarder's own auth, and the existing
+   `token::Client::transfer` moves the freshly minted USDC into escrow.
+4. `open_question()` runs unchanged: the question is recorded with the
+   payer's Stellar address of record as `Question.payer`, and the escrowed
+   amount is the bridged USDC that just arrived.
+
+### Refund path for a bridged payer
+
+`refund()` / `refund_timeout()` / `do_refund()` are **unchanged** and
+settle natively on Stellar: they call `token_client.transfer` to
+`Question.payer`, which is the payer's Stellar address of record captured
+in step 3. A bridged payer therefore needs their own Stellar address to be
+the `Question.payer` of record, so a refund pays them back on Stellar.
+Bridging the refund back to the origin chain is explicitly **not** in this
+change: `do_refund()` today only ever calls `token_client.transfer` on
+Stellar, and a bridge-back path is a separate, larger scope. A bridged
+payer who wants funds back on their origin chain must bridge the refunded
+USDC out themselves.
+
+### Open questions resolved
+
+1. **Does the bridged payer need their own Stellar address as
+   `Question.payer` of record?** Yes. The forwarder is the caller, but the
+   payer's Stellar address of record is what `refund()`/`refund_timeout()`
+   pay back on Stellar. Refunding across the bridge is out of scope.
+2. **Which bridge fits best?** CCTP for native USDC, given the escrow
+   token is USDC and the trust/latency model is a single attestation
+   round. Axelar GMP is the fallback only if arbitrary payloads or
+   non-USDC assets are needed later.
+
 ## Pieces
 
 | piece | where | what it does |
@@ -131,54 +193,3 @@ Point the backend's `resolve()`/`refund()` at NEW before step 3 for new
 questions. Questions still on OLD keep settling there normally during
 the migration. `migrate_pending` and a concurrent `resolve` on the same
 id can't both succeed; whichever lands second reverts.
-
-**What doesn't move:** workers' `Owed` balances, stakes, and payers'
-prepaid `Balance`s stay on OLD, withdrawable exactly as before. They
-belong to their owners, who can withdraw them from OLD at any time. Only
-escrow for Pending questions needs moving, because only it depends on
-the backend to settle.
-
-## v0.2.0 sources (the currently deployed contract)
-
-v0.2.0 has no `list_pending`, no `migrate_pending`, and no upgrade
-entrypoint, so it can't be taught either. For a v0.2.0 source the tool
-does the only thing that is fund-safe:
-
-- **Enumerate** with `--legacy-ids 1-50000` (or `--legacy-ids-file`): each
-  candidate id is probed with `get_question()`. The backend knows which ids
-  it issued.
-- `plan` reports the questions and explains the path.
-- `run` calls admin `refund()` on each one, returning funds to the payer,
-  who then re-submits against the new instance. It's still crash-safe,
-  since each refund is atomic and re-runs skip what's no longer Pending.
-  Re-escrowing needs the payer's signature, which is exactly why v0.3 adds
-  an on-chain handoff.
-
-## Trust notes
-
-- Only the **source admin** signs a migration. The target's consent was
-  given in advance by its own admin via `set_migration_source`.
-- A malicious source admin could "migrate" to a target it controls. That
-  grants no new power: the same admin can already `resolve()` pending
-  questions to addresses it controls. A payer who wants assurance can
-  check that the target's Wasm hash matches a published release.
-  Deadlines are preserved, so `refund_timeout()` on a legitimate target
-  fires on the original schedule.
-- `list_pending` order isn't stable under concurrent settlement
-  (swap-remove). `plan` re-reads until `pending_count()` is the same before
-  and after paging. `run` sidesteps the issue by always taking the head.
-
-## Fork test (issue #7 cross-reference)
-
-[tools/fork/make-fork-fixture.mjs](../tools/fork/make-fork-fixture.mjs)
-captures, via RPC `getLedgerEntries`, every ledger entry a
-`refund_timeout()` of one real Pending question touches, with their real
-`live_until` values: instance, code, question, index entries (including the
-swap-remove tail), token instance and balance, and the payer's account and
-trustline. [fixtures/](../fixtures) holds two captures from testnet: a
-v0.3 question left Pending by the first e2e run, and a question on a
-v0.2.0 instance deployed from the exact Wasm fixture. The
-`testnet_fork_*` tests archive all of it and refund with no auth mocked.
-`stellar snapshot create` would be the obvious tool, but the pinned
-stellar-cli 26 fails on protocol-28 history buckets
-(`read XDR frame bucket entry: xdr value invalid`).

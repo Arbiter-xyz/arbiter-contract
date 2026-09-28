@@ -61,3 +61,98 @@ assert_eq!(client.status(&question_id), Status::Refunded);
 
 Building a Rust backend to actually consume this crate — that's a separate,
 much larger effort.
+
+## Cross-chain settlement bridge (design note)
+
+This is a **design note only**. No contract code changes land until the
+bridge-to-contract interface (what actually calls `submit()`/`charge()`, and
+from what address) is settled. `src/lib.rs` and the tests are intentionally
+untouched.
+
+### Problem
+
+`submit()` and `deposit()` both require `payer.require_auth()` and a direct
+`token::Client::transfer` from an address the contract can authenticate on
+Stellar. There is no path today for a payer whose funds originate on another
+chain to reach escrow without first bridging to a Stellar-native balance
+themselves.
+
+### Chosen rail: Circle CCTP + a Stellar forwarder
+
+We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
+Stellar, rather than Axelar GMP.
+
+- CCTP is a *burn-and-mint* rail for native USDC: the payer burns USDC on
+their origin chain and CCTP mints the same amount of native USDC on Stellar.
+  The escrowed token stays native USDC, so `resolve()`/`refund()` keep
+  settling with the existing `token_client.transfer` — no change to the
+  settlement path.
+- CCTP already requires a forwarder contract for Stellar recipients, so the
+  "who calls `submit()`" question has a natural answer: the forwarder.
+- Axelar GMP is general message-passing with a different trust/latency model
+  (validator set, arbitrary payloads). It is more than this issue needs and
+  would tempt a redesign of `submit()`; CCTP keeps the change additive.
+
+### Fund trace: origin chain → `open_question()`
+
+1. **Origin chain.** The payer calls CCTP's `depositForBurn` on their origin
+   chain, burning USDC and emitting a message whose `mintRecipient` is the
+   **forwarder contract's Stellar address** (not the payer's own address).
+2. **Attestation.** Circle's attestation service signs the burn message.
+3. **Mint on Stellar.** Anyone (the payer, a relayer, or the forwarder's own
+   keeper) submits the attestation to CCTP's Stellar `MessageTransmitter`,
+   which mints native USDC to the forwarder contract.
+4. **Forwarder calls the escrow.** The forwarder contract now holds the
+   bridged USDC and calls `submit()` (or `deposit()`) on the escrow contract
+   on the payer's behalf, passing the payer's designated Stellar address as
+   `payer` and transferring the minted USDC into escrow.
+5. **`open_question()`.** `submit()` runs exactly as it does today —
+   `payer.require_auth()`, `token_client.transfer(payer, contract, reward)`,
+   then `open_question()` — with the forwarder acting as the authenticated
+   caller for the payer's designated address.
+
+This mirrors how `charge()` already lets the admin open a question funded by
+a payer's prior `deposit()` without a per-question payer signature: the
+forwarder is the thing that calls `submit()`/`charge()`, not the original
+payer directly.
+
+### Open question 1 — who is `Question.payer` of record?
+
+The bridged payer **must have their own Stellar address** to be the
+`Question.payer` of record. `do_refund()` today only ever calls
+`token_client.transfer` on Stellar, so the address that `refund()` and
+`refund_timeout()` pay back has to be a Stellar address the contract can
+authenticate and transfer to. The forwarder is a *conduit*, not the payer of
+record: it forwards the bridged USDC into escrow and records the payer's
+designated Stellar address as `payer`.
+
+### Refund path for a bridged payer (not just the happy path)
+
+- **On Stellar, unchanged.** `refund()` / `refund_timeout()` call
+  `do_refund()`, which transfers the escrowed native USDC back to
+  `Question.payer` — the bridged payer's designated Stellar address. The
+  refund settles natively on Stellar; it does **not** bridge back to the
+  origin chain.
+- **Bridging back is out of scope.** Making a refund bridge back to the
+  payer's origin chain is a much larger change: `do_refund()` would need to
+  call a bridge's burn/withdraw path instead of `token_client.transfer`, and
+  the contract would need to know the payer's origin chain and recipient
+  address. That is explicitly not part of this issue.
+- **Consequence to state plainly.** A bridged payer receives their refund as
+  native USDC on their designated Stellar address. If they want it back on
+  their origin chain, they bridge it out themselves — the escrow contract
+  never initiates an outbound bridge.
+
+### Open question 2 — CCTP vs Axelar GMP
+
+CCTP fits "pay from another chain" best here because it keeps the escrowed
+asset native USDC and the settlement path (`resolve()`/`refund()`) untouched,
+and its forwarder requirement gives a concrete answer to "what calls
+`submit()`." Axelar GMP's general message-passing is more flexible but brings
+a different trust/latency model and would invite a redesign of `submit()`
+rather than an additive forwarder.
+
+### Out of scope
+
+Making the escrowed token itself a bridged/multichain token — that is #72's
+distinct approach, not a prerequisite for this note.
