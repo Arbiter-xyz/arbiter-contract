@@ -197,6 +197,12 @@ pub enum DataKey {
     /// #95 refund-risk underwriting: admin-approved address allowed to call
     /// instant_refund(). Value is a bool flag (true = currently approved).
     Underwriter(Address),
+    /// #96 worker-diversity: admin-attested source-diversity tag for a
+    /// worker (e.g. a region/network-origin code). The admin is the trust
+    /// anchor here rather than a third-party attestation protocol — see
+    /// docs-maintainer-notes/valreb001.md and the PR description for why
+    /// this is scoped down from a real oracle integration.
+    WorkerRegion(Address),
 }
 
 #[contracterror]
@@ -225,6 +231,12 @@ pub enum ContractError {
     /// #95: instant_refund() called by an address the admin hasn't
     /// approved via approve_underwriter().
     NotUnderwriter = 20,
+    /// #96: resolve_diverse() rejected a worker with no admin-attested
+    /// WorkerRegion tag.
+    UnattestedWorker = 21,
+    /// #96: resolve_diverse()'s `workers` list didn't cover at least
+    /// `min_distinct_regions` distinct attested regions.
+    InsufficientDiversity = 22,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -286,6 +298,15 @@ pub struct InstantRefundFronted {
     pub question_id: u64,
     pub underwriter: Address,
     pub fee: i128,
+}
+
+/// Emitted when the admin attests a worker's source-diversity region (#96).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerRegionAttested {
+    #[topic]
+    pub worker: Address,
+    pub region: Symbol,
 }
 
 #[contract]
@@ -1474,6 +1495,111 @@ impl OracleEscrow {
         .publish(&env);
         Ok(())
     }
+
+    // ---- #96: worker-diversity requirement ---------------------------------
+    //
+    // Scoped-down implementation: rather than integrating a real third-party
+    // identity/attestation protocol (none is named in the issue, which flags
+    // this as the key open question), the admin itself attests each worker's
+    // source-diversity tag (e.g. region/network-origin) via
+    // attest_worker_region(). resolve_diverse() is a NEW, opt-in variant of
+    // resolve() — the existing resolve() is untouched — that additionally
+    // requires every worker in `workers` to carry an attestation and the set
+    // to span at least `min_distinct_regions` distinct regions before paying
+    // out. Out of scope: signature-verified third-party attestations, and
+    // any change to resolve()'s existing (non-diverse) behavior.
+
+    /// Admin-only. Records `region` as `worker`'s attested source-diversity
+    /// tag, overwriting any previous attestation.
+    pub fn attest_worker_region(env: Env, worker: Address, region: Symbol) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        Self::set_persistent(&env, &DataKey::WorkerRegion(worker.clone()), &region);
+        Self::bump_instance(&env);
+        WorkerRegionAttested { worker, region }.publish(&env);
+        Ok(())
+    }
+
+    pub fn get_worker_region(env: Env, worker: Address) -> Option<Symbol> {
+        env.storage().persistent().get(&DataKey::WorkerRegion(worker))
+    }
+
+    /// Same payout mechanics as resolve() (20% platform fee, even split of
+    /// the remainder across `workers`, SLASH_BPS taken from each
+    /// `losing_workers` entry), but additionally requires every worker in
+    /// `workers` to have an admin-attested WorkerRegion, and the attested
+    /// regions across `workers` to include at least `min_distinct_regions`
+    /// distinct values. An unattested worker or an insufficiently diverse
+    /// set is rejected before anything is credited or slashed.
+    pub fn resolve_diverse(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+        min_distinct_regions: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+        Self::validate_worker_diversity(&env, &workers, min_distinct_regions)?;
+
+        let key = DataKey::Question(question_id);
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let amount = question.amount;
+        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let mut platform_take = fee + dust;
+        for loser in losing_workers.iter() {
+            platform_take += Self::slash(&env, &loser, slash_cap);
+        }
+        for worker in workers.iter() {
+            Self::credit_owed(&env, &worker, share);
+        }
+        let _ = platform_take;
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        Ok(())
+    }
+
+    /// Rejects an unattested worker, or a `workers` set spanning fewer than
+    /// `min_distinct_regions` distinct attested regions. O(n^2) over
+    /// `workers`, same complexity budget as validate_worker_lists().
+    fn validate_worker_diversity(
+        env: &Env,
+        workers: &Vec<Address>,
+        min_distinct_regions: u32,
+    ) -> Result<(), ContractError> {
+        let mut regions: Vec<Symbol> = Vec::new(env);
+        for worker in workers.iter() {
+            let region: Symbol = env
+                .storage()
+                .persistent()
+                .get(&DataKey::WorkerRegion(worker))
+                .ok_or(ContractError::UnattestedWorker)?;
+            if !regions.iter().any(|r| r == region) {
+                regions.push_back(region);
+            }
+        }
+        if regions.len() < min_distinct_regions {
+            return Err(ContractError::InsufficientDiversity);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1486,3 +1612,5 @@ mod test_migration;
 mod test_ttl;
 #[cfg(test)]
 mod test_refund_underwriting;
+#[cfg(test)]
+mod test_worker_diversity;
