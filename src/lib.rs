@@ -822,24 +822,7 @@ impl OracleEscrow {
     /// question's entry (or the whole contract instance) has archived: see
     /// docs/ttl-archival.md and src/test_ttl.rs.
     pub fn refund_timeout(env: Env, question_id: u64) -> Result<(), ContractError> {
-        let key = DataKey::Question(question_id);
-        let question: Question = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        // saturating: an overflow panic here would make the question
-        // permanently un-refundable by anyone but the admin.
-        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
-        if env.ledger().sequence() < deadline {
-            return Err(ContractError::TooEarlyForTimeout);
-        }
-
-        Self::do_refund(&env, question_id)
+        Self::try_refund_timeout(&env, question_id)
     }
 
     /// Admin-only key rotation. The current admin must sign to authorize
@@ -1539,6 +1522,62 @@ impl OracleEscrow {
         }
         (slashable * SLASH_BPS / BPS_DENOM).min(cap).min(slashable).max(0)
     }
+
+    // ---- Issue #86: permissionless batch-expiry sweep -----------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Caller supplies exact question_ids (no on-chain enumeration of
+    //    which Pending questions are past deadline), same as the existing
+    //    single-id refund_timeout() — explicitly out of scope per the issue.
+    //  - Best-effort/continue-past-failures, returning one Result per id in
+    //    the same order, rather than aborting the whole batch on the first
+    //    ineligible id.
+    //  - No explicit batch-size cap beyond the existing MAX_QUORUM_SIZE
+    //    precedent elsewhere in the contract; callers are expected to size
+    //    batches sensibly (each iteration is O(1), no O(n^2) work).
+    //
+    // The one non-additive change: refund_timeout()'s body was extracted
+    // into try_refund_timeout() below so both it and sweep_timeouts() share
+    // the identical per-question deadline-check + do_refund() logic.
+    // refund_timeout()'s own behavior, error cases and signature are
+    // unchanged.
+
+    /// The per-question logic refund_timeout() has always run: only
+    /// eligible once Pending and past its deadline, verbatim.
+    fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
+        let key = DataKey::Question(question_id);
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        // saturating: an overflow panic here would make the question
+        // permanently un-refundable by anyone but the admin.
+        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
+        if env.ledger().sequence() < deadline {
+            return Err(ContractError::TooEarlyForTimeout);
+        }
+
+        Self::do_refund(env, question_id)
+    }
+
+    /// Permissionless batch version of refund_timeout(): attempts the same
+    /// per-question deadline check and refund for every id in
+    /// `question_ids`, continuing past individual failures (a question
+    /// that's not-yet-eligible or already settled) instead of reverting the
+    /// whole call. Returns one `Result` per input id, in the same order, so
+    /// the caller can see exactly which ones actually refunded.
+    pub fn sweep_timeouts(env: Env, question_ids: Vec<u64>) -> Vec<Result<(), ContractError>> {
+        let mut results = Vec::new(&env);
+        for question_id in question_ids.iter() {
+            results.push_back(Self::try_refund_timeout(&env, question_id));
+        }
+        results
+    }
 }
 
 #[cfg(test)]
@@ -1553,3 +1592,5 @@ mod test_ttl;
 mod test_quorum_bounds;
 #[cfg(test)]
 mod test_dry_run_resolve;
+#[cfg(test)]
+mod test_batch_expiry_sweep;
