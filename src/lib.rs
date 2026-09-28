@@ -444,10 +444,11 @@ pub enum ContractError {
     NothingToClaim = 305,
 }
 
-/// Emitted whenever a question becomes Pending — by submit(), charge(), or
-/// import_question() on a migration target. Together with QuestionSettled
-/// this lets an off-chain indexer rebuild the pending set without calling
-/// list_pending().
+/// `question_opened` topics: question_id; data: payer, token, amount,
+/// created_at, timeout_ledgers. Emitted whenever a question becomes Pending
+/// — by submit(), charge(), or import_question() on a migration target.
+/// Together with QuestionSettled this lets an off-chain indexer rebuild the
+/// pending set without calling list_pending().
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionOpened {
@@ -467,6 +468,94 @@ pub struct QuestionSettled {
     #[topic]
     pub question_id: u64,
     pub status: Status,
+}
+
+/// `question_resolved` topics: question_id; data: worker_count, fee,
+/// total_slashed.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionResolved {
+    #[topic]
+    pub question_id: u64,
+    pub worker_count: u32,
+    pub fee: i128,
+    pub total_slashed: i128,
+}
+
+/// `worker_slashed` topics: question_id, worker; data: amount.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerSlashed {
+    #[topic]
+    pub question_id: u64,
+    #[topic]
+    pub worker: Address,
+    pub amount: i128,
+}
+
+/// `question_refunded` topics: question_id; data: payer, amount, via_timeout.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionRefunded {
+    #[topic]
+    pub question_id: u64,
+    pub payer: Address,
+    pub amount: i128,
+    pub via_timeout: bool,
+}
+
+/// `stake_changed` topics: worker, token; data: signed amount, new_total.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StakeChanged {
+    #[topic]
+    pub worker: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+    pub new_total: i128,
+}
+
+/// `worker_paid` topics: worker; data: recipient, token, amount.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerPaid {
+    #[topic]
+    pub worker: Address,
+    pub recipient: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// `prepaid_balance_changed` topics: payer, token; data: signed amount,
+/// new_total.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrepaidBalanceChanged {
+    #[topic]
+    pub payer: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+    pub new_total: i128,
+}
+
+/// `admin_rotated` topics: old_admin, new_admin; data: empty.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRotated {
+    #[topic]
+    pub old_admin: Address,
+    #[topic]
+    pub new_admin: Address,
+}
+
+/// `timeout_ledgers_changed` data: old_timeout_ledgers, new_timeout_ledgers.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeoutLedgersChanged {
+    pub old_timeout_ledgers: u32,
+    pub new_timeout_ledgers: u32,
 }
 
 /// Issue #84: the would-be outcome of calling resolve() with the given
@@ -864,6 +953,9 @@ impl OracleEscrow {
     /// Payer locks `amount` of the configured token into escrow for
     /// `question_id`. Any i128 > 0 is accepted here — pricing tiers /
     /// dynamic pricing are a backend policy, not a contract constraint.
+    /// Fee math divides before multiplying, so the full positive i128 range
+    /// is safe from intermediate overflow, far beyond any realistic USDC
+    /// amount even at seven decimal places.
     pub fn submit(
         env: Env,
         payer: Address,
@@ -925,13 +1017,20 @@ impl OracleEscrow {
             &amount,
         );
 
-        let key = DataKey::Balance(payer);
+        let key = DataKey::Balance(payer.clone());
         let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let updated = existing
             .checked_add(amount)
             .ok_or(ContractError::ArithmeticOverflow)?;
         Self::set_persistent(&env, &key, &updated);
         Self::bump_instance(&env);
+        PrepaidBalanceChanged {
+            payer,
+            token: token_addr,
+            amount,
+            new_total: updated,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -959,6 +1058,13 @@ impl OracleEscrow {
             .ok_or(ContractError::ArithmeticOverflow)?;
         Self::set_persistent(&env, &key, &updated);
         Self::bump_instance(&env);
+        PrepaidBalanceChanged {
+            payer,
+            token,
+            amount,
+            new_total: updated,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -984,8 +1090,16 @@ impl OracleEscrow {
             &amount,
         );
 
-        Self::set_persistent(&env, &key, &(existing - amount));
+        let updated = existing - amount;
+        Self::set_persistent(&env, &key, &updated);
         Self::bump_instance(&env);
+        PrepaidBalanceChanged {
+            payer,
+            token: token_addr,
+            amount: -amount,
+            new_total: updated,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1009,8 +1123,16 @@ impl OracleEscrow {
             &payer,
             &amount,
         );
-        Self::set_persistent(&env, &key, &(balance - amount));
+        let updated = balance - amount;
+        Self::set_persistent(&env, &key, &updated);
         Self::bump_instance(&env);
+        PrepaidBalanceChanged {
+            payer,
+            token,
+            amount: -amount,
+            new_total: updated,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1277,15 +1399,28 @@ impl OracleEscrow {
         let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
         let pool = amount - fee;
         let n = workers.len() as i128;
+        // If workers.len() exceeds the after-fee pool, integer division
+        // makes every share zero and the platform absorbs the entire pool
+        // as dust. Callers (including backend pricing tiers) must keep the
+        // amount large enough for the chosen quorum to avoid this outcome.
         let share = pool / n;
         let dust = pool - share * n;
 
         let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
         let mut platform_take = fee + dust;
         for loser in losing_workers.iter() {
+            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
             platform_take = platform_take
-                .checked_add(Self::slash(&env, &question_token, &loser, slash_cap))
+                .checked_add(slashed)
                 .ok_or(ContractError::ArithmeticOverflow)?;
+            if slashed > 0 {
+                WorkerSlashed {
+                    question_id,
+                    worker: loser,
+                    amount: slashed,
+                }
+                .publish(&env);
+            }
         }
         for worker in workers.iter() {
             Self::credit_owed(&env, &question_token, &worker, share)?;
@@ -1304,6 +1439,13 @@ impl OracleEscrow {
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        QuestionResolved {
+            question_id,
+            worker_count: workers.len(),
+            fee,
+            total_slashed: platform_take - fee - dust,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1330,8 +1472,16 @@ impl OracleEscrow {
             .checked_add(amount)
             .ok_or(ContractError::ArithmeticOverflow)?;
         info.warming_since = env.ledger().sequence();
-        Self::set_persistent(&env, &DataKey::Stake(worker), &info);
+        let new_total = info.settled + info.warming;
+        Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
         Self::bump_instance(&env);
+        StakeChanged {
+            worker,
+            token: token_addr,
+            amount,
+            new_total,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -1359,8 +1509,16 @@ impl OracleEscrow {
             .checked_add(amount)
             .ok_or(ContractError::ArithmeticOverflow)?;
         info.warming_since = env.ledger().sequence();
+        let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &key, &info);
         Self::bump_instance(&env);
+        StakeChanged {
+            worker,
+            token,
+            amount,
+            new_total,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1401,8 +1559,17 @@ impl OracleEscrow {
             .ok_or(ContractError::ArithmeticOverflow)?;
         info.unbonding_release_at = release_at;
 
-        Self::set_persistent(&env, &DataKey::Stake(worker), &info);
+        let new_total = info.settled + info.warming;
+        let token_addr = Self::token(&env)?;
+        Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
         Self::bump_instance(&env);
+        StakeChanged {
+            worker,
+            token: token_addr,
+            amount: -amount,
+            new_total,
+        }
+        .publish(&env);
         Ok(release_at)
     }
 
@@ -1467,8 +1634,16 @@ impl OracleEscrow {
             .ok_or(ContractError::ArithmeticOverflow)?;
         info.unbonding_release_at = release_at;
         let key = Self::stake_key(&env, &token, &worker)?;
+        let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &key, &info);
         Self::bump_instance(&env);
+        StakeChanged {
+            worker,
+            token,
+            amount: -amount,
+            new_total,
+        }
+        .publish(&env);
         Ok(release_at)
     }
 
@@ -1627,6 +1802,13 @@ impl OracleEscrow {
 
         Self::set_persistent(env, &key, &(owed - amount));
         Self::bump_instance(env);
+        WorkerPaid {
+            worker: worker.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+        }
+        .publish(env);
         Ok(amount)
     }
 
@@ -1731,7 +1913,7 @@ impl OracleEscrow {
     /// makes this a true fail-closed-only transition.
     pub fn refund(env: Env, question_id: u64) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        Self::do_refund(&env, question_id)
+        Self::do_refund(&env, question_id, false)
     }
 
     /// Permissionless escape hatch: once a question has sat Pending for at
@@ -1787,8 +1969,20 @@ impl OracleEscrow {
             return Err(ContractError::AdminRotationNotReady);
         }
         pending.new_admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &pending.new_admin);
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &pending.new_admin);
         env.storage().instance().remove(&AssetKey::PendingAdminRotation);
+        AdminRotated {
+            old_admin,
+            new_admin: pending.new_admin.clone(),
+        }
+        .publish(&env);
         AdminRotationExecuted {
             new_admin: pending.new_admin,
         }
@@ -1811,10 +2005,20 @@ impl OracleEscrow {
         if new_timeout_ledgers == 0 || new_timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
+        let old_timeout_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimeoutLedgers)
+            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&DataKey::TimeoutLedgers, &new_timeout_ledgers);
         Self::bump_instance(&env);
+        TimeoutLedgersChanged {
+            old_timeout_ledgers,
+            new_timeout_ledgers,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -2347,7 +2551,11 @@ impl OracleEscrow {
         }
     }
 
-    fn do_refund(env: &Env, question_id: u64) -> Result<(), ContractError> {
+    fn do_refund(
+        env: &Env,
+        question_id: u64,
+        via_timeout: bool,
+    ) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
         let mut question: Question = env
             .storage()
@@ -2366,6 +2574,13 @@ impl OracleEscrow {
         );
 
         Self::settle_question(env, question_id, &key, &mut question, Status::Refunded);
+        QuestionRefunded {
+            question_id,
+            payer: question.payer.clone(),
+            amount: question.amount,
+            via_timeout,
+        }
+        .publish(env);
         Ok(())
     }
 
@@ -2715,7 +2930,7 @@ impl OracleEscrow {
         if env.ledger().sequence() < question.deadline {
             return Err(ContractError::TimeoutNotReached);
         }
-        Self::do_refund(&env, &key, &question)?;
+        Self::do_refund(env, question_id, true)?;
         Ok(())
     }
 
