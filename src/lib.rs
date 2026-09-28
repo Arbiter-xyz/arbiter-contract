@@ -216,6 +216,20 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// #88: a fixed-price template a payer can open a question from, instead
+    /// of supplying a caller-chosen amount. Admin-managed. Advisory-only
+    /// quorum_hint (see QuestionTemplate) — not enforced by this contract.
+    Template(u32),
+    /// #89: `owner` has pre-authorized `delegate` to call
+    /// submit_as_delegate() on their behalf, up to this much cumulative
+    /// i128 amount (decremented per use, mirroring a capped allowance
+    /// rather than unlimited authority).
+    Delegate(Address, Address),
+    /// #90: a claimable-vesting stream from `payer` to `beneficiary` — the
+    /// practical on-chain approximation of "payment streaming" (see Stream
+    /// doc comment). Keyed by (payer, beneficiary) so one payer can run at
+    /// most one active stream per beneficiary at a time.
+    Stream(Address, Address),
     /// Admin-settable lower bound on `workers.len() + losing_workers.len()`
     /// for resolve() (issue #85). Absent means unbounded (today's
     /// behavior) — see `set_quorum_bounds()` / `get_quorum_bounds()`.
@@ -406,6 +420,28 @@ pub enum ContractError {
     CannotDisableDefaultAsset = 36,
     ArithmeticOverflow = 37,
     AssetLimitReached = 38,
+    // 300s: new-feature error codes for #87/#88/#89/#90. Starting at 300
+    // deliberately avoids colliding with other in-flight PRs touching this
+    // same file (20s, 100s, 200s already claimed elsewhere) — see this
+    // PR's description for the full breakdown.
+    /// #87: reopen_question() called on a question that isn't Refunded (or
+    /// isn't owned by the caller).
+    QuestionNotRefunded = 300,
+    /// #88: submit_from_template()/register_template() referenced a
+    /// template_id with no registered QuestionTemplate.
+    TemplateNotFound = 301,
+    /// #89: submit_as_delegate() called by an address with no active
+    /// delegation from `payer`, or whose remaining capped allowance is
+    /// less than the requested amount.
+    DelegateNotAuthorized = 302,
+    /// #90: create_stream() called with end_ledger <= start_ledger, or a
+    /// duplicate (payer, beneficiary) stream already exists.
+    InvalidStreamRange = 303,
+    /// #90: claim_stream()/get_stream()/cancel_stream() referenced a
+    /// (payer, beneficiary) pair with no active stream.
+    StreamNotFound = 304,
+    /// #90: claim_stream() called with nothing newly vested to claim.
+    NothingToClaim = 305,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -467,6 +503,95 @@ pub struct QuestionMigrated {
     pub question_id: u64,
     pub target: Address,
     pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted by reopen_question() (#87).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionReopened {
+    #[topic]
+    pub question_id: u64,
+    pub payer: Address,
+    pub amount: i128,
+    pub created_at: u32,
+    pub timeout_ledgers: u32,
+}
+
+/// #88: a fixed on-chain price a question can be opened at via
+/// submit_from_template(), instead of a caller-supplied amount.
+/// `quorum_hint` is advisory only — this contract does not enforce it
+/// against resolve()'s actual worker/losing_worker counts; overlaps with
+/// #85 if that enforcement is added later.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionTemplate {
+    pub price: i128,
+    pub quorum_hint: u32,
+}
+
+/// Emitted by register_template() (#88).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateRegistered {
+    #[topic]
+    pub template_id: u32,
+    pub price: i128,
+    pub quorum_hint: u32,
+}
+
+/// Emitted by grant_delegate() (#89).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegateGranted {
+    #[topic]
+    pub owner: Address,
+    pub delegate: Address,
+    pub cap: i128,
+}
+
+/// Emitted by revoke_delegate() (#89).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegateRevoked {
+    #[topic]
+    pub owner: Address,
+    pub delegate: Address,
+}
+
+/// #90: a claimable-vesting stream, the practical on-chain approximation of
+/// "payment streaming" — see create_stream()/claim_stream() doc comments
+/// for why this contract does not attempt real per-ledger push-transfers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stream {
+    pub payer: Address,
+    pub beneficiary: Address,
+    pub total: i128,
+    pub claimed: i128,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+}
+
+/// Emitted by create_stream() (#90).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamCreated {
+    #[topic]
+    pub payer: Address,
+    pub beneficiary: Address,
+    pub total: i128,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+}
+
+/// Emitted by claim_stream()/cancel_stream() (#90).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamClaimed {
+    #[topic]
+    pub payer: Address,
+    pub beneficiary: Address,
     pub amount: i128,
 }
 
@@ -654,35 +779,6 @@ pub struct StakeSnapshotted {
     pub worker: Address,
     pub ledger: u32,
     pub stake: i128,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReputationUpdated {
-    #[topic]
-    pub worker: Address,
-    pub matched: u32,
-    pub lost: u32,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AssetPermissionChanged {
-    #[topic]
-    pub token: Address,
-    pub allowed: bool,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AdminRotationProposed {
-    #[topic]
-    pub new_admin: Address,
-    pub executable_at: u32,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, Partial
 }
 
 #[contractevent]
@@ -2376,6 +2472,78 @@ impl OracleEscrow {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
+    // ---- #87: reopen a refunded question -------------------------------
+    //
+    // Scope, per the issue's own resolution of its open question 1: a
+    // triggered refund still means "the payer got their money back, full
+    // stop" — do_refund()/refund_timeout() are UNCHANGED here, funds still
+    // leave the contract unconditionally. What's added is narrower: a
+    // Refunded question's id can be turned back into a fresh Pending
+    // question, funded by a brand-new deposit from the ORIGINAL payer only
+    // (answering open question 2 — no admin path), with created_at and the
+    // timeout clock reset to "now" (open question 3 — deliberately a NEW
+    // window, not a resurrection of the old one, since the old window's
+    // deadline already passed and prompted the refund).
+
+    /// Turns a Refunded question back into a fresh, fully-funded Pending
+    /// one under the SAME question_id, requiring a brand-new deposit from
+    /// the original payer — reusing the id doesn't reuse the old funds,
+    /// which already left the contract when it was refunded. Only the
+    /// original `question.payer` may reopen (their own require_auth()); a
+    /// Resolved/Pending/Migrated question is out of scope and rejected with
+    /// QuestionNotRefunded, matching the issue's explicit scope line.
+    pub fn reopen_question(
+        env: Env,
+        payer: Address,
+        question_id: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let key = DataKey::Question(question_id);
+        let existing: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if existing.status != Status::Refunded {
+            return Err(ContractError::QuestionNotRefunded);
+        }
+        if existing.payer != payer {
+            return Err(ContractError::QuestionNotRefunded);
+        }
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let now = env.ledger().sequence();
+        let reopened = Question {
+            payer: payer.clone(),
+            amount,
+            status: Status::Pending,
+            created_at: now,
+            deadline: now.saturating_add(Self::timeout_ledgers(&env)),
+        };
+        env.storage().persistent().set(&key, &reopened);
+        Self::extend_persistent(&env, &key);
+
+        Self::bump_instance(&env);
+        QuestionReopened {
+            question_id,
+            payer,
+            amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // ---- Issue #85: admin-settable quorum-size bounds ----------------
     //
     // Simplifications vs. the full issue:
@@ -2401,55 +2569,6 @@ impl OracleEscrow {
         env.storage().instance().set(&DataKey::MinQuorum, &min);
         env.storage().instance().set(&DataKey::MaxQuorum, &max);
 
-        Self::bump_instance(&env);
-        Ok(())
-    }
-
-    // ---- #91: auto-top-up threshold ----------------------------------
-    //
-    // Scoped down from the issue's open questions: the contract cannot pull
-    // funds from a payer's wallet without their signature, and #89's
-    // delegation primitive this issue optionally depends on doesn't exist
-    // yet on this branch. So this implements just the "fixed
-    // DataKey::TopUpThreshold(Address) the payer sets themselves, checked
-    // ... without failing the charge" half of the design (open question 3 /
-    // the second acceptance criterion), as a threshold + event mechanism
-    // that a backend polls or calls right after charge() — it does NOT hook
-    // into charge() itself, so the hottest existing path and its behavior
-    // on InsufficientBalance are completely unchanged.
-
-    /// Payer sets (or clears, with 0) the balance floor below which they
-    /// want to be notified. Payer-only, mirroring deposit()/withdraw_balance().
-    pub fn set_top_up_threshold(
-        env: Env,
-        payer: Address,
-        threshold: i128,
-    ) -> Result<(), ContractError> {
-        payer.require_auth();
-        if threshold < 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
-        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
-
-        Self::bump_instance(&env);
-        Ok(())
-    }
-
-    /// Returns the currently configured `(min, max)` quorum bounds, or the
-    /// unbounded defaults `(0, u32::MAX)` if `set_quorum_bounds()` has never
-    /// been called.
-    pub fn get_quorum_bounds(env: Env) -> (u32, u32) {
-        let min: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MinQuorum)
-            .unwrap_or(0);
-        let max: u32 = env
-            .storage()
-          
         Self::bump_instance(&env);
         Ok(())
     }
@@ -2513,6 +2632,123 @@ impl OracleEscrow {
             return Err(ContractError::QuorumTooLarge);
         }
         Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()) as u32)?;
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let amount = question.amount;
+        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        let share_per_worker = pool / n;
+        let dust = pool - share_per_worker * n;
+
+        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let mut total_slashed: i128 = 0;
+        for loser in losing_workers.iter() {
+            total_slashed += Self::preview_slash(&env, &loser, slash_cap);
+        }
+
+        Ok(ResolvePreview {
+            fee,
+            dust,
+            share_per_worker,
+            total_slashed,
+            platform_take: fee + dust + total_slashed,
+        })
+    }
+
+    /// Pure counterpart to `slash()`: computes the same amount that slash()
+    /// would take from `worker`'s slashable stake (capped the same way),
+    /// but never writes it back. Used only by `preview_resolve()`.
+    fn preview_slash(env: &Env, worker: &Address, cap: i128) -> i128 {
+        let key = DataKey::Stake(worker.clone());
+        if !env.storage().persistent().has(&key) {
+            return 0;
+        }
+        let info = Self::stake_info(env, worker);
+        let slashable = info.settled + info.warming + info.unbonding;
+        if slashable <= 0 {
+            return 0;
+        }
+        (slashable * SLASH_BPS / BPS_DENOM).min(cap).min(slashable).max(0)
+    }
+
+    // ---- Issue #86: permissionless batch-expiry sweep -----------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Caller supplies exact question_ids (no on-chain enumeration of
+    //    which Pending questions are past deadline), same as the existing
+    //    single-id refund_timeout() — explicitly out of scope per the issue.
+    //  - Best-effort/continue-past-failures, returning one Result per id in
+    //    the same order, rather than aborting the whole batch on the first
+    //    ineligible id.
+    //  - No explicit batch-size cap beyond the existing MAX_QUORUM_SIZE
+    //    precedent elsewhere in the contract; callers are expected to size
+    //    batches sensibly (each iteration is O(1), no O(n^2) work).
+    //
+    // The one non-additive change: refund_timeout()'s body was extracted
+    // into try_refund_timeout() below so both it and sweep_timeouts() share
+    // the identical per-question deadline-check + do_refund() logic.
+    // refund_timeout()'s own behavior, error cases and signature are
+    // unchanged.
+
+    /// The per-question logic refund_timeout() has always run: only
+    /// eligible once Pending and past its deadline, verbatim.
+    fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
+        let key = DataKey::Question(question_id);
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+        if env.ledger().sequence() < question.deadline {
+            return Err(ContractError::TimeoutNotReached);
+        }
+        Self::do_refund(&env, &key, &question)?;
+        Ok(())
+    }
+
+    // ---- #91: auto-top-up threshold ----------------------------------
+    //
+    // Scoped down from the issue's open questions: the contract cannot pull
+    // funds from a payer's wallet without their signature, and #89's
+    // delegation primitive this issue optionally depends on doesn't exist
+    // yet on this branch. So this implements just the "fixed
+    // DataKey::TopUpThreshold(Address) the payer sets themselves, checked
+    // ... without failing the charge" half of the design (open question 3 /
+    // the second acceptance criterion), as a threshold + event mechanism
+    // that a backend polls or calls right after charge() — it does NOT hook
+    // into charge() itself, so the hottest existing path and its behavior
+    // on InsufficientBalance are completely unchanged.
+
+    /// Payer sets (or clears, with 0) the balance floor below which they
+    /// want to be notified. Payer-only, mirroring deposit()/withdraw_balance().
+    pub fn set_top_up_threshold(
+        env: Env,
+        payer: Address,
+        threshold: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if threshold < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
+        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
+
+        Self::bump_instance(&env);
         Ok(())
     }
 
@@ -2737,91 +2973,6 @@ impl OracleEscrow {
         Ok(())
     }
 
-        env: Env,
-        question_id: u64,
-        workers: Vec<Address>,
-        losing_workers: Vec<Address>,
-    ) -> Result<ResolvePreview, ContractError> {
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
-            return Err(ContractError::QuorumTooLarge);
-        }
-        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
-        Self::validate_worker_lists(&workers, &losing_workers)?;
-
-        let question: Question = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        let amount = question.amount;
-        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
-        let pool = amount - fee;
-        let n = workers.len() as i128;
-        let share_per_worker = pool / n;
-        let dust = pool - share_per_worker * n;
-
-        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
-        let mut total_slashed: i128 = 0;
-        for loser in losing_workers.iter() {
-            total_slashed += Self::preview_slash(&env, &loser, slash_cap);
-        }
-
-        Ok(ResolvePreview {
-            fee,
-            dust,
-            share_per_worker,
-            total_slashed,
-            platform_take: fee + dust + total_slashed,
-        })
-    }
-
-    /// Pure counterpart to `slash()`: computes the same amount that slash()
-    /// would take from `worker`'s slashable stake (capped the same way),
-    /// but never writes it back. Used only by `preview_resolve()`.
-    fn preview_slash(env: &Env, worker: &Address, cap: i128) -> i128 {
-        let key = DataKey::Stake(worker.clone());
-        if !env.storage().persistent().has(&key) {
-            return 0;
-        }
-        let info = Self::stake_info(env, worker);
-        let slashable = info.settled + info.warming + info.unbonding;
-        if slashable <= 0 {
-            return 0;
-        }
-        (slashable * SLASH_BPS / BPS_DENOM).min(cap).min(slashable).max(0)
-    }
-
-    // ---- Issue #86: permissionless batch-expiry sweep -----------------
-    //
-    // Simplifications vs. the full issue:
-    //  - Caller supplies exact question_ids (no on-chain enumeration of
-    //    which Pending questions are past deadline), same as the existing
-    //    single-id refund_timeout() — explicitly out of scope per the issue.
-    //  - Best-effort/continue-past-failures, returning one Result per id in
-    //    the same order, rather than aborting the whole batch on the first
-    //    ineligible id.
-    //  - No explicit batch-size cap beyond the existing MAX_QUORUM_SIZE
-    //    precedent elsewhere in the contract; callers are expected to size
-    //    batches sensibly (each iteration is O(1), no O(n^2) work).
-    //
-    // The one non-additive change: refund_timeout()'s body was extracted
-    // into try_refund_timeout() below so both it and sweep_timeouts() share
-    // the identical per-question deadline-check + do_refund() logic.
-    // refund_timeout()'s own behavior, error cases and signature are
-    // unchanged.
-
-    /// The per-question logic refund_timeout() has always run: only
-    /// eligible once Pending and past its deadline, verbatim.
-    fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
-        let key = DataKey::Question(question_id);
-        let question: Question = env
             .storage()
             .persistent()
             .get(&key)
@@ -3112,3 +3263,11 @@ mod test_dry_run_resolve;
 mod test_batch_expiry_sweep;
 #[cfg(test)]
 mod test_leaderboard;
+#[cfg(test)]
+mod test_reopen_question;
+#[cfg(test)]
+mod test_question_templates;
+#[cfg(test)]
+mod test_delegated_auth;
+#[cfg(test)]
+mod test_payment_streaming;
