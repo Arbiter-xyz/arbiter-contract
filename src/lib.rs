@@ -2,8 +2,8 @@
 
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contracterror, contractevent, contractimpl, contracttype, token, vec, Address,
-    Bytes, BytesN, Env, IntoVal, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 /// 20% platform fee, integer basis points. Never floats.
@@ -199,6 +199,14 @@ pub enum DataKey {
     /// full WebAuthn/passkey ceremony — see the doc comment on
     /// register_passkey() for what this deliberately does not model.
     PasskeyPubkey(Address),
+    /// Ed25519 public key of the trusted KYC attestor, set by the admin via
+    /// set_kyc_attestor(). Absent means no attestor is configured and
+    /// attest_kyc() always fails — see docs/kyc-attestation.md for why this
+    /// contract never itself gates on the resulting attestation.
+    KycAttestorPubkey,
+    /// Ledger sequence until which `Address` is considered KYC-attested,
+    /// written by attest_kyc().
+    KycAttestation(Address),
 }
 
 #[contracterror]
@@ -230,6 +238,11 @@ pub enum ContractError {
     /// The secp256r1 signature did not verify against the worker's
     /// registered passkey public key.
     InvalidPasskeySignature = 21,
+    /// attest_kyc() called before set_kyc_attestor() configured a trusted
+    /// attestor public key.
+    KycAttestorNotSet = 22,
+    /// The expiry ledger passed to attest_kyc() is not in the future.
+    InvalidKycExpiry = 23,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -273,6 +286,16 @@ pub struct QuestionMigrated {
 pub struct PasskeyRegistered {
     #[topic]
     pub worker: Address,
+}
+
+/// Emitted by attest_kyc() when a subject's KYC attestation is recorded or
+/// refreshed.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KycAttested {
+    #[topic]
+    pub subject: Address,
+    pub expiry_ledger: u32,
 }
 
 #[contract]
@@ -1439,6 +1462,75 @@ impl OracleEscrow {
         env.crypto().secp256r1_verify(&pubkey, &digest, &signature);
         Ok(())
     }
+
+    /// Admin-only. Configures the ed25519 public key of the single trusted
+    /// off-chain KYC attestor whose signed claims attest_kyc() will accept
+    /// (issue #75). Replacing it does not retroactively invalidate
+    /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
+    pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::KycAttestorPubkey, &attestor_pubkey);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_kyc_attestor(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::KycAttestorPubkey)
+    }
+
+    /// Permissionless: anyone may submit a claim signed by the configured
+    /// KYC attestor recording that `subject` is attested until
+    /// `expiry_ledger`. The signed message is `subject`'s XDR encoding
+    /// followed by `expiry_ledger`'s XDR encoding, so a claim is bound to
+    /// exactly one subject and one expiry and can't be replayed for a
+    /// different pair. This ONLY records the attestation — no entry point
+    /// in this contract (submit()/deposit()/resolve()/...) reads or gates
+    /// on it; see docs/kyc-attestation.md for why that wiring is
+    /// deliberately deferred.
+    pub fn attest_kyc(
+        env: Env,
+        subject: Address,
+        expiry_ledger: u32,
+        signature: BytesN<64>,
+    ) -> Result<(), ContractError> {
+        let attestor_pubkey: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KycAttestorPubkey)
+            .ok_or(ContractError::KycAttestorNotSet)?;
+        if expiry_ledger <= env.ledger().sequence() {
+            return Err(ContractError::InvalidKycExpiry);
+        }
+
+        let mut message = subject.to_xdr(&env);
+        message.append(&expiry_ledger.to_xdr(&env));
+        env.crypto()
+            .ed25519_verify(&attestor_pubkey, &message, &signature);
+
+        Self::set_persistent(&env, &DataKey::KycAttestation(subject.clone()), &expiry_ledger);
+        Self::bump_instance(&env);
+        KycAttested {
+            subject,
+            expiry_ledger,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Whether `subject` currently holds an unexpired KYC attestation.
+    /// Informational only — see attest_kyc()'s doc comment.
+    pub fn is_kyc_verified(env: Env, subject: Address) -> bool {
+        let expiry: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::KycAttestation(subject));
+        match expiry {
+            Some(expiry) => env.ledger().sequence() < expiry,
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1447,6 +1539,8 @@ mod test;
 mod test_account_abstraction;
 #[cfg(test)]
 mod test_economics;
+#[cfg(test)]
+mod test_kyc;
 #[cfg(test)]
 mod test_passkey;
 #[cfg(test)]
