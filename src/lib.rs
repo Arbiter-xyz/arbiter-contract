@@ -109,6 +109,13 @@ pub enum Status {
     /// like Resolved/Refunded — the funds and the obligation now live in
     /// the target contract, under the same question_id.
     Migrated,
+    /// #97 dispute-window finality: set by resolve_challengeable() instead
+    /// of Resolved. Nothing has been credited or slashed yet — the actual
+    /// worker lists and payout are held in DataKey::PendingResolution until
+    /// finalize_resolve() (after the dispute window, if undisputed) moves
+    /// the question to Resolved. Distinct from Pending: refund()/
+    /// refund_timeout() no longer apply once a resolution is in flight.
+    ResolvedPending,
 }
 
 #[contracttype]
@@ -203,6 +210,10 @@ pub enum DataKey {
     /// docs-maintainer-notes/valreb001.md and the PR description for why
     /// this is scoped down from a real oracle integration.
     WorkerRegion(Address),
+    /// #97 dispute-window finality: the not-yet-credited resolution recorded
+    /// by resolve_challengeable(), keyed by question_id. Holds the worker
+    /// lists, the dispute deadline and whether it's been disputed.
+    PendingResolution(u64),
 }
 
 #[contracterror]
@@ -237,6 +248,16 @@ pub enum ContractError {
     /// #96: resolve_diverse()'s `workers` list didn't cover at least
     /// `min_distinct_regions` distinct attested regions.
     InsufficientDiversity = 22,
+    /// #97: dispute_resolve()/finalize_resolve() called on a question with
+    /// no in-flight PendingResolution (never went through
+    /// resolve_challengeable(), or already finalized).
+    NoPendingResolution = 23,
+    /// #97: finalize_resolve() called before its dispute window elapsed.
+    DisputeWindowNotElapsed = 24,
+    /// #97: finalize_resolve() called on a resolution a dispute_resolve()
+    /// call already flagged; an admin must resolve the dispute out of band
+    /// (see the Out of scope note on resolve_challengeable()).
+    QuestionDisputed = 25,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -307,6 +328,35 @@ pub struct WorkerRegionAttested {
     #[topic]
     pub worker: Address,
     pub region: Symbol,
+}
+
+/// #97: the not-yet-credited resolution recorded by resolve_challengeable(),
+/// awaiting either a dispute_resolve() flag or finalize_resolve() after the
+/// window elapses.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingResolution {
+    pub workers: Vec<Address>,
+    pub losing_workers: Vec<Address>,
+    pub dispute_deadline: u32,
+    pub disputed: bool,
+}
+
+/// Emitted when resolve_challengeable() opens a dispute window (#97).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionChallengeable {
+    #[topic]
+    pub question_id: u64,
+    pub dispute_deadline: u32,
+}
+
+/// Emitted when dispute_resolve() flags an in-flight resolution (#97).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionDisputed {
+    #[topic]
+    pub question_id: u64,
 }
 
 #[contract]
@@ -1600,6 +1650,149 @@ impl OracleEscrow {
         }
         Ok(())
     }
+
+    // ---- #97: public dispute-window finality -------------------------------
+    //
+    // Scoped-down implementation: a new, opt-in `Status::ResolvedPending`
+    // state-machine primitive. resolve_challengeable() records the worker
+    // lists without crediting or slashing anything, and starts a dispute
+    // window. Anyone may permissionlessly call dispute_resolve() within that
+    // window to block finalization (mirroring refund_timeout()'s
+    // permissionless philosophy) — what happens to a disputed resolution
+    // afterward (admin adjudication, reversal) is explicitly out of scope,
+    // same as the issue states; today a disputed resolution simply stays
+    // stuck in ResolvedPending pending a future admin-adjudication feature.
+    // finalize_resolve() is permissionless too and, once the window has
+    // elapsed with no dispute, credits/slashes exactly as resolve() does.
+    // The existing resolve() function and its immediate-settlement behavior
+    // are completely untouched; this is purely an additional path.
+
+    /// Admin-only. Starts a `dispute_window_ledgers`-long public challenge
+    /// window on `question_id` instead of crediting/slashing immediately.
+    /// Nothing is paid out until finalize_resolve() succeeds.
+    pub fn resolve_challengeable(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+        dispute_window_ledgers: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let key = DataKey::Question(question_id);
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let dispute_deadline = env.ledger().sequence().saturating_add(dispute_window_ledgers);
+        Self::set_persistent(
+            &env,
+            &DataKey::PendingResolution(question_id),
+            &PendingResolution {
+                workers,
+                losing_workers,
+                dispute_deadline,
+                disputed: false,
+            },
+        );
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::ResolvedPending);
+        ResolutionChallengeable {
+            question_id,
+            dispute_deadline,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Permissionless, like refund_timeout(). Flags an in-flight
+    /// (ResolvedPending) resolution as disputed, blocking finalize_resolve()
+    /// until an admin-adjudication process (out of scope here) resolves it.
+    pub fn dispute_resolve(env: Env, question_id: u64) -> Result<(), ContractError> {
+        let rkey = DataKey::PendingResolution(question_id);
+        let mut pending: PendingResolution = env
+            .storage()
+            .persistent()
+            .get(&rkey)
+            .ok_or(ContractError::NoPendingResolution)?;
+        if pending.disputed {
+            return Err(ContractError::QuestionDisputed);
+        }
+        // Deliberately allowed even after `dispute_deadline`: as long as
+        // finalize_resolve() hasn't already run (which would have removed
+        // this PendingResolution entry), a late dispute still meaningfully
+        // blocks finalization. Simplification: no separate "too late" error.
+        pending.disputed = true;
+        Self::set_persistent(&env, &rkey, &pending);
+        Self::bump_instance(&env);
+        ResolutionDisputed { question_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Permissionless. Once `question_id`'s dispute window has elapsed with
+    /// no dispute, performs exactly the crediting/slashing resolve() would
+    /// have performed immediately, and moves the question to Resolved.
+    pub fn finalize_resolve(env: Env, question_id: u64) -> Result<(), ContractError> {
+        let rkey = DataKey::PendingResolution(question_id);
+        let pending: PendingResolution = env
+            .storage()
+            .persistent()
+            .get(&rkey)
+            .ok_or(ContractError::NoPendingResolution)?;
+        if pending.disputed {
+            return Err(ContractError::QuestionDisputed);
+        }
+        if env.ledger().sequence() < pending.dispute_deadline {
+            return Err(ContractError::DisputeWindowNotElapsed);
+        }
+
+        let key = DataKey::Question(question_id);
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::ResolvedPending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let amount = question.amount;
+        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let pool = amount - fee;
+        let n = pending.workers.len() as i128;
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let mut platform_take = fee + dust;
+        for loser in pending.losing_workers.iter() {
+            platform_take += Self::slash(&env, &loser, slash_cap);
+        }
+        for worker in pending.workers.iter() {
+            Self::credit_owed(&env, &worker, share);
+        }
+        let _ = platform_take;
+
+        env.storage().persistent().remove(&rkey);
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        Ok(())
+    }
+
+    pub fn get_pending_resolution(env: Env, question_id: u64) -> Option<PendingResolution> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingResolution(question_id))
+    }
 }
 
 #[cfg(test)]
@@ -1614,3 +1807,5 @@ mod test_ttl;
 mod test_refund_underwriting;
 #[cfg(test)]
 mod test_worker_diversity;
+#[cfg(test)]
+mod test_dispute_finality;
