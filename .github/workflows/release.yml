@@ -2,45 +2,98 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      contract_id:
+        description: 'Deployed contract id to verify against (defaults to pinned testnet address)'
+        required: false
+        default: 'CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36'
+
+env:
+  # Pinned testnet deployment. Override via workflow_dispatch input or by
+  # setting the CONTRACT_ID repository variable for a future mainnet deploy.
+  DEFAULT_CONTRACT_ID: CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36
 
 jobs:
-  build-and-release:
+  build:
+    name: Build optimized WASM
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
+    outputs:
+      wasm_hash: ${{ steps.hash.outputs.wasm_hash }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
-      - uses: Swatinem/rust-cache@v2
-      - name: Install Stellar CLI
-        run: |
-          curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
-          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
-      - name: Build contract to WASM
-        run: stellar contract build
-      - name: Compute wasm hash
-        id: wasm
-        run: |
-          wasm_path=target/wasm32v1-none/release/oracle_escrow.wasm
-          hash=$(sha256sum "$wasm_path" | cut -d' ' -f1)
-          echo "path=$wasm_path" >> "$GITHUB_OUTPUT"
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-          echo "### Wasm hash (sha256)" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`$hash\`" >> "$GITHUB_STEP_SUMMARY"
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.wasm.outputs.path }}
-          body: |
-            **Wasm hash (sha256):** `${{ steps.wasm.outputs.hash }}`
+      - uses: actions/checkout@v4
 
-            This is the same hash Soroban uses to identify contract code
-            on-chain — compare it against a deployed instance's wasm hash
-            to confirm that instance matches this tag's source. See
-            [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)
-            for interface changes at this version.
-          generate_release_notes: true
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt
+
+      - name: Build contract WASM
+        run: stellar contract build
+
+      - name: Compute local WASM hash
+        id: hash
+        run: |
+          WASM=$(find target/wasm32-unknown-unknown/release -maxdepth 1 -name '*.wasm' ! -name '*_test.wasm' | head -n1)
+          if [ -z "$WASM" ]; then
+            echo "::error::No WASM artifact produced by 'stellar contract build'"
+            exit 1
+          fi
+          echo "Local artifact: $WASM"
+          HASH=$(sha256sum "$WASM" | awk '{print $1}')
+          echo "wasm_hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Local WASM sha256: $HASH"
+
+  verify-hash:
+    name: Verify deployed WASM hash
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt
+
+      - name: Resolve target contract id
+        id: target
+        run: |
+          CONTRACT_ID="${{ github.event.inputs.contract_id }}"
+          if [ -z "$CONTRACT_ID" ]; then
+            CONTRACT_ID="${{ vars.CONTRACT_ID }}"
+          fi
+          if [ -z "$CONTRACT_ID" ]; then
+            CONTRACT_ID="$DEFAULT_CONTRACT_ID"
+          fi
+          echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+          echo "Verifying against contract id: $CONTRACT_ID"
+
+      - name: Fetch deployed WASM from chain
+        id: onchain
+        run: |
+          CONTRACT_ID="${{ steps.target.outputs.contract_id }}"
+          mkdir -p onchain
+          stellar contract fetch \
+            --id "$CONTRACT_ID" \
+            --network testnet \
+            --out-file onchain/deployed.wasm
+          HASH=$(sha256sum onchain/deployed.wasm | awk '{print $1}')
+          echo "onchain_hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "On-chain WASM sha256: $HASH"
+
+      - name: Diff local vs on-chain WASM hash
+        run: |
+          LOCAL="${{ needs.build.outputs.wasm_hash }}"
+          ONCHAIN="${{ steps.onchain.outputs.onchain_hash }}"
+          echo "Local   : $LOCAL"
+          echo "On-chain: $ONCHAIN"
+          if [ "$LOCAL" != "$ONCHAIN" ]; then
+            echo "::error::WASM hash mismatch for contract ${{ steps.target.outputs.contract_id }} — deployed bytecode does not match this commit's build."
+            echo "This means the deployed contract was NOT built from the current source (or the build is not reproducible)."
+            exit 1
+          fi
+          echo "::notice::WASM hash verified: deployed contract matches this commit's build."

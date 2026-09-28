@@ -3,6 +3,36 @@
 A Soroban smart contract implementing an oracle-based escrow with dispute
 resolution, plus the JavaScript integrations that talk to it.
 
+## Guided deploy + initialize wizard
+
+`initialize()` is only guarded by `AlreadyInitialized`: it accepts whoever
+calls it first, requiring only that caller's own signature on whatever `admin`
+address they pass in. A freshly-deployed, not-yet-initialized contract is
+therefore racing the real deployer — anyone watching for a new `OracleEscrow`
+WASM upload could front-run the legitimate
+`initialize(admin, token, platform, timeout_ledgers)` call and become `admin`
+themselves.
+
+`scripts/deploy-init.sh` mitigates this at the tooling layer by making deploy
+and initialize effectively atomic from the operator's point of view:
+
+- It prompts for and validates all four `initialize()` arguments (`admin`,
+  `token`, `platform`, `timeout_ledgers`) **before** any transaction is
+  submitted, so nothing has to be looked up after the contract id is known.
+- It then runs `stellar contract deploy` and
+  `stellar contract invoke -- initialize` back-to-back in the same invocation,
+  with no manual pause in between, and prints the measured elapsed time
+  between the two submissions.
+
+```sh
+./scripts/deploy-init.sh
+```
+
+> **This is a mitigation, not a fix.** Tooling can only narrow the window
+> between two separate transactions, never close it to zero. The contract-level
+> fix for `initialize()` front-running is tracked separately; use that if you
+> need a stronger guarantee.
+
 ## Architecture
 
 Every current integration with the contract goes through the JavaScript
@@ -16,6 +46,58 @@ There is no equivalent for a Rust caller today. `soroban-sdk`'s
 `#[contractimpl]` macro already generates an `OracleEscrowClient` (the same
 type `test.rs`'s `client(f)` helper returns), which is most of what a
 standalone crate would need to publish.
+
+## Client bindings
+
+Integrators can talk to the contract from more than one language. The
+JavaScript reference (`backend/src/stellarClient.js`, `app/src/contractCalls.js`)
+remains the canonical example; a Python binding is also shipped under
+`bindings/python/`.
+
+### Python binding (`bindings/python/`)
+
+A thin, dependency-light wrapper over the contract's XDR spec. It covers all
+of the contract's entry points:
+
+- writes: `initialize`, `submit`, `deposit`, `withdraw_balance`, `charge`,
+  `resolve`, `stake`, `unstake`, `withdraw`, `withdraw_to`, `touch`,
+  `refund`, `refund_timeout`, `set_admin`, `set_timeout_ledgers`
+- reads: `get_question`, `get_balance`, `get_admin`, `get_timeout_ledgers`
+
+The contract's `Question`, `Status`, and `ContractError` types are mapped to
+native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
+so callers never touch raw XDR.
+
+```python
+from oracle_escrow import Client, Status
+
+client = Client(rpc_url, contract_id, network_passphrase)
+
+question_id = client.submit(asker, question, reward)
+client.resolve(oracle, question_id, answer)
+assert client.get_question(question_id).status == Status.RESOLVED
+```
+
+### Regenerating bindings
+
+The bindings are generated from the contract's embedded XDR spec, the same
+source `stellar contract bindings` reads. Whenever `src/lib.rs`'s public
+interface changes (a new entry point, a new `ContractError` variant, a changed
+`Question` field), regenerate them with:
+
+```sh
+stellar contract build
+stellar contract bindings typescript \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --output-dir bindings/typescript
+python bindings/python/generate.py \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --output bindings/python/oracle_escrow/_spec.py
+```
+
+The Python generator reads the same spec entries the CLI emits, so the two
+stay in lockstep. Run it as part of the release checklist whenever the public
+interface changes.
 
 ## Standalone Rust client crate
 
@@ -92,6 +174,37 @@ tradeoff: aggressive optimization can make a failed transaction's trap
 less readable, so debugging a revert may require a separate unoptimized
 build.
 
+## WASM hash verification
+
+CI proves the contract *compiles* to a valid, deployable WASM, but that alone
+doesn't prove a specific *deployed* contract id corresponds to a specific
+`lib.rs` commit. The `wasm-hash-verify` workflow closes that gap: it builds the
+WASM from the current commit with the same `stellar contract build` command CI
+already runs, fetches the deployed contract's actual on-chain WASM
+(`stellar contract fetch`), and diffs the two sha256 hashes. On a mismatch the
+check fails loudly in CI.
+
+This is only meaningful when the build is reproducible (bit-for-bit identical
+output from the same source) — otherwise a legitimate deployment can show a
+false mismatch purely from a different build environment. See the
+reproducible-build work tracked separately.
+
+The target contract id is parameterized. It defaults to the pinned testnet
+deployment (`CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36`) and can
+be overridden via the `CONTRACT_ID` repository variable or the
+`workflow_dispatch` inputs, so the same action is reusable for a future
+mainnet deployment:
+
+```sh
+gh workflow run wasm-hash-verify.yml \
+  -f contract_id=<contract-id> \
+  -f network=mainnet
+```
+
+There is no incident-alerting wiring in this repo, so the action does not
+assume a notification channel exists — a mismatch is surfaced as a failed CI
+check.
+
 ## Handsoff notes
 
 `submit()` and `deposit()` both require `payer.require_auth()` and a direct
@@ -132,115 +245,4 @@ build.
 - #79: On-chain aggregate stats view
 
 <!-- handsoff-issue-21 -->
-- #21: touch() rewrites unchanged Owed/Stake values before extending TTL, costing an avoidable write fee
-
-<!-- handsoff-issue-24 -->
-- #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
-
-<!-- handsoff-issue-46 -->
-- #46: Emergency pause switch
-
-<!-- handsoff-issue-47 -->
-- #47: Proxy/versioned upgrade path
-
-<!-- handsoff-issue-51 -->
-- #51: Time-locked large withdrawals
-
-<!-- handsoff-issue-52 -->
-- #52: Withdrawal destination allowlist
-
-<!-- handsoff-issue-62 -->
-- #62: Mutation testing pass
-
-<!-- handsoff-issue-63 -->
-- #63: Formal state-machine spec
-
-<!-- handsoff-issue-64 -->
-- #64: WASM binary size optimization
-
-<!-- handsoff-issue-102 -->
-- #102: Third-party stake sponsorship
-
-<!-- handsoff-issue-103 -->
-- #103: Cooperative staking pools
-
-### Chosen rail: Circle CCTP + a Stellar forwarder
-
-We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
-Stellar, rather than Axelar GMP.
-
-- CCTP is a *burn-and-mint* rail for native USDC: the payer burns USDC on
-their origin chain and CCTP mints the same amount of native USDC on Stellar.
-  The escrowed token stays native USDC, so `resolve()`/`refund()` keep
-  settling with the existing `token_client.transfer` — no change to the
-  settlement path.
-- CCTP already requires a forwarder contract for Stellar recipients, so the
-  "who calls `submit()`" question has a natural answer: the forwarder.
-- Axelar GMP is general message-passing with a different trust/latency model
-  (validator set, arbitrary payloads). It is more than this issue needs and
-  would tempt a redesign of `submit()`; CCTP keeps the change additive.
-
-### Fund trace: origin chain → `open_question()`
-
-1. **Origin chain.** The payer calls CCTP's `depositForBurn` on their origin
-   chain, burning USDC and emitting a message whose `mintRecipient` is the
-   **forwarder contract's Stellar address** (not the payer's own address).
-2. **Attestation.** Circle's attestation service signs the burn message.
-3. **Mint on Stellar.** Anyone (the payer, a relayer, or the forwarder's own
-   keeper) submits the attestation to CCTP's Stellar `MessageTransmitter`,
-   which mints native USDC to the forwarder contract.
-4. **Forwarder calls the escrow.** The forwarder contract now holds the
-   bridged USDC and calls `submit()` (or `deposit()`) on the escrow contract
-   on the payer's behalf, passing the payer's designated Stellar address as
-   `payer` and transferring the minted USDC into escrow.
-5. **`open_question()`.** `submit()` runs exactly as it does today —
-   `payer.require_auth()`, `token_client.transfer(payer, contract, reward)`,
-   then `open_question()` — with the forwarder acting as the authenticated
-   caller for the payer's designated address.
-
-This mirrors how `charge()` already lets the admin open a question funded by
-a payer's prior `deposit()` without a per-question payer signature: the
-forwarder is the thing that calls `submit()`/`charge()`, not the original
-payer directly.
-
-### Open question 1 — who is `Question.payer` of record?
-
-The bridged payer **must have their own Stellar address** to be the
-`Question.payer` of record. `do_refund()` today only ever calls
-`token_client.transfer` on Stellar, so the address that `refund()` and
-`refund_timeout()` pay back has to be a Stellar address the contract can
-authenticate and transfer to. The forwarder is a *conduit*, not the payer of
-record: it forwards the bridged USDC into escrow and records the payer's
-designated Stellar address as `payer`.
-
-### Refund path for a bridged payer (not just the happy path)
-
-- **On Stellar, unchanged.** `refund()` / `refund_timeout()` call
-  `do_refund()`, which transfers the escrowed native USDC back to
-  `Question.payer` — the bridged payer's designated Stellar address. The
-  refund settles natively on Stellar; it does **not** bridge back to the
-  origin chain.
-- **Bridging back is out of scope.** Making a refund bridge back to the
-  payer's origin chain is a much larger change: `do_refund()` would need to
-  call a bridge's burn/withdraw path instead of `token_client.transfer`, and
-  the contract would need to know the payer's origin chain and recipient
-  address. That is explicitly not part of this issue.
-- **Consequence to state plainly.** A bridged payer receives their refund as
-  native USDC on their designated Stellar address. If they want it back on
-  their origin chain, they bridge it out themselves — the escrow contract
-  never initiates an outbound bridge.
-
-### Open question 2 — CCTP vs Axelar GMP
-
-CCTP fits "pay from another chain" best here because it keeps the escrowed
-asset native USDC and the settlement path (`resolve()`/`refund()`) untouched,
-and its forwarder requirement gives a concrete answer to "what calls
-`submit()`." Axelar GMP's general message-passing is more flexible but brings
-a different trust/latency model and would invite a redesign of `submit()`
-rather than an additive forwarder.
-
-### Out of scope
-
-Making the escrowed token itself a bridged/multichain token — that is #72's
-distinct approach, not a prerequisite for this note.
-
+- #21: touch() rewrites u
