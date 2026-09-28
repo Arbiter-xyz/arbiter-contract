@@ -35,17 +35,13 @@ upgrade-test-v3 = []
 # Lifts MAX_QUORUM_SIZE so the resource sweep can measure past it.
 bench-uncapped-quorum = []
 
-# Public benchmark harness (issue #65). `cargo bench` runs the budget-tracking
-# harness in benches/resources.rs, which records per-entry-point instruction
-# counts and writes the diffable table in benches/results.md.
-[[bench]]
-name = "resources"
-harness = false
-
-# Size-oriented release profile (issue #64). `stellar contract build` compiles
-# with this profile and then runs wasm-opt, so the deployed bytecode is the
-# post-wasm-opt artifact. These settings are the size budget's first line of
-
+[workspace]
+# The standalone Rust client crate (issue #69) lives in client/ and is a
+# workspace member so `cargo build -p oracle-escrow-client` works from the
+# repo root. It is intentionally NOT a dependency of this contract crate:
+# it wraps the generated `OracleEscrowClient` and can be published on its
+# own release cycle.
+members = ["client"]
 
 # Public benchmark harness (issue #65). `cargo bench` runs the budget-tracking
 # harness in benches/resources.rs, which records per-entry-point instruction

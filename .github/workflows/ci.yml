@@ -4,18 +4,42 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
-  test-and-build:
+  app:
+    name: app (JS)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          targets: wasm32v1-none
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run lint --if-present
+      - run: npm test --if-present
+
+  contract:
+    name: contract (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contract
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit
+        run: cargo audit
       - name: cargo test
         run: cargo test
       - name: Doc-comment coverage lint
