@@ -4,20 +4,65 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      contract_id:
+        description: "Deployed contract id to verify against"
+        required: false
+        default: "CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36"
 
 jobs:
-  test-and-build:
+  app:
+    name: app (JS)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: app
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          targets: wasm32v1-none
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run lint --if-present
+      - run: npm test --if-present
+
+  contract:
+    name: contract (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contract
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit
+        run: cargo audit
       - name: cargo test
         run: cargo test
+      - name: Doc-comment coverage lint
+        # Enforces rustdoc's missing-docs lint on the crate so undocumented
+        # public items (e.g. get_balance, get_stake, get_owed) are caught in
+        # CI instead of relying on a reviewer to notice the gap.
+        run: RUSTFLAGS="-D missing_docs" cargo check --lib
+      - name: Slashing model claims
+        # Asserts every number docs/economics/slashing-threat-model.md cites
+        # from the closed-form model, and that the committed tables are
+        # current.
+        run: |
+          python3 sim/slashing_model.py --check
+          python3 sim/slashing_model.py > /tmp/tables.md
+          diff <(tail -n +8 docs/economics/model-tables.md) /tmp/tables.md
+      - name: Migration tool syntax
+        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs
       - name: Install Stellar CLI
         # Prebuilt .deb instead of cargo install: building from source pulls
         # in hardware-wallet support (dbus, then libudev/hidapi) and takes
@@ -25,5 +70,79 @@ jobs:
         run: |
           curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
-      - name: Build contract to WASM
-        run: stellar contract build
+      - name: Build contract and test fixtures to WASM
+        run: scripts/build-wasm.sh
+      - name: WASM size budget
+        # Records the optimized contract bytecode size and fails if it
+        # regresses past the 15.5KB baseline cited in the README. The size
+        # is measured from the same `stellar contract build` output that
+        # scripts/build-wasm.sh produces, so it is reproducible locally.
+        run: |
+          WASM=target/wasm32v1-none/release/escrow_contract.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::error::expected WASM artifact not found at $WASM"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$WASM")
+          echo "Optimized WASM size: ${SIZE} bytes ($(awk "BEGIN { printf \"%.1f\", $SIZE/1024 }" ) KB)"
+          echo "### WASM size: ${SIZE} bytes" >> "$GITHUB_STEP_SUMMARY"
+          BASELINE=15872 # 15.5KB
+          if [ "$SIZE" -gt "$BASELINE" ]; then
+            echo "::error::WASM size ${SIZE} bytes exceeds the ${BASELINE}-byte (15.5KB) baseline"
+            exit 1
+          fi
+      - name: WASM-hash verification against deployed contract
+        # Ties the deployed contract id pinned in the README to the lib.rs
+        # commit under test: builds the WASM (same `stellar contract build`
+        # output as above), fetches the deployed contract's on-chain WASM
+        # hash, and fails loudly on any mismatch. This is only meaningful
+        # because the build is reproducible (#115); a mismatch means either
+        # the deployed bytecode drifted from this commit or the build is no
+        # longer deterministic. There is no incident-alerting wiring in this
+        # repo, so the failure path is a hard CI failure (non-zero exit).
+        env:
+          CONTRACT_ID: ${{ github.event.inputs.contract_id || 'CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36' }}
+          NETWORK: testnet
+        run: |
+          set -euo pipefail
+          WASM=target/wasm32v1-none/release/escrow_contract.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::error::expected WASM artifact not found at $WASM"
+            exit 1
+          fi
+          LOCAL_HASH=$(sha256sum "$WASM" | awk '{print $1}')
+          echo "Local WASM sha256:  $LOCAL_HASH"
+          # Fetch the deployed contract's bytecode and hash it locally so the
+          # comparison is a plain sha256 of the same artifact shape.
+          stellar contract fetch \
+            --id "$CONTRACT_ID" \
+            --network "$NETWORK" \
+            --out-file /tmp/deployed.wasm
+          DEPLOYED_HASH=$(sha256sum /tmp/deployed.wasm | awk '{print $1}')
+          echo "Deployed WASM sha256: $DEPLOYED_HASH"
+          echo "### WASM-hash verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "- contract id: \`$CONTRACT_ID\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- local:    \`$LOCAL_HASH\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- deployed: \`$DEPLOYED_HASH\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$LOCAL_HASH" != "$DEPLOYED_HASH" ]; then
+            echo "::error::WASM hash mismatch for $CONTRACT_ID: local $LOCAL_HASH != deployed $DEPLOYED_HASH"
+            exit 1
+          fi
+          echo "WASM hash matches deployed contract $CONTRACT_ID"
+      - name: WASM tests (mainnet resource-limit gate, upgrade worked example)
+        # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
+        # hand, not a gate. See docs/RESOURCE_LIMITS.md.
+        run: cargo test -- --ignored --skip bench_ --nocapture
+      - name: Gas-cost regression gate
+        # Runs the #65 benchmark harness and compares each measured function's
+        # instruction count against the committed baseline in
+        # bench/baseline.json. Fails if any function grows past the configured
+        # threshold. To accept a deliberate, justified cost increase, regenerate
+        # the baseline with `cargo run --release --bin bench -- --emit-baseline`
+        # and commit the diff (see docs/RESOURCE_LIMITS.md).
+        run: |
+          cargo run --release --bin bench -- --check-baseline bench/baseline.json
+      - name: Deep property-based fuzz run
+        run: cargo test escrow_invariant_holds_for_every_call_sequence
+        env:
+          PROPTEST_CASES: "1000"
