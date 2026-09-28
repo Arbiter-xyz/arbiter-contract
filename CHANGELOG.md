@@ -20,7 +20,26 @@ actually matches this tag's source, rather than trusting the tag name alone.
 
 ## [Unreleased]
 
-No interface changes yet.
+No unreleased interface changes.
+
+## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
+
+- **Breaking behavior change**: `set_admin(new_admin)` schedules an
+  observable, cancellable eight-day rotation. Execution requires both the
+  incumbent and successor authorization.
+- Added allowlisted SEP-41 asset operations for submissions, prepaid
+  balances, worker earnings, and staking. Every pending question is bound
+  to one asset; the list is capped at 32 and amounts remain in that token's
+  native decimal units.
+- Added per-asset balance/stake/owed getters, `get_question_token`, and
+  `get_asset_decimals`. Existing storage keys and legacy questions retain
+  their original default-token interpretation.
+- Resolution now transfers platform fees and slashes in the question's
+  asset and uses overflow-safe basis-point arithmetic.
+- Added `ArithmeticOverflow`, `AssetLimitReached`, `AssetNotAllowed`,
+  `CannotDisableDefaultAsset`, and admin-rotation errors.
+- Added [multi-asset/admin design](docs/MULTI_ASSET_AND_ADMIN_ROTATION.md)
+  and [observability analysis](docs/SETTLEMENT_OBSERVABILITY.md).
 
 ## [0.3.0] — partial/routed withdrawals, permissionless touch()
 
@@ -58,7 +77,8 @@ point:
 
 Errors 1–12 (`AlreadyInitialized` through `InvalidWorkerLists`).
 
-[Unreleased]: https://github.com/nayt9/arbiter-contract/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/nayt9/arbiter-contract/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nayt9/arbiter-contract/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nayt9/arbiter-contract/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nayt9/arbiter-contract/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nayt9/arbiter-contract/releases/tag/v0.1.0
