@@ -194,6 +194,9 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// #95 refund-risk underwriting: admin-approved address allowed to call
+    /// instant_refund(). Value is a bool flag (true = currently approved).
+    Underwriter(Address),
 }
 
 #[contracterror]
@@ -219,6 +222,9 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    /// #95: instant_refund() called by an address the admin hasn't
+    /// approved via approve_underwriter().
+    NotUnderwriter = 20,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -253,6 +259,33 @@ pub struct QuestionMigrated {
     pub question_id: u64,
     pub target: Address,
     pub amount: i128,
+}
+
+/// #95: fee (basis points, deducted from the refunded amount) paid to a
+/// registered underwriter for fronting an instant refund before a question's
+/// permissionless refund_timeout() deadline. See docs-maintainer-notes for
+/// why this is scoped as "an earlier, fee-bearing refund path" rather than
+/// a separately-funded insurance pool (the issue itself flags the latter as
+/// an unresolved design question, out of scope here).
+const UNDERWRITER_FEE_BPS: i128 = 500;
+
+/// Emitted when the admin approves or revokes an underwriter (#95).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnderwriterStatusChanged {
+    #[topic]
+    pub underwriter: Address,
+    pub approved: bool,
+}
+
+/// Emitted when a registered underwriter fronts an instant refund (#95).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstantRefundFronted {
+    #[topic]
+    pub question_id: u64,
+    pub underwriter: Address,
+    pub fee: i128,
 }
 
 #[contract]
@@ -1350,6 +1383,97 @@ impl OracleEscrow {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
+
+    // ---- #95: third-party refund-risk underwriting ------------------------
+    //
+    // Scoped-down implementation: rather than a separately-funded insurance
+    // pool (the issue flags where that pool's revenue would even come from
+    // as an open question), a registered underwriter can trigger an early,
+    // fee-bearing refund on a still-Pending question, before the
+    // permissionless refund_timeout() deadline would otherwise unlock it.
+    // The fee comes out of the already-escrowed `amount` itself (the payer
+    // gets slightly less, in exchange for not having to wait), and is
+    // credited to the underwriter's existing Owed balance via withdraw().
+    // Out of scope: real risk pricing, a separate collateral pool, and any
+    // reimbursement mechanism beyond the fee (the issue's own "out of
+    // scope" section).
+
+    /// Admin-only. Approves `underwriter` to call instant_refund().
+    pub fn approve_underwriter(env: Env, underwriter: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Underwriter(underwriter.clone()), &true);
+        Self::extend_persistent(&env, &DataKey::Underwriter(underwriter.clone()));
+        Self::bump_instance(&env);
+        UnderwriterStatusChanged {
+            underwriter,
+            approved: true,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only. Revokes a previously-approved underwriter.
+    pub fn revoke_underwriter(env: Env, underwriter: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Underwriter(underwriter.clone()));
+        Self::bump_instance(&env);
+        UnderwriterStatusChanged {
+            underwriter,
+            approved: false,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn is_underwriter(env: Env, underwriter: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Underwriter(underwriter))
+            .unwrap_or(false)
+    }
+
+    /// Registered-underwriter-only. Refunds a still-Pending question
+    /// immediately (no need to wait for refund_timeout()'s deadline),
+    /// deducting UNDERWRITER_FEE_BPS of the amount as the underwriter's fee
+    /// and crediting it to the underwriter's Owed balance (withdrawable via
+    /// withdraw()). Cannot run on an already-settled question, same as
+    /// refund()/refund_timeout().
+    pub fn instant_refund(env: Env, underwriter: Address, question_id: u64) -> Result<(), ContractError> {
+        underwriter.require_auth();
+        if !Self::is_underwriter(env.clone(), underwriter.clone()) {
+            return Err(ContractError::NotUnderwriter);
+        }
+
+        let key = DataKey::Question(question_id);
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let fee = question.amount * UNDERWRITER_FEE_BPS / BPS_DENOM;
+        let payer_amount = question.amount - fee;
+
+        let token_client = token::Client::new(&env, &Self::token(&env)?);
+        token_client.transfer(&env.current_contract_address(), &question.payer, &payer_amount);
+        Self::credit_owed(&env, &underwriter, fee);
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Refunded);
+        InstantRefundFronted {
+            question_id,
+            underwriter,
+            fee,
+        }
+        .publish(&env);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1360,3 +1484,5 @@ mod test_economics;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
+#[cfg(test)]
+mod test_refund_underwriting;
