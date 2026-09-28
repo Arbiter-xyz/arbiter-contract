@@ -210,6 +210,30 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// #91: payer-set floor on their own Balance(Address). Checked only by
+    /// the new permissionless check_top_up_threshold() — see that fn's docs
+    /// for why charge() itself is left untouched.
+    TopUpThreshold(Address),
+    /// #92: amount of a worker's Owed(Address) currently pledged as
+    /// collateral and therefore excluded from what do_withdraw() will pay
+    /// out. Set only via lock_owed()/release_owed(), gated to whichever
+    /// single address set_lending_authority() has registered.
+    OwedLock(Address),
+    /// #92: the one address (e.g. a lending protocol contract) authorized to
+    /// call lock_owed()/release_owed(). Admin-registered, mirroring the
+    /// MigrationSource single-authority pattern above.
+    LendingAuthority,
+    /// #93: non-transferable proof-of-verified-claim record for a resolved
+    /// question, keyed by question_id. Minted opt-in via mint_claim() — see
+    /// that fn's docs for why resolve() itself doesn't mint automatically.
+    Claim(u64),
+    /// #94: a worker's on-chain win/loss tally. Updated opt-in via
+    /// record_reputation() — see that fn's docs for why resolve() itself
+    /// isn't touched.
+    Reputation(Address),
+    /// #94: guards record_reputation() against being called twice for the
+    /// same question_id, which would double-count that resolution.
+    ReputationRecorded(u64),
     /// #95 refund-risk underwriting: admin-approved address allowed to call
     /// instant_refund(). Value is a bool flag (true = currently approved).
     Underwriter(Address),
@@ -278,6 +302,29 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    // Numeric codes 20-99 are intentionally skipped: this repo has other
+    // open PRs (upstream #142, #143) adding their own ContractError variants
+    // in that range against the same upstream main. Starting at 100 keeps
+    // these new variants collision-free regardless of merge order.
+    /// #92: lock_owed() was asked to lock more than the worker's current
+    /// Owed(Address) minus what is already locked.
+    LockExceedsOwed = 101,
+    /// #92: release_owed() was asked to release more than is currently
+    /// locked for that worker.
+    NoLockToRelease = 102,
+    /// #92: lock_owed()/release_owed() called by an address other than the
+    /// one registered via set_lending_authority().
+    NotLendingAuthority = 107,
+    /// #92: lock_owed()/release_owed() called before any
+    /// set_lending_authority() call has ever succeeded.
+    LendingAuthorityNotSet = 108,
+    /// #93: mint_claim() called on a question that hasn't reached
+    /// Status::Resolved yet.
+    QuestionNotResolved = 103,
+    /// #93: mint_claim() called twice for the same question_id.
+    ClaimAlreadyExists = 104,
+    /// #94: record_reputation() called twice for the same question_id.
+    ReputationAlreadyRecorded = 106,
     /// #95: instant_refund() called by an address the admin hasn't
     /// approved via approve_underwriter().
     NotUnderwriter = 20,
@@ -358,6 +405,78 @@ pub struct QuestionMigrated {
     pub target: Address,
     pub token: Address,
     pub amount: i128,
+}
+
+/// #91: emitted by check_top_up_threshold() whenever a payer's Balance is
+/// found at or below their own configured TopUpThreshold. Purely
+/// informational — it never blocks or reverses anything; a backend watching
+/// for it is the on-chain threshold mechanism this issue asked for, short of
+/// a full delegated-pull design (see check_top_up_threshold()'s doc comment
+/// for the scoping rationale).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopUpNeeded {
+    #[topic]
+    pub payer: Address,
+    pub balance: i128,
+    pub threshold: i128,
+}
+
+/// #92: emitted by lock_owed().
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedLocked {
+    #[topic]
+    pub worker: Address,
+    pub amount: i128,
+    pub total_locked: i128,
+}
+
+/// #92: emitted by release_owed().
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedReleased {
+    #[topic]
+    pub worker: Address,
+    pub amount: i128,
+    pub total_locked: i128,
+}
+
+/// #93: a non-transferable proof that `question_id` was adjudicated. There
+/// is deliberately no transfer/approve function anywhere in this contract
+/// for this record, which is what makes it non-transferable — see
+/// mint_claim()'s doc comment for the rest of this issue's scoping.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimRecord {
+    pub question_id: u64,
+    pub payer: Address,
+    /// Ledger sequence resolve() actually settled the question at, NOT
+    /// necessarily when mint_claim() was called — see mint_claim()'s docs
+    /// for why these currently coincide in this scoped-down version.
+    pub resolved_at: u32,
+    pub minted_at: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimMinted {
+    #[topic]
+    pub question_id: u64,
+    pub payer: Address,
+    pub minted_at: u32,
+}
+
+/// #94: a worker's cumulative on-chain win/loss tally. "Soulbound" here
+/// means: no function in this contract ever moves one address's Reputation
+/// entry to another address, and there is no owner-settable transfer path —
+/// the record is bound to the Address key it lives under for the life of
+/// the contract. See record_reputation()'s doc comment for scoping.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReputationInfo {
+    pub matched: u32,
+    pub lost: u32,
 }
 
 /// #95: fee (basis points, deducted from the refunded amount) paid to a
@@ -472,6 +591,44 @@ pub struct StakeSnapshotted {
     pub worker: Address,
     pub ledger: u32,
     pub stake: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReputationUpdated {
+    #[topic]
+    pub worker: Address,
+    pub matched: u32,
+    pub lost: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetPermissionChanged {
+    #[topic]
+    pub token: Address,
+    pub allowed: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRotationProposed {
+    #[topic]
+    pub new_admin: Address,
+    pub executable_at: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Partial
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReputationUpdated {
+    #[topic]
+    pub worker: Address,
+    pub matched: u32,
+    pub lost: u32,
 }
 
 #[contractevent]
@@ -1281,7 +1438,16 @@ impl OracleEscrow {
         if owed <= 0 {
             return Err(ContractError::NothingOwed);
         }
-        if amount > owed {
+        // #92, the one non-additive change this PR makes: caps what's
+        // withdrawable at owed minus whatever lock_owed() has pledged as
+        // collateral. Locked amount defaults to 0, so this is a no-op for
+        // every worker who never has anything locked.
+        let locked: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwedLock(worker.clone()))
+            .unwrap_or(0);
+        if amount > owed - locked {
             return Err(ContractError::InsufficientOwed);
         }
 
@@ -2155,6 +2321,100 @@ impl OracleEscrow {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
+    // ---- #91: auto-top-up threshold ----------------------------------
+    //
+    // Scoped down from the issue's open questions: the contract cannot pull
+    // funds from a payer's wallet without their signature, and #89's
+    // delegation primitive this issue optionally depends on doesn't exist
+    // yet on this branch. So this implements just the "fixed
+    // DataKey::TopUpThreshold(Address) the payer sets themselves, checked
+    // ... without failing the charge" half of the design (open question 3 /
+    // the second acceptance criterion), as a threshold + event mechanism
+    // that a backend polls or calls right after charge() — it does NOT hook
+    // into charge() itself, so the hottest existing path and its behavior
+    // on InsufficientBalance are completely unchanged.
+
+    /// Payer sets (or clears, with 0) the balance floor below which they
+    /// want to be notified. Payer-only, mirroring deposit()/withdraw_balance().
+    pub fn set_top_up_threshold(
+        env: Env,
+        payer: Address,
+        threshold: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if threshold < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
+        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_top_up_threshold(env: Env, payer: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TopUpThreshold(payer))
+            .unwrap_or(0)
+    }
+
+    /// Permissionless (like touch()): compares `payer`'s current Balance
+    /// against their own configured threshold and, if the balance is at or
+    /// below it, emits TopUpNeeded without touching either value or failing
+    /// in any way. A payer with no threshold set (or a threshold of 0) is a
+    /// harmless no-op. Returns whether the event was emitted, so an
+    /// off-chain caller can act on the return value instead of re-reading
+    /// events.
+    pub fn check_top_up_threshold(env: Env, payer: Address) -> bool {
+        let threshold: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TopUpThreshold(payer.clone()))
+            .unwrap_or(0);
+        if threshold <= 0 {
+            return false;
+        }
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Balance(payer.clone()))
+            .unwrap_or(0);
+        if balance > threshold {
+            return false;
+        }
+        TopUpNeeded {
+            payer,
+            balance,
+            threshold,
+        }
+        .publish(&env);
+        true
+    }
+
+    // ---- #92: owed balance as collateral -----------------------------
+    //
+    // Scoped down per the issue's out-of-scope note: no liquidation logic,
+    // no price oracle — purely the lock/lien primitive. The lock is a FIXED
+    // amount (not a percentage), so if resolve() credits more Owed after a
+    // lock is placed, the lock does not float — it stays exactly what
+    // lock_owed() set it to (open question 3). Authorization is a single
+    // admin-registered address (open question 2), the same shape as
+    // set_migration_source()/MigrationSource above.
+
+    /// Admin-only. Registers the one address allowed to call
+    /// lock_owed()/release_owed() — e.g. a separate lending-protocol
+    /// contract. Overwrites any previous registration.
+    pub fn set_lending_authority(env: Env, authority: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::LendingAuthority, &authority);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
     /// Binds `pubkey` (a SEC-1-encoded secp256r1 public key, 65 bytes) to
     /// `worker`'s Address for use with verify_passkey_auth() (issue #74).
     /// The worker still signs this call with their existing Address
@@ -2280,6 +2540,95 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// Admin-only. Sets the pubkey that attest_kyc() will accept
+    /// (issue #75). Replacing it does not retroactively invalidate
+    /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
+    pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::KycAttestorPubkey, &attestor_pubkey);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Returns None for a question with no minted claim yet (unresolved or
+    /// simply not minted), matching this issue's third acceptance criterion.
+    pub fn get_claim(env: Env, question_id: u64) -> Option<ClaimRecord> {
+        env.storage().persistent().get(&DataKey::Claim(question_id))
+    }
+
+    // ---- #94: soulbound reputation counters --------------------------
+    //
+    // Scoped down per the issue's own open questions: no burn-and-reissue
+    // token mint on every resolve() (question 1's cost concern) — this
+    // keeps a plain per-worker counter struct instead, updated by an
+    // opt-in call rather than inside resolve()'s hot path, so resolve()'s
+    // body and cost are unchanged. "Soulbound" here (question 3) means
+    // there is no function anywhere in this contract that moves a
+    // Reputation entry between addresses.
+
+    /// Admin-only, opt-in companion to resolve(): records the same
+    /// workers/losing_workers outcome for `question_id` into each worker's
+    /// running Reputation tally. Guarded against being called twice for the
+    /// same question_id so a resolved question's counters can't be
+    /// double-counted. Intentionally does not duplicate resolve()'s
+    /// validation (list overlap, size cap) — this trusts the same admin
+    /// that already authorized resolve() and is meant to be called
+    /// immediately alongside it.
+    pub fn record_reputation(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let recorded_key = DataKey::ReputationRecorded(question_id);
+        if env.storage().persistent().has(&recorded_key) {
+            return Err(ContractError::ReputationAlreadyRecorded);
+        }
+        Self::set_persistent(&env, &recorded_key, &true);
+
+        for worker in workers.iter() {
+            let key = DataKey::Reputation(worker.clone());
+            let mut info: ReputationInfo = env.storage().persistent().get(&key).unwrap_or_default();
+            info.matched += 1;
+            Self::set_persistent(&env, &key, &info);
+            ReputationUpdated {
+                worker,
+                matched: info.matched,
+                lost: info.lost,
+            }
+            .publish(&env);
+        }
+        for loser in losing_workers.iter() {
+            let key = DataKey::Reputation(loser.clone());
+            let mut info: ReputationInfo = env.storage().persistent().get(&key).unwrap_or_default();
+            info.lost += 1;
+            Self::set_persistent(&env, &key, &info);
+            ReputationUpdated {
+                worker: loser,
+                matched: info.matched,
+                lost: info.lost,
+            }
+            .publish(&env);
+        }
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_reputation(env: Env, worker: Address) -> ReputationInfo {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Reputation(worker))
+            .unwrap_or_default()
+    }
+
     /// Simple insertion sort (O(n^2), fine for resolve()-sized quorums; see
     /// MAX_QUORUM_SIZE) into a scratch Vec<i128>, then picks the middle
     /// element(s). No `std::sort`/new dependency needed.
@@ -2363,6 +2712,7 @@ impl OracleEscrow {
             .get(&DataKey::StakeSnapshot(worker, ledger))
             .ok_or(ContractError::StakeSnapshotNotFound)
     }
+    }
 }
 
 #[cfg(test)]
@@ -2381,6 +2731,14 @@ mod test_snapshot;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
+#[cfg(test)]
+mod test_auto_topup;
+#[cfg(test)]
+mod test_owed_collateral;
+#[cfg(test)]
+mod test_claim_nft;
+#[cfg(test)]
+mod test_soulbound_reputation;
 #[cfg(test)]
 mod test_refund_underwriting;
 #[cfg(test)]
