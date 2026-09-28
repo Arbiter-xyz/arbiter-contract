@@ -18,6 +18,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test
+      - name: Doc-comment coverage lint
+        # Enforces rustdoc's missing-docs lint on the crate so undocumented
+        # public items (e.g. get_balance, get_stake, get_owed) are caught in
+        # CI instead of relying on a reviewer to notice the gap.
+        run: RUSTFLAGS="-D missing_docs" cargo check --lib
       - name: Slashing model claims
         # Asserts every number docs/economics/slashing-threat-model.md cites
         # from the closed-form model, and that the committed tables are
