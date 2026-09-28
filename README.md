@@ -17,6 +17,58 @@ There is no equivalent for a Rust caller today. `soroban-sdk`'s
 type `test.rs`'s `client(f)` helper returns), which is most of what a
 standalone crate would need to publish.
 
+## Client bindings
+
+Integrators can talk to the contract from more than one language. The
+JavaScript reference (`backend/src/stellarClient.js`, `app/src/contractCalls.js`)
+remains the canonical example; a Python binding is also shipped under
+`bindings/python/`.
+
+### Python binding (`bindings/python/`)
+
+A thin, dependency-light wrapper over the contract's XDR spec. It covers all
+of the contract's entry points:
+
+- writes: `initialize`, `submit`, `deposit`, `withdraw_balance`, `charge`,
+  `resolve`, `stake`, `unstake`, `withdraw`, `withdraw_to`, `touch`,
+  `refund`, `refund_timeout`, `set_admin`, `set_timeout_ledgers`
+- reads: `get_question`, `get_balance`, `get_admin`, `get_timeout_ledgers`
+
+The contract's `Question`, `Status`, and `ContractError` types are mapped to
+native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
+so callers never touch raw XDR.
+
+```python
+from oracle_escrow import Client, Status
+
+client = Client(rpc_url, contract_id, network_passphrase)
+
+question_id = client.submit(asker, question, reward)
+client.resolve(oracle, question_id, answer)
+assert client.get_question(question_id).status == Status.RESOLVED
+```
+
+### Regenerating bindings
+
+The bindings are generated from the contract's embedded XDR spec, the same
+source `stellar contract bindings` reads. Whenever `src/lib.rs`'s public
+interface changes (a new entry point, a new `ContractError` variant, a changed
+`Question` field), regenerate them with:
+
+```sh
+stellar contract build
+stellar contract bindings typescript \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --output-dir bindings/typescript
+python bindings/python/generate.py \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --output bindings/python/oracle_escrow/_spec.py
+```
+
+The Python generator reads the same spec entries the CLI emits, so the two
+stay in lockstep. Run it as part of the release checklist whenever the public
+interface changes.
+
 ## Standalone Rust client crate
 
 A thin crate wrapping the generated `OracleEscrowClient` with a stable public
@@ -170,7 +222,7 @@ We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
 Stellar, rather than Axelar GMP.
 
 - CCTP is a *burn-and-mint* rail for native USDC: the payer burns USDC on
-their origin chain and CCTP mints the same amount of native USDC on Stellar.
+  their origin chain and CCTP mints the same amount of native USDC on Stellar.
   The escrowed token stays native USDC, so `resolve()`/`refund()` keep
   settling with the existing `token_client.transfer` — no change to the
   settlement path.
@@ -208,39 +260,6 @@ payer directly.
 The bridged payer **must have their own Stellar address** to be the
 `Question.payer` of record. `do_refund()` today only ever calls
 `token_client.transfer` on Stellar, so the address that `refund()` and
-`refund_timeout()` pay back has to be a Stellar address the contract can
-authenticate and transfer to. The forwarder is a *conduit*, not the payer of
-record: it forwards the bridged USDC into escrow and records the payer's
-designated Stellar address as `payer`.
+`refund_timeout()` pay back has to be a Stellar address the contrac
 
-### Refund path for a bridged payer (not just the happy path)
-
-- **On Stellar, unchanged.** `refund()` / `refund_timeout()` call
-  `do_refund()`, which transfers the escrowed native USDC back to
-  `Question.payer` — the bridged payer's designated Stellar address. The
-  refund settles natively on Stellar; it does **not** bridge back to the
-  origin chain.
-- **Bridging back is out of scope.** Making a refund bridge back to the
-  payer's origin chain is a much larger change: `do_refund()` would need to
-  call a bridge's burn/withdraw path instead of `token_client.transfer`, and
-  the contract would need to know the payer's origin chain and recipient
-  address. That is explicitly not part of this issue.
-- **Consequence to state plainly.** A bridged payer receives their refund as
-  native USDC on their designated Stellar address. If they want it back on
-  their origin chain, they bridge it out themselves — the escrow contract
-  never initiates an outbound bridge.
-
-### Open question 2 — CCTP vs Axelar GMP
-
-CCTP fits "pay from another chain" best here because it keeps the escrowed
-asset native USDC and the settlement path (`resolve()`/`refund()`) untouched,
-and its forwarder requirement gives a concrete answer to "what calls
-`submit()`." Axelar GMP's general message-passing is more flexible but brings
-a different trust/latency model and would invite a redesign of `submit()`
-rather than an additive forwarder.
-
-### Out of scope
-
-Making the escrowed token itself a bridged/multichain token — that is #72's
-distinct approach, not a prerequisite for this note.
-
+/* … truncated 1770 chars — edit only what you need near the top … */
