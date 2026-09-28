@@ -207,6 +207,11 @@ pub enum DataKey {
     /// Ledger sequence until which `Address` is considered KYC-attested,
     /// written by attest_kyc().
     KycAttestation(Address),
+    /// A worker's stake (as get_stake() would have reported it at the time)
+    /// captured at a specific ledger sequence by snapshot_stake(). See
+    /// docs/stake-snapshot.md for why this is an explicit, caller-paid
+    /// checkpoint rather than continuous on-chain history.
+    StakeSnapshot(Address, u32),
 }
 
 #[contracterror]
@@ -243,6 +248,9 @@ pub enum ContractError {
     KycAttestorNotSet = 22,
     /// The expiry ledger passed to attest_kyc() is not in the future.
     InvalidKycExpiry = 23,
+    /// get_historical_stake() found no snapshot for that worker at that
+    /// exact ledger.
+    StakeSnapshotNotFound = 24,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -296,6 +304,17 @@ pub struct KycAttested {
     #[topic]
     pub subject: Address,
     pub expiry_ledger: u32,
+}
+
+/// Emitted by snapshot_stake() when a worker's stake is checkpointed at a
+/// ledger.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StakeSnapshotted {
+    #[topic]
+    pub worker: Address,
+    pub ledger: u32,
+    pub stake: i128,
 }
 
 #[contract]
@@ -1531,6 +1550,46 @@ impl OracleEscrow {
             None => false,
         }
     }
+
+    /// Permissionless: checkpoints `worker`'s CURRENT active stake
+    /// (`get_stake()` — settled + warming) under the CURRENT ledger
+    /// sequence, so it can later be read back via get_historical_stake()
+    /// even after Stake(worker) itself has moved on (issue #82). Like
+    /// touch(), anyone may call this — typically an off-chain indexer or
+    /// the backend on a periodic sweep — and the caller pays the storage
+    /// cost of the checkpoint, same TTL model as every other persistent
+    /// entry. Returns the ledger sequence the snapshot was recorded under.
+    pub fn snapshot_stake(env: Env, worker: Address) -> u32 {
+        let stake = Self::stake_info(&env, &worker);
+        let value = stake.settled + stake.warming;
+        let ledger = env.ledger().sequence();
+        Self::set_persistent(&env, &DataKey::StakeSnapshot(worker.clone(), ledger), &value);
+        Self::bump_instance(&env);
+        StakeSnapshotted {
+            worker,
+            ledger,
+            stake: value,
+        }
+        .publish(&env);
+        ledger
+    }
+
+    /// Reads back a checkpoint written by snapshot_stake() for `worker` at
+    /// EXACTLY `ledger` — this is a point lookup, not a range query or an
+    /// interpolation over the nearest earlier snapshot (see
+    /// docs/stake-snapshot.md for why). Callers that need history at an
+    /// arbitrary past ledger must have called snapshot_stake() at that
+    /// ledger, or reconstruct it from this contract's events instead.
+    pub fn get_historical_stake(
+        env: Env,
+        worker: Address,
+        ledger: u32,
+    ) -> Result<i128, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StakeSnapshot(worker, ledger))
+            .ok_or(ContractError::StakeSnapshotNotFound)
+    }
 }
 
 #[cfg(test)]
@@ -1543,6 +1602,8 @@ mod test_economics;
 mod test_kyc;
 #[cfg(test)]
 mod test_passkey;
+#[cfg(test)]
+mod test_snapshot;
 #[cfg(test)]
 mod test_migration;
 #[cfg(test)]
