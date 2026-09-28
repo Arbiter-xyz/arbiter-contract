@@ -140,3 +140,6 @@ the full write-up.)
 
 <!-- handsoff-issue-21 -->
 - #21: touch() rewrites unchanged Owed/Stake values before extending TTL, costing an avoidable write fee
+
+<!-- handsoff-issue-24 -->
+- #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
