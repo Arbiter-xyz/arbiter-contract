@@ -194,6 +194,10 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// #91: payer-set floor on their own Balance(Address). Checked only by
+    /// the new permissionless check_top_up_threshold() — see that fn's docs
+    /// for why charge() itself is left untouched.
+    TopUpThreshold(Address),
 }
 
 #[contracterror]
@@ -253,6 +257,21 @@ pub struct QuestionMigrated {
     pub question_id: u64,
     pub target: Address,
     pub amount: i128,
+}
+
+/// #91: emitted by check_top_up_threshold() whenever a payer's Balance is
+/// found at or below their own configured TopUpThreshold. Purely
+/// informational — it never blocks or reverses anything; a backend watching
+/// for it is the on-chain threshold mechanism this issue asked for, short of
+/// a full delegated-pull design (see check_top_up_threshold()'s doc comment
+/// for the scoping rationale).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopUpNeeded {
+    #[topic]
+    pub payer: Address,
+    pub balance: i128,
+    pub threshold: i128,
 }
 
 #[contract]
@@ -1350,6 +1369,78 @@ impl OracleEscrow {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
+
+    // ---- #91: auto-top-up threshold ----------------------------------
+    //
+    // Scoped down from the issue's open questions: the contract cannot pull
+    // funds from a payer's wallet without their signature, and #89's
+    // delegation primitive this issue optionally depends on doesn't exist
+    // yet on this branch. So this implements just the "fixed
+    // DataKey::TopUpThreshold(Address) the payer sets themselves, checked
+    // ... without failing the charge" half of the design (open question 3 /
+    // the second acceptance criterion), as a threshold + event mechanism
+    // that a backend polls or calls right after charge() — it does NOT hook
+    // into charge() itself, so the hottest existing path and its behavior
+    // on InsufficientBalance are completely unchanged.
+
+    /// Payer sets (or clears, with 0) the balance floor below which they
+    /// want to be notified. Payer-only, mirroring deposit()/withdraw_balance().
+    pub fn set_top_up_threshold(
+        env: Env,
+        payer: Address,
+        threshold: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if threshold < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
+        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_top_up_threshold(env: Env, payer: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TopUpThreshold(payer))
+            .unwrap_or(0)
+    }
+
+    /// Permissionless (like touch()): compares `payer`'s current Balance
+    /// against their own configured threshold and, if the balance is at or
+    /// below it, emits TopUpNeeded without touching either value or failing
+    /// in any way. A payer with no threshold set (or a threshold of 0) is a
+    /// harmless no-op. Returns whether the event was emitted, so an
+    /// off-chain caller can act on the return value instead of re-reading
+    /// events.
+    pub fn check_top_up_threshold(env: Env, payer: Address) -> bool {
+        let threshold: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TopUpThreshold(payer.clone()))
+            .unwrap_or(0);
+        if threshold <= 0 {
+            return false;
+        }
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Balance(payer.clone()))
+            .unwrap_or(0);
+        if balance > threshold {
+            return false;
+        }
+        TopUpNeeded {
+            payer,
+            balance,
+            threshold,
+        }
+        .publish(&env);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1360,3 +1451,5 @@ mod test_economics;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
+#[cfg(test)]
+mod test_auto_topup;
