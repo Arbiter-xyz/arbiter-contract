@@ -267,6 +267,32 @@ pub struct QuestionSettled {
     pub status: Status,
 }
 
+/// Issue #84: the would-be outcome of calling resolve() with the given
+/// question_id/workers/losing_workers, computed WITHOUT mutating any
+/// storage or transferring/crediting anything. Mirrors resolve()'s
+/// fee/pool/share/dust/slash arithmetic exactly (same constants, same
+/// integer division), so a caller can check the exact split beforehand
+/// instead of hand-replicating it off-chain.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvePreview {
+    /// Platform fee taken off the top (PLATFORM_FEE_BPS of the question's
+    /// amount).
+    pub fee: i128,
+    /// Integer-division remainder from splitting `pool` evenly across
+    /// `workers`, which resolve() folds into the platform's take.
+    pub dust: i128,
+    /// What EACH matching worker in `workers` would be credited.
+    pub share_per_worker: i128,
+    /// Sum of what would be slashed from all `losing_workers` combined
+    /// (each capped individually the same way `slash()` caps it; a
+    /// worker with no stake contributes 0, same as the real resolve()).
+    pub total_slashed: i128,
+    /// What the platform address would end up with: fee + dust +
+    /// total_slashed.
+    pub platform_take: i128,
+}
+
 /// Emitted on the SOURCE contract for each question migrate_pending() moves.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1432,6 +1458,87 @@ impl OracleEscrow {
         }
         Ok(())
     }
+
+    // ---- Issue #84: dry-run resolve() simulation ----------------------
+    //
+    // Simplifications vs. the full issue:
+    //  - This duplicates resolve()'s validation + arithmetic rather than
+    //    refactoring resolve() itself to share a common "compute" path with
+    //    it, to keep this change purely additive and resolve() itself
+    //    byte-for-byte unchanged (other than the #85 guard clause above).
+    //  - Does not call require_auth() at all (not even a read-only check),
+    //    matching the issue's explicit ask; it is intentionally viewable by
+    //    anyone, same as other getters like get_question()/get_owed().
+    //  - Validates the question exists and is Pending, returning the same
+    //    errors resolve() would for a hypothetical call, per the issue's
+    //    resolved open question.
+
+    /// Read-only. Computes what resolve(question_id, workers, losing_workers)
+    /// WOULD do — the platform fee, per-worker share, integer-division dust,
+    /// and total slash taken from `losing_workers` — without writing any
+    /// storage, transferring/crediting any funds, or requiring any
+    /// authorization. See `ResolvePreview`.
+    pub fn preview_resolve(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<ResolvePreview, ContractError> {
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let amount = question.amount;
+        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        let share_per_worker = pool / n;
+        let dust = pool - share_per_worker * n;
+
+        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let mut total_slashed: i128 = 0;
+        for loser in losing_workers.iter() {
+            total_slashed += Self::preview_slash(&env, &loser, slash_cap);
+        }
+
+        Ok(ResolvePreview {
+            fee,
+            dust,
+            share_per_worker,
+            total_slashed,
+            platform_take: fee + dust + total_slashed,
+        })
+    }
+
+    /// Pure counterpart to `slash()`: computes the same amount that slash()
+    /// would take from `worker`'s slashable stake (capped the same way),
+    /// but never writes it back. Used only by `preview_resolve()`.
+    fn preview_slash(env: &Env, worker: &Address, cap: i128) -> i128 {
+        let key = DataKey::Stake(worker.clone());
+        if !env.storage().persistent().has(&key) {
+            return 0;
+        }
+        let info = Self::stake_info(env, worker);
+        let slashable = info.settled + info.warming + info.unbonding;
+        if slashable <= 0 {
+            return 0;
+        }
+        (slashable * SLASH_BPS / BPS_DENOM).min(cap).min(slashable).max(0)
+    }
 }
 
 #[cfg(test)]
@@ -1444,3 +1551,5 @@ mod test_migration;
 mod test_ttl;
 #[cfg(test)]
 mod test_quorum_bounds;
+#[cfg(test)]
+mod test_dry_run_resolve;
