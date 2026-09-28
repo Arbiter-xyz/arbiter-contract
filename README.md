@@ -71,11 +71,98 @@ untouched.
 
 ### Problem
 
+## WASM binary size
+
+The release profile in `Cargo.toml` is tuned for size (`opt-level = "z"`,
+`lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`), and
+`stellar contract build` runs `wasm-opt` on the result. Smaller bytecode
+lowers the storage rent every deployment (and re-deployment) pays, so the
+size is treated as a budget to defend rather than a one-off observation.
+
+Measure it with the same command CI uses:
+
+```sh
+stellar contract build
+ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
+```
+
+**Baseline: 15.5KB** (optimized). The build must stay at or below this
+number; a PR that regresses it should be visible in CI output. Note the
+tradeoff: aggressive optimization can make a failed transaction's trap
+less readable, so debugging a revert may require a separate unoptimized
+build.
+
+## Handsoff notes
+
 `submit()` and `deposit()` both require `payer.require_auth()` and a direct
 `token::Client::transfer` from an address the contract can authenticate on
 Stellar. There is no path today for a payer whose funds originate on another
 chain to reach escrow without first bridging to a Stellar-native balance
 themselves.
+
+### Chosen rail: Circle CCTP + a Stellar forwarder
+
+We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
+Stellar, rather than Axelar GMP.
+
+sm
+```
+
+**Baseline: 15.5KB** (optimized). The build must stay at or below this
+number; a PR that regresses it should be visible in CI output. Note the
+tradeoff: aggressive optimization can make a failed transaction's trap
+less readable, so debugging a revert may require a separate unoptimized
+build.
+
+## Handsoff notes
+
+<!-- handsoff-issue-28 -->
+- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
+
+<!-- handsoff-issue-76 -->
+- #76: Compliance blocklist registry
+
+<!-- handsoff-issue-77 -->
+- #77: Travel-rule metadata field
+
+<!-- handsoff-issue-78 -->
+- #78: Multi-treasury fee routing
+
+<!-- handsoff-issue-79 -->
+- #79: On-chain aggregate stats view
+
+<!-- handsoff-issue-21 -->
+- #21: touch() rewrites unchanged Owed/Stake values before extending TTL, costing an avoidable write fee
+
+<!-- handsoff-issue-24 -->
+- #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
+
+<!-- handsoff-issue-46 -->
+- #46: Emergency pause switch
+
+<!-- handsoff-issue-47 -->
+- #47: Proxy/versioned upgrade path
+
+<!-- handsoff-issue-51 -->
+- #51: Time-locked large withdrawals
+
+<!-- handsoff-issue-52 -->
+- #52: Withdrawal destination allowlist
+
+<!-- handsoff-issue-62 -->
+- #62: Mutation testing pass
+
+<!-- handsoff-issue-63 -->
+- #63: Formal state-machine spec
+
+<!-- handsoff-issue-64 -->
+- #64: WASM binary size optimization
+
+<!-- handsoff-issue-102 -->
+- #102: Third-party stake sponsorship
+
+<!-- handsoff-issue-103 -->
+- #103: Cooperative staking pools
 
 ### Chosen rail: Circle CCTP + a Stellar forwarder
 
@@ -156,3 +243,4 @@ rather than an additive forwarder.
 
 Making the escrowed token itself a bridged/multichain token — that is #72's
 distinct approach, not a prerequisite for this note.
+

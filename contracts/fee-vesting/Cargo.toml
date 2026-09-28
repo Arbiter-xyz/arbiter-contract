@@ -1,0 +1,19 @@
+[package]
+name = "fee-vesting"
+version = "0.1.0"
+edition = "2021"
+description = "Cliff-then-linear vesting treasury for OracleEscrow platform fee revenue"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]

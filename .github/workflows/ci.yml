@@ -40,7 +40,65 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
       - name: cargo audit
         run: cargo audit
-      - run: cargo test -p oracle-escrow
-      - name: Install stellar-cli
-        run: cargo install --locked stellar-cli --version 21.0.0
-      - run: stellar contract build
+      - name: cargo test
+        run: cargo test
+      - name: Doc-comment coverage lint
+        # Enforces rustdoc's missing-docs lint on the crate so undocumented
+        # public items (e.g. get_balance, get_stake, get_owed) are caught in
+        # CI instead of relying on a reviewer to notice the gap.
+        run: RUSTFLAGS="-D missing_docs" cargo check --lib
+      - name: Slashing model claims
+        # Asserts every number docs/economics/slashing-threat-model.md cites
+        # from the closed-form model, and that the committed tables are
+        # current.
+        run: |
+          python3 sim/slashing_model.py --check
+          python3 sim/slashing_model.py > /tmp/tables.md
+          diff <(tail -n +8 docs/economics/model-tables.md) /tmp/tables.md
+      - name: Migration tool syntax
+        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs
+      - name: Install Stellar CLI
+        # Prebuilt .deb instead of cargo install: building from source pulls
+        # in hardware-wallet support (dbus, then libudev/hidapi) and takes
+        # 10+ minutes. Pinned to the version this project was built against.
+        run: |
+          curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
+      - name: Build contract and test fixtures to WASM
+        run: scripts/build-wasm.sh
+      - name: WASM size budget
+        # Records the optimized contract bytecode size and fails if it
+        # regresses past the 15.5KB baseline cited in the README. The size
+        # is measured from the same `stellar contract build` output that
+        # scripts/build-wasm.sh produces, so it is reproducible locally.
+        run: |
+          WASM=target/wasm32v1-none/release/escrow_contract.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::error::expected WASM artifact not found at $WASM"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$WASM")
+          echo "Optimized WASM size: ${SIZE} bytes ($(awk "BEGIN { printf \"%.1f\", $SIZE/1024 }" ) KB)"
+          echo "### WASM size: ${SIZE} bytes" >> "$GITHUB_STEP_SUMMARY"
+          BASELINE=15872 # 15.5KB
+          if [ "$SIZE" -gt "$BASELINE" ]; then
+            echo "::error::WASM size ${SIZE} bytes exceeds the ${BASELINE}-byte (15.5KB) baseline"
+            exit 1
+          fi
+      - name: WASM tests (mainnet resource-limit gate, upgrade worked example)
+        # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
+        # hand, not a gate. See docs/RESOURCE_LIMITS.md.
+        run: cargo test -- --ignored --skip bench_ --nocapture
+      - name: Gas-cost regression gate
+        # Runs the #65 benchmark harness and compares each measured function's
+        # instruction count against the committed baseline in
+        # bench/baseline.json. Fails if any function grows past the configured
+        # threshold. To accept a deliberate, justified cost increase, regenerate
+        # the baseline with `cargo run --release --bin bench -- --emit-baseline`
+        # and commit the diff (see docs/RESOURCE_LIMITS.md).
+        run: |
+          cargo run --release --bin bench -- --check-baseline bench/baseline.json
+      - name: Deep property-based fuzz run
+        run: cargo test escrow_invariant_holds_for_every_call_sequence
+        env:
+          PROPTEST_CASES: "1000"
