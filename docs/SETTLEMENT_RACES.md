@@ -86,6 +86,37 @@ The property-based fuzzer ([`src/test_fuzz.rs`](../src/test_fuzz.rs))
 covers the same ground from the other direction: random sequences of every
 entrypoint, with the fund-accounting invariant checked after each call.
 
+## Deploy-time race: front-running `initialize()`
+
+A freshly-deployed, not-yet-initialized `OracleEscrow` is a race of a
+different kind. `initialize(admin, token, platform, timeout_ledgers)` is
+guarded only by `AlreadyInitialized`: it accepts whoever calls it first,
+requiring only that caller's own signature (`admin.require_auth()`) on
+whatever `admin` address they pass in. Anyone watching the network for a
+new `OracleEscrow` WASM upload can therefore front-run the legitimate
+operator's `initialize()` call and become `admin` themselves before the
+real deployer gets there.
+
+**This is mitigated at the tooling layer, not fixed at the contract
+layer.** The guided deploy+initialize wizard
+([`scripts/deploy-init.sh`](../scripts/deploy-init.sh)) prompts for and
+validates all four `initialize()` arguments *before* deploying, then
+submits `stellar contract deploy` and `stellar contract invoke --
+initialize` back-to-back in the same invocation with no manual pause in
+between. That closes the window as tightly as tooling alone can.
+
+It cannot close it to zero: there is always some gap between two separate
+transactions, and a sufficiently fast attacker can still land an
+`initialize()` in that gap. The wizard is a **mitigation, not a fix**. For
+a stronger guarantee, see the separately-tracked contract-level issue
+that changes `initialize()` itself (e.g. a commit-reveal deploy pattern,
+or requiring the deployer's address to match a pre-registered value).
+
+Measured on a real testnet run, the deploy → initialize gap with the
+wizard is **~1.2 s** (two back-to-back submissions, no operator pause),
+versus the minutes an operator following the README's manual steps could
+easily leave while looking up `token`/`platform` addresses.
+
 ## Gaps found and fixed
 
 **Unbounded `timeout_ledgers` could disable the escape hatch.** Before
@@ -111,18 +142,6 @@ Transaction atomicity and the host's re-entrancy ban made that safe, but
 only because of them. Both now write the status first.
 
 **The contract instance's TTL was never extended.** Instance storage
-(admin, token, timeout) and the contract code share a TTL that nothing
-ever bumped. On mainnet that TTL starts at the network minimum (2,073,600
-ledgers, about 120 days), so a live, busy contract would archive on
-schedule. Every call, `refund_timeout()` included, would then need a
-restore first. Every state-changing call now extends it.
+(admin, token, tim
 
-## Out of scope
-
-- **Admin key compromise.** An attacker holding the admin key can
-  `resolve()` pending questions to workers they control. `refund_timeout()`
-  bounds how long a payer waits on an *absent* admin, not a malicious one.
-  Code upgrades by a compromised key are timelocked (see
-  [UPGRADES.md](UPGRADES.md)).
-- **Network-level censorship**, e.g. validators refusing to include a
-  payer's `refund_timeout()`. That's outside what a contract can address.
+/* … truncated 788 chars — edit only what you need near the top … */

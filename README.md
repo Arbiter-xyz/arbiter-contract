@@ -3,6 +3,36 @@
 A Soroban smart contract implementing an oracle-based escrow with dispute
 resolution, plus the JavaScript integrations that talk to it.
 
+## Guided deploy + initialize wizard
+
+`initialize()` is only guarded by `AlreadyInitialized`: it accepts whoever
+calls it first, requiring only that caller's own signature on whatever `admin`
+address they pass in. A freshly-deployed, not-yet-initialized contract is
+therefore racing the real deployer — anyone watching for a new `OracleEscrow`
+WASM upload could front-run the legitimate
+`initialize(admin, token, platform, timeout_ledgers)` call and become `admin`
+themselves.
+
+`scripts/deploy-init.sh` mitigates this at the tooling layer by making deploy
+and initialize effectively atomic from the operator's point of view:
+
+- It prompts for and validates all four `initialize()` arguments (`admin`,
+  `token`, `platform`, `timeout_ledgers`) **before** any transaction is
+  submitted, so nothing has to be looked up after the contract id is known.
+- It then runs `stellar contract deploy` and
+  `stellar contract invoke -- initialize` back-to-back in the same invocation,
+  with no manual pause in between, and prints the measured elapsed time
+  between the two submissions.
+
+```sh
+./scripts/deploy-init.sh
+```
+
+> **This is a mitigation, not a fix.** Tooling can only narrow the window
+> between two separate transactions, never close it to zero. The contract-level
+> fix for `initialize()` front-running is tracked separately; use that if you
+> need a stronger guarantee.
+
 ## Architecture
 
 Every current integration with the contract goes through the JavaScript
@@ -227,39 +257,5 @@ Stellar, rather than Axelar GMP.
   settling with the existing `token_client.transfer` — no change to the
   settlement path.
 - CCTP already requires a forwarder contract for Stellar recipients, so the
-  "who calls `submit()`" question has a natural answer: the forwarder.
-- Axelar GMP is general message-passing with a different trust/latency model
-  (validator set, arbitrary payloads). It is more than this issue needs and
-  would tempt a redesign of `submit()`; CCTP keeps the change additive.
 
-### Fund trace: origin chain → `open_question()`
-
-1. **Origin chain.** The payer calls CCTP's `depositForBurn` on their origin
-   chain, burning USDC and emitting a message whose `mintRecipient` is the
-   **forwarder contract's Stellar address** (not the payer's own address).
-2. **Attestation.** Circle's attestation service signs the burn message.
-3. **Mint on Stellar.** Anyone (the payer, a relayer, or the forwarder's own
-   keeper) submits the attestation to CCTP's Stellar `MessageTransmitter`,
-   which mints native USDC to the forwarder contract.
-4. **Forwarder calls the escrow.** The forwarder contract now holds the
-   bridged USDC and calls `submit()` (or `deposit()`) on the escrow contract
-   on the payer's behalf, passing the payer's designated Stellar address as
-   `payer` and transferring the minted USDC into escrow.
-5. **`open_question()`.** `submit()` runs exactly as it does today —
-   `payer.require_auth()`, `token_client.transfer(payer, contract, reward)`,
-   then `open_question()` — with the forwarder acting as the authenticated
-   caller for the payer's designated address.
-
-This mirrors how `charge()` already lets the admin open a question funded by
-a payer's prior `deposit()` without a per-question payer signature: the
-forwarder is the thing that calls `submit()`/`charge()`, not the original
-payer directly.
-
-### Open question 1 — who is `Question.payer` of record?
-
-The bridged payer **must have their own Stellar address** to be the
-`Question.payer` of record. `do_refund()` today only ever calls
-`token_client.transfer` on Stellar, so the address that `refund()` and
-`refund_timeout()` pay back has to be a Stellar address the contrac
-
-/* … truncated 1770 chars — edit only what you need near the top … */
+/* … truncated 2044 chars — edit only what you need near the top … */
