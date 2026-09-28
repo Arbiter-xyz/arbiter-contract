@@ -2,9 +2,53 @@
 
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl, contracttype,
     testutils::{Address as _, Ledger},
     Env,
 };
+
+#[contracttype]
+enum SixDecimalAssetKey {
+    Balance(Address),
+}
+
+#[contract]
+struct SixDecimalAsset;
+
+#[contractimpl]
+impl SixDecimalAsset {
+    pub fn decimals(_env: Env) -> u32 {
+        6
+    }
+
+    pub fn balance(env: Env, account: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&SixDecimalAssetKey::Balance(account))
+            .unwrap_or(0)
+    }
+
+    pub fn mint(env: Env, account: Address, amount: i128) {
+        let key = SixDecimalAssetKey::Balance(account.clone());
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(balance + amount));
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        let from_key = SixDecimalAssetKey::Balance(from);
+        let to_key = SixDecimalAssetKey::Balance(to);
+        let from_balance: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+        assert!(amount > 0 && amount <= from_balance);
+        let to_balance: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&from_key, &(from_balance - amount));
+        env.storage()
+            .persistent()
+            .set(&to_key, &(to_balance + amount));
+    }
+}
 
 /// The v0.2.0 contract exactly as it was deployed before the TTL, migration
 /// and slashing changes (built from commit 7e5c893). Tests run it side by
@@ -251,6 +295,110 @@ fn initialize_rejects_zero_timeout() {
     let c = OracleEscrowClient::new(&env, &contract_id);
     let res = c.try_initialize(&admin, &sac.address(), &platform, &0u32);
     assert_eq!(res, Err(Ok(ContractError::InvalidTimeout)));
+}
+
+#[test]
+fn question_settlement_never_substitutes_another_asset() {
+    let f = setup();
+    let c = client(&f);
+    let other = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    let unapproved = Address::generate(&f.env);
+    assert_eq!(
+        c.try_submit_asset(&f.payer, &unapproved, &100, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+    let other_admin = token::StellarAssetClient::new(&f.env, &other);
+    other_admin.mint(&f.payer, &(AMOUNT * 2));
+    c.set_asset_allowed(&other, &true);
+
+    c.submit(&f.payer, &101, &AMOUNT);
+    c.submit_asset(&f.payer, &other, &102, &AMOUNT);
+    c.submit_asset(&f.payer, &other, &103, &AMOUNT);
+    let other_escrow_before = token::Client::new(&f.env, &other).balance(&f.contract_id);
+    let worker = Address::generate(&f.env);
+    c.resolve(
+        &101,
+        &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
+        &soroban_sdk::Vec::new(&f.env),
+    );
+
+    assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT - AMOUNT / 5);
+    assert_eq!(token::Client::new(&f.env, &other).balance(&f.contract_id), other_escrow_before);
+    assert_eq!(c.get_owed_asset(&worker, &f.token_address), AMOUNT * 4 / 5);
+    assert_eq!(c.get_owed_asset(&worker, &other), 0);
+
+    let default_escrow_after = token_client(&f).balance(&f.contract_id);
+    c.resolve(
+        &103,
+        &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
+        &soroban_sdk::Vec::new(&f.env),
+    );
+    assert_eq!(token_client(&f).balance(&f.contract_id), default_escrow_after);
+    assert_eq!(
+        token::Client::new(&f.env, &other).balance(&f.contract_id),
+        AMOUNT * 4 / 5
+    );
+    assert_eq!(c.get_owed_asset(&worker, &other), AMOUNT * 4 / 5);
+
+    c.refund(&102);
+    assert_eq!(token::Client::new(&f.env, &other).balance(&f.payer), AMOUNT);
+    assert_eq!(
+        token::Client::new(&f.env, &other).balance(&f.contract_id),
+        AMOUNT * 4 / 5
+    );
+    assert_eq!(c.get_question_token(&102), other);
+}
+
+#[test]
+fn six_decimal_asset_uses_native_units_without_seven_decimal_scaling() {
+    let f = setup();
+    let c = client(&f);
+    let asset = f.env.register(SixDecimalAsset, ());
+    let asset_client = SixDecimalAssetClient::new(&f.env, &asset);
+    asset_client.mint(&f.payer, &1_250_000);
+    c.set_asset_allowed(&asset, &true);
+
+    assert_eq!(c.get_asset_decimals(&asset), 6);
+    c.submit_asset(&f.payer, &asset, &103, &1_250_000);
+    assert_eq!(asset_client.balance(&f.contract_id), 1_250_000);
+
+    let worker = Address::generate(&f.env);
+    c.resolve(
+        &103,
+        &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
+        &soroban_sdk::Vec::new(&f.env),
+    );
+    assert_eq!(asset_client.balance(&f.platform), 250_000);
+    assert_eq!(c.get_owed_asset(&worker, &asset), 1_000_000);
+    c.withdraw_asset(&worker, &asset, &1_000_000);
+    assert_eq!(asset_client.balance(&worker), 1_000_000);
+}
+
+#[test]
+fn admin_rotation_is_public_delayed_and_cancellable() {
+    let f = setup();
+    let c = client(&f);
+    let attacker = Address::generate(&f.env);
+    c.propose_admin_rotation(&attacker);
+
+    let pending = c.get_pending_admin_rotation().unwrap();
+    assert_eq!(pending.new_admin, attacker);
+    assert_eq!(
+        pending.executable_at,
+        f.env.ledger().sequence() + ADMIN_ROTATION_DELAY_LEDGERS
+    );
+    assert_eq!(c.try_execute_admin_rotation(), Err(Ok(ContractError::AdminRotationNotReady)));
+    c.cancel_admin_rotation();
+    assert_eq!(c.get_pending_admin_rotation(), None);
+
+    c.propose_admin_rotation(&attacker);
+    let executable_at = c.get_pending_admin_rotation().unwrap().executable_at;
+    f.env.ledger().set_sequence_number(executable_at);
+    c.execute_admin_rotation();
+    assert_eq!(c.get_pending_admin_rotation(), None);
 }
 
 // --- Permissionless timeout-refund escape hatch ---
@@ -719,11 +867,14 @@ fn set_admin_rotates_authority_to_a_new_key() {
     let new_admin = Address::generate(&f.env);
 
     c.set_admin(&new_admin);
+    let pending = c.get_pending_admin_rotation().unwrap();
+    assert_eq!(pending.new_admin, new_admin);
+    f.env.ledger().set_sequence_number(pending.executable_at);
+    c.execute_admin_rotation();
+    assert_eq!(c.get_pending_admin_rotation(), None);
 
-    // Old admin no longer has authority: mock_all_auths() approves any
-    // signer in tests, so this doesn't directly prove the OLD key is
-    // rejected on a live network — but it does prove the NEW admin is now
-    // recognized as the authority for admin-gated calls.
+    // mock_all_auths() cannot distinguish old and new signers; a separate
+    // test covers proposal visibility, delay, and cancellation.
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
     c.resolve(

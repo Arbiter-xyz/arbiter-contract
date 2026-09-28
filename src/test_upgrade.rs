@@ -9,8 +9,8 @@
 //! - the timelock works and every payer gets an exit before new code runs;
 //! - a failed or abandoned upgrade leaves the running contract untouched;
 //! - storage written by one version decodes identically in the next
-//!   (golden XDR pins below);
-//! - end to end with real WASM: v1 with pending questions, upgrade to v2,
+    assert_eq!(c.version(), 2);
+//! - end to end with real WASM: v2 with pending questions, upgrade to v3,
 //!   everything settles exactly once with exact accounting.
 
 extern crate std;
@@ -97,7 +97,7 @@ fn fake_hash(env: &Env, byte: u8) -> BytesN<32> {
 fn version_reports_the_compiled_contract_version() {
     let fx = setup(None);
     assert_eq!(fx.client().version(), CONTRACT_VERSION);
-    assert_eq!(CONTRACT_VERSION, 1);
+    assert_eq!(CONTRACT_VERSION, 2);
 }
 
 #[test]
@@ -390,18 +390,18 @@ fn storage_layout_is_pinned() {
 
 // --- Worked example on real WASM ---
 
-/// v1 (the deployable build) with questions in every state, upgraded in
-/// place to v2 (the upgrade-test-v2 build), then everything settled and
+/// v2 (the deployable build) with questions in every state, upgraded in
+/// place to v3 (the upgrade-test-v3 build), then everything settled and
 /// drained. Every stroop is accounted for.
 #[test]
 #[ignore = "needs WASM artifacts: scripts/build-wasm.sh"]
-fn worked_example_v1_to_v2_with_pending_questions() {
-    let v1 = test_wasm::load(test_wasm::RELEASE);
-    let v2 = test_wasm::load(test_wasm::UPGRADE_V2);
-    let fx = setup(Some(&v1));
+fn worked_example_v2_to_v3_with_pending_questions() {
+    let v2 = test_wasm::load(test_wasm::RELEASE);
+    let v3 = test_wasm::load(test_wasm::UPGRADE_V3);
+    let fx = setup(Some(&v2));
     let c = fx.client();
     let env = &fx.env;
-    assert_eq!(c.version(), 1);
+    assert_eq!(c.version(), 2);
 
     let payer_b = Address::generate(env);
     fx.mint(&payer_b, AMOUNT * 2);
@@ -412,25 +412,25 @@ fn worked_example_v1_to_v2_with_pending_questions() {
     let everyone = [&fx.payer, &payer_b, &w1, &w2, &w3, &loser, &fx.platform, &fx.contract_id];
     let total = || everyone.iter().map(|a| fx.tc().balance(a)).sum::<i128>();
 
-    // --- v1: build up state. ---
+    // --- v2: build up state. ---
     c.stake(&loser, &1_000_000);
-    c.submit(&fx.payer, &10, &AMOUNT); // resolved under v1, owed carried over
+    c.submit(&fx.payer, &10, &AMOUNT); // resolved before the upgrade, owed carried over
     c.resolve(&10, &Vec::from_array(env, [w1.clone(), w2.clone()]), &Vec::new(env));
     c.submit(&fx.payer, &1, &AMOUNT); // resolved under v2
     c.deposit(&payer_b, &(AMOUNT * 2));
     c.charge(&payer_b, &2, &AMOUNT); // admin-refunded under v2
-    c.submit(&fx.payer, &3, &AMOUNT); // escapes via refund_timeout under v1
+    c.submit(&fx.payer, &3, &AMOUNT); // escapes via refund_timeout under v2
 
     // --- Propose. ---
-    let v2_hash = env.deployer().upload_contract_wasm(Bytes::from_slice(env, &v2));
-    c.propose_upgrade(&v2_hash);
+    let v3_hash = env.deployer().upload_contract_wasm(Bytes::from_slice(env, &v3));
+    c.propose_upgrade(&v3_hash);
     let executable_at = c.get_pending_upgrade().unwrap().executable_at;
-    c.submit(&fx.payer, &4, &AMOUNT); // opened during the delay, resolved under v2
+    c.submit(&fx.payer, &4, &AMOUNT); // opened during the delay, resolved under v3
     fx.advance_to(executable_at - 10);
     c.submit(&fx.payer, &5, &AMOUNT); // clamped to a 9-ledger window
     assert_eq!(c.get_question(&5).timeout_ledgers, 9);
 
-    // q3's payer exits while v1 still runs.
+    // q3's payer exits while v2 still runs.
     c.refund_timeout(&3);
     assert_eq!(c.try_execute_upgrade(), Err(Ok(ContractError::UpgradeNotReady)));
 
@@ -446,7 +446,7 @@ fn worked_example_v1_to_v2_with_pending_questions() {
     let owed_before = (c.get_owed(&w1), c.get_owed(&w2));
     let balance_before = fx.tc().balance(&fx.contract_id);
     c.execute_upgrade();
-    assert_eq!(c.version(), 2, "v2 code is live at the same address");
+    assert_eq!(c.version(), 3, "v3 code is live at the same address");
     assert_eq!(c.get_pending_upgrade(), None);
 
     // Same address, same storage, same funds.
@@ -459,7 +459,7 @@ fn worked_example_v1_to_v2_with_pending_questions() {
     assert_eq!(c.get_stake(&loser), 1_000_000);
     assert_eq!(c.get_balance(&payer_b), AMOUNT);
 
-    // --- v2: settle everything still pending. ---
+    // --- v3: settle everything still pending. ---
     c.resolve(&1, &Vec::from_array(env, [w1.clone(), w3.clone()]), &Vec::from_array(env, [loser.clone()]));
     c.refund(&2);
     c.resolve(&4, &Vec::from_array(env, [w2.clone()]), &Vec::new(env));
@@ -495,15 +495,15 @@ fn worked_example_v1_to_v2_with_pending_questions() {
 
 #[test]
 #[ignore = "needs WASM artifacts: scripts/build-wasm.sh"]
-fn upgrading_to_a_hash_that_was_never_uploaded_leaves_v1_running() {
-    let v1 = test_wasm::load(test_wasm::RELEASE);
-    let fx = setup(Some(&v1));
+fn upgrading_to_a_hash_that_was_never_uploaded_leaves_v2_running() {
+    let v2 = test_wasm::load(test_wasm::RELEASE);
+    let fx = setup(Some(&v2));
     let c = fx.client();
     c.submit(&fx.payer, &1, &AMOUNT);
     c.propose_upgrade(&fake_hash(&fx.env, 7));
     fx.advance_to(1_000 + UPGRADE_DELAY_LEDGERS);
     assert!(c.try_execute_upgrade().is_err());
-    assert_eq!(c.version(), 1);
+    assert_eq!(c.version(), 2);
     assert!(c.get_pending_upgrade().is_some());
     c.resolve(&1, &Vec::from_array(&fx.env, [Address::generate(&fx.env)]), &Vec::new(&fx.env));
     assert_eq!(c.get_question(&1).status, Status::Resolved);
