@@ -143,3 +143,6 @@ the full write-up.)
 
 <!-- handsoff-issue-77 -->
 - #77: Travel-rule metadata field
+
+<!-- handsoff-issue-78 -->
+- #78: Multi-treasury fee routing
