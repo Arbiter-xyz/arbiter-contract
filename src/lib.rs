@@ -79,6 +79,12 @@ pub const MAX_QUORUM_SIZE: u32 = 64;
 #[cfg(feature = "bench-uncapped-quorum")]
 pub const MAX_QUORUM_SIZE: u32 = u32::MAX;
 
+/// Issue #83: max number of entries kept in the on-chain leaderboard. Small
+/// on purpose (top 20, not top 100) to keep the insertion-sort update added
+/// to resolve()'s per-worker credit loop cheap — it is O(LEADERBOARD_CAP)
+/// per credited worker, not O(n) over all workers ever staked.
+pub const LEADERBOARD_CAP: u32 = 20;
+
 /// Ledgers between propose_upgrade() and the earliest execute_upgrade().
 /// Strictly longer than MAX_TIMEOUT_LEDGERS, so every question pending when
 /// an upgrade is proposed reaches its refund_timeout() deadline while the
@@ -202,6 +208,15 @@ pub enum DataKey {
     /// of the fixed `MAX_QUORUM_SIZE` resource-safety cap, which always
     /// applies regardless of this being configured.
     MaxQuorum,
+    /// Issue #83: total number of resolve() calls a worker has been in the
+    /// credited `workers` list for. Maintained alongside (not instead of)
+    /// `LeaderboardEntries` so a worker's full count survives even after
+    /// falling out of the bounded top-N.
+    ResolvedCount(Address),
+    /// Issue #83: bounded `Vec<(Address, u32)>`, capped at LEADERBOARD_CAP,
+    /// sorted descending by resolved count. Instance storage, since it's
+    /// small and read/written on essentially every resolve().
+    LeaderboardEntries,
 }
 
 #[contracterror]
@@ -569,6 +584,10 @@ impl OracleEscrow {
         }
         for worker in workers.iter() {
             Self::credit_owed(&env, &worker, share);
+            // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
+            // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not
+            // O(all workers ever staked).
+            Self::record_resolved_credit(&env, &worker);
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
@@ -1578,6 +1597,89 @@ impl OracleEscrow {
         }
         results
     }
+
+    // ---- Issue #83: on-chain leaderboard -------------------------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Bounded top-N (LEADERBOARD_CAP = 20), not trustlessly-complete —
+    //    this is a "verifiable top ranking" primitive, not a full worker
+    //    registry. A worker's true total is always available via
+    //    get_resolved_count() even after falling out of the top N.
+    //  - Ranking is purely resolved_count (times credited by resolve());
+    //    match-ratio/reputation scoring itself stays backend-owned, per the
+    //    issue's explicit "out of scope".
+    //  - Maintained with a simple O(LEADERBOARD_CAP) linear scan + insert
+    //    per credited worker rather than a fancier data structure, since
+    //    LEADERBOARD_CAP is small and fixed.
+
+    /// Called once per credited worker inside resolve()'s existing loop.
+    /// Bumps that worker's total ResolvedCount and re-sorts them into the
+    /// bounded LeaderboardEntries if they now qualify for the top N.
+    fn record_resolved_credit(env: &Env, worker: &Address) {
+        let count_key = DataKey::ResolvedCount(worker.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0) + 1;
+        Self::set_persistent(env, &count_key, &count);
+        Self::update_leaderboard(env, worker, count);
+    }
+
+    fn update_leaderboard(env: &Env, worker: &Address, count: u32) {
+        let mut entries: Vec<(Address, u32)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LeaderboardEntries)
+            .unwrap_or(Vec::new(env));
+
+        // Remove any existing entry for this worker so it can be
+        // re-inserted at its new, correct position.
+        let mut existing_idx: Option<u32> = None;
+        for i in 0..entries.len() {
+            if entries.get(i).unwrap().0 == *worker {
+                existing_idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = existing_idx {
+            entries.remove(i);
+        }
+
+        // Insertion sort, descending by count: find the first entry with a
+        // strictly smaller count and insert just before it.
+        let mut insert_at = entries.len();
+        for i in 0..entries.len() {
+            if entries.get(i).unwrap().1 < count {
+                insert_at = i;
+                break;
+            }
+        }
+        entries.insert(insert_at, (worker.clone(), count));
+
+        if entries.len() > LEADERBOARD_CAP {
+            entries.remove(entries.len() - 1);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LeaderboardEntries, &entries);
+        Self::bump_instance(env);
+    }
+
+    /// Read-only. Returns the bounded top-LEADERBOARD_CAP workers by
+    /// resolved_count, sorted descending.
+    pub fn get_leaderboard(env: Env) -> Vec<(Address, u32)> {
+        env.storage()
+            .instance()
+            .get(&DataKey::LeaderboardEntries)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Read-only. Returns a worker's full resolved_count, even if they've
+    /// fallen out of the bounded top-N leaderboard.
+    pub fn get_resolved_count(env: Env, worker: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ResolvedCount(worker))
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -1594,3 +1696,5 @@ mod test_quorum_bounds;
 mod test_dry_run_resolve;
 #[cfg(test)]
 mod test_batch_expiry_sweep;
+#[cfg(test)]
+mod test_leaderboard;
