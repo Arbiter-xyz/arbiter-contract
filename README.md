@@ -140,3 +140,6 @@ the full write-up.)
 
 <!-- handsoff-issue-46 -->
 - #46: Emergency pause switch
+
+<!-- handsoff-issue-47 -->
+- #47: Proxy/versioned upgrade path
