@@ -140,3 +140,6 @@ the full write-up.)
 
 <!-- handsoff-issue-102 -->
 - #102: Third-party stake sponsorship
+
+<!-- handsoff-issue-103 -->
+- #103: Cooperative staking pools
