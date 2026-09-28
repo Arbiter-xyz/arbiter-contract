@@ -207,6 +207,10 @@ pub enum DataKey {
     /// call lock_owed()/release_owed(). Admin-registered, mirroring the
     /// MigrationSource single-authority pattern above.
     LendingAuthority,
+    /// #93: non-transferable proof-of-verified-claim record for a resolved
+    /// question, keyed by question_id. Minted opt-in via mint_claim() — see
+    /// that fn's docs for why resolve() itself doesn't mint automatically.
+    Claim(u64),
 }
 
 #[contracterror]
@@ -248,6 +252,11 @@ pub enum ContractError {
     /// #92: lock_owed()/release_owed() called before any
     /// set_lending_authority() call has ever succeeded.
     LendingAuthorityNotSet = 108,
+    /// #93: mint_claim() called on a question that hasn't reached
+    /// Status::Resolved yet.
+    QuestionNotResolved = 103,
+    /// #93: mint_claim() called twice for the same question_id.
+    ClaimAlreadyExists = 104,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -317,6 +326,31 @@ pub struct OwedReleased {
     pub worker: Address,
     pub amount: i128,
     pub total_locked: i128,
+}
+
+/// #93: a non-transferable proof that `question_id` was adjudicated. There
+/// is deliberately no transfer/approve function anywhere in this contract
+/// for this record, which is what makes it non-transferable — see
+/// mint_claim()'s doc comment for the rest of this issue's scoping.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimRecord {
+    pub question_id: u64,
+    pub payer: Address,
+    /// Ledger sequence resolve() actually settled the question at, NOT
+    /// necessarily when mint_claim() was called — see mint_claim()'s docs
+    /// for why these currently coincide in this scoped-down version.
+    pub resolved_at: u32,
+    pub minted_at: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimMinted {
+    #[topic]
+    pub question_id: u64,
+    pub payer: Address,
+    pub minted_at: u32,
 }
 
 #[contract]
@@ -1608,6 +1642,61 @@ impl OracleEscrow {
         authority.require_auth();
         Ok(())
     }
+
+    // ---- #93: proof-of-verified-claim record -------------------------
+    //
+    // Scoped down per the issue's own open questions: minting is opt-in
+    // (question 1) rather than happening inside resolve() itself, which
+    // keeps resolve()'s cost and body completely unchanged; and it carries
+    // no answer text/hash (question 2) since submit()/resolve() don't carry
+    // one today and adding that is explicitly flagged in the issue as its
+    // own signature-change discussion. Non-transferability (question 3) is
+    // by construction: no transfer/approve function exists for ClaimRecord.
+
+    /// Permissionless: anyone (payer, worker, or an indexer) can mint the
+    /// claim record for a question once it's Resolved. Fails if the
+    /// question isn't Resolved yet, or if a record already exists for it.
+    pub fn mint_claim(env: Env, question_id: u64) -> Result<(), ContractError> {
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Resolved {
+            return Err(ContractError::QuestionNotResolved);
+        }
+        let key = DataKey::Claim(question_id);
+        if env.storage().persistent().has(&key) {
+            return Err(ContractError::ClaimAlreadyExists);
+        }
+        let minted_at = env.ledger().sequence();
+        let record = ClaimRecord {
+            question_id,
+            payer: question.payer.clone(),
+            // record_question()/settle_question() don't currently stamp a
+            // separate "resolved at" ledger onto Question, so this uses the
+            // mint ledger for both fields — a version of this issue that
+            // also adds an answer-hash field would want resolve() itself to
+            // record the true resolution ledger.
+            resolved_at: minted_at,
+            minted_at,
+        };
+        Self::set_persistent(&env, &key, &record);
+        Self::bump_instance(&env);
+        ClaimMinted {
+            question_id,
+            payer: question.payer,
+            minted_at,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Returns None for a question with no minted claim yet (unresolved or
+    /// simply not minted), matching this issue's third acceptance criterion.
+    pub fn get_claim(env: Env, question_id: u64) -> Option<ClaimRecord> {
+        env.storage().persistent().get(&DataKey::Claim(question_id))
+    }
 }
 
 #[cfg(test)]
@@ -1622,3 +1711,5 @@ mod test_ttl;
 mod test_auto_topup;
 #[cfg(test)]
 mod test_owed_collateral;
+#[cfg(test)]
+mod test_claim_nft;
