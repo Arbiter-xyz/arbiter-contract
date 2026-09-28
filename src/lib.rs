@@ -2,8 +2,8 @@
 
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contracterror, contractevent, contractimpl, contracttype, token, vec, Address, Env,
-    IntoVal, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 /// 20% platform fee, integer basis points. Never floats.
@@ -203,6 +203,24 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// A worker's registered secp256r1 public key (SEC-1-encoded, 65
+    /// bytes), used by verify_passkey_auth() as a simplified stand-in for a
+    /// full WebAuthn/passkey ceremony — see the doc comment on
+    /// register_passkey() for what this deliberately does not model.
+    PasskeyPubkey(Address),
+    /// Ed25519 public key of the trusted KYC attestor, set by the admin via
+    /// set_kyc_attestor(). Absent means no attestor is configured and
+    /// attest_kyc() always fails — see docs/kyc-attestation.md for why this
+    /// contract never itself gates on the resulting attestation.
+    KycAttestorPubkey,
+    /// Ledger sequence until which `Address` is considered KYC-attested,
+    /// written by attest_kyc().
+    KycAttestation(Address),
+    /// A worker's stake (as get_stake() would have reported it at the time)
+    /// captured at a specific ledger sequence by snapshot_stake(). See
+    /// docs/stake-snapshot.md for why this is an explicit, caller-paid
+    /// checkpoint rather than continuous on-chain history.
+    StakeSnapshot(Address, u32),
 }
 
 #[contracttype]
@@ -240,12 +258,26 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
-    AssetNotAllowed = 20,
-    NoAdminRotationPending = 21,
-    AdminRotationNotReady = 22,
-    CannotDisableDefaultAsset = 23,
-    ArithmeticOverflow = 24,
-    AssetLimitReached = 25,
+    /// verify_passkey_auth() called before register_passkey() for this
+    /// worker.
+    PasskeyNotRegistered = 20,
+    /// The secp256r1 signature did not verify against the worker's
+    /// registered passkey public key.
+    InvalidPasskeySignature = 21,
+    /// attest_kyc() called before set_kyc_attestor() configured a trusted
+    /// attestor public key.
+    KycAttestorNotSet = 22,
+    /// The expiry ledger passed to attest_kyc() is not in the future.
+    InvalidKycExpiry = 23,
+    /// get_historical_stake() found no snapshot for that worker at that
+    /// exact ledger.
+    StakeSnapshotNotFound = 24,
+    AssetNotAllowed = 25,
+    NoAdminRotationPending = 26,
+    AdminRotationNotReady = 27,
+    CannotDisableDefaultAsset = 28,
+    ArithmeticOverflow = 29,
+    AssetLimitReached = 30,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -282,6 +314,36 @@ pub struct QuestionMigrated {
     pub target: Address,
     pub token: Address,
     pub amount: i128,
+}
+
+/// Emitted by register_passkey() when a worker binds (or replaces) a
+/// secp256r1 passkey public key to their Address.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasskeyRegistered {
+    #[topic]
+    pub worker: Address,
+}
+
+/// Emitted by attest_kyc() when a subject's KYC attestation is recorded or
+/// refreshed.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KycAttested {
+    #[topic]
+    pub subject: Address,
+    pub expiry_ledger: u32,
+}
+
+/// Emitted by snapshot_stake() when a worker's stake is checkpointed at a
+/// ledger.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StakeSnapshotted {
+    #[topic]
+    pub worker: Address,
+    pub ledger: u32,
+    pub stake: i128,
 }
 
 #[contractevent]
@@ -1963,12 +2025,198 @@ impl OracleEscrow {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
+
+    /// Binds `pubkey` (a SEC-1-encoded secp256r1 public key, 65 bytes) to
+    /// `worker`'s Address for use with verify_passkey_auth() (issue #74).
+    /// The worker still signs this call with their existing Address
+    /// (keypair or smart-wallet, see #73) — this is a registration step,
+    /// not itself a passkey authentication. Calling it again replaces the
+    /// previously registered key.
+    ///
+    /// This is a SIMPLIFIED STAND-IN for full WebAuthn passkey support, not
+    /// an implementation of the WebAuthn ceremony: it does not verify
+    /// `authenticatorData`/`clientDataJSON` or any origin/RP-ID binding, and
+    /// it does not implement Soroban's `CustomAccountInterface` — a real
+    /// passkey-backed smart wallet would do that at the account-abstraction
+    /// layer (see #73/docs/account-abstraction.md), not here. This just
+    /// gives the worker console a way to register a device-held
+    /// secp256r1 key pair and later prove possession of it via a plain
+    /// signature, using `Env::crypto().secp256r1_verify`, which is the one
+    /// primitive Soroban actually exposes on this path today.
+    pub fn register_passkey(
+        env: Env,
+        worker: Address,
+        pubkey: BytesN<65>,
+    ) -> Result<(), ContractError> {
+        worker.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::PasskeyPubkey(worker.clone()), &pubkey);
+        Self::extend_persistent(&env, &DataKey::PasskeyPubkey(worker.clone()));
+        Self::bump_instance(&env);
+        PasskeyRegistered { worker }.publish(&env);
+        Ok(())
+    }
+
+    pub fn get_passkey_pubkey(env: Env, worker: Address) -> Option<BytesN<65>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PasskeyPubkey(worker))
+    }
+
+    /// Verifies that `signature` is a valid secp256r1 signature over
+    /// `message` under `worker`'s registered passkey public key. Returns
+    /// `Ok(())` on success; the underlying host call panics the whole
+    /// transaction on an invalid signature rather than returning through
+    /// this Result (consistent with how Soroban's crypto verifiers work
+    /// generally), so a failing check never both partially runs and
+    /// reports success.
+    ///
+    /// This does not call `worker.require_auth()` — it's a standalone
+    /// possession check a caller (e.g. the worker console backend
+    /// completing workerAuth.js's challenge/response flow) can use
+    /// alongside, not instead of, the contract's normal auth model. Nothing
+    /// currently gates on this; wiring it into an entry point is left to
+    /// the worker-console integration issue #74 scopes as depending on
+    /// this verification primitive.
+    pub fn verify_passkey_auth(
+        env: Env,
+        worker: Address,
+        message: Bytes,
+        signature: BytesN<64>,
+    ) -> Result<(), ContractError> {
+        let pubkey: BytesN<65> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PasskeyPubkey(worker))
+            .ok_or(ContractError::PasskeyNotRegistered)?;
+        let digest = env.crypto().sha256(&message);
+        env.crypto().secp256r1_verify(&pubkey, &digest, &signature);
+        Ok(())
+    }
+
+    /// Admin-only. Configures the ed25519 public key of the single trusted
+    /// off-chain KYC attestor whose signed claims attest_kyc() will accept
+    /// (issue #75). Replacing it does not retroactively invalidate
+    /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
+    pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::KycAttestorPubkey, &attestor_pubkey);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_kyc_attestor(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::KycAttestorPubkey)
+    }
+
+    /// Permissionless: anyone may submit a claim signed by the configured
+    /// KYC attestor recording that `subject` is attested until
+    /// `expiry_ledger`. The signed message is `subject`'s XDR encoding
+    /// followed by `expiry_ledger`'s XDR encoding, so a claim is bound to
+    /// exactly one subject and one expiry and can't be replayed for a
+    /// different pair. This ONLY records the attestation — no entry point
+    /// in this contract (submit()/deposit()/resolve()/...) reads or gates
+    /// on it; see docs/kyc-attestation.md for why that wiring is
+    /// deliberately deferred.
+    pub fn attest_kyc(
+        env: Env,
+        subject: Address,
+        expiry_ledger: u32,
+        signature: BytesN<64>,
+    ) -> Result<(), ContractError> {
+        let attestor_pubkey: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KycAttestorPubkey)
+            .ok_or(ContractError::KycAttestorNotSet)?;
+        if expiry_ledger <= env.ledger().sequence() {
+            return Err(ContractError::InvalidKycExpiry);
+        }
+
+        let mut message = subject.to_xdr(&env);
+        message.append(&expiry_ledger.to_xdr(&env));
+        env.crypto()
+            .ed25519_verify(&attestor_pubkey, &message, &signature);
+
+        Self::set_persistent(&env, &DataKey::KycAttestation(subject.clone()), &expiry_ledger);
+        Self::bump_instance(&env);
+        KycAttested {
+            subject,
+            expiry_ledger,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Whether `subject` currently holds an unexpired KYC attestation.
+    /// Informational only — see attest_kyc()'s doc comment.
+    pub fn is_kyc_verified(env: Env, subject: Address) -> bool {
+        let expiry: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::KycAttestation(subject));
+        match expiry {
+            Some(expiry) => env.ledger().sequence() < expiry,
+            None => false,
+        }
+    }
+
+    /// Permissionless: checkpoints `worker`'s CURRENT active stake
+    /// (`get_stake()` — settled + warming) under the CURRENT ledger
+    /// sequence, so it can later be read back via get_historical_stake()
+    /// even after Stake(worker) itself has moved on (issue #82). Like
+    /// touch(), anyone may call this — typically an off-chain indexer or
+    /// the backend on a periodic sweep — and the caller pays the storage
+    /// cost of the checkpoint, same TTL model as every other persistent
+    /// entry. Returns the ledger sequence the snapshot was recorded under.
+    pub fn snapshot_stake(env: Env, worker: Address) -> u32 {
+        let stake = Self::stake_info(&env, &worker);
+        let value = stake.settled + stake.warming;
+        let ledger = env.ledger().sequence();
+        Self::set_persistent(&env, &DataKey::StakeSnapshot(worker.clone(), ledger), &value);
+        Self::bump_instance(&env);
+        StakeSnapshotted {
+            worker,
+            ledger,
+            stake: value,
+        }
+        .publish(&env);
+        ledger
+    }
+
+    /// Reads back a checkpoint written by snapshot_stake() for `worker` at
+    /// EXACTLY `ledger` — this is a point lookup, not a range query or an
+    /// interpolation over the nearest earlier snapshot (see
+    /// docs/stake-snapshot.md for why). Callers that need history at an
+    /// arbitrary past ledger must have called snapshot_stake() at that
+    /// ledger, or reconstruct it from this contract's events instead.
+    pub fn get_historical_stake(
+        env: Env,
+        worker: Address,
+        ledger: u32,
+    ) -> Result<i128, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StakeSnapshot(worker, ledger))
+            .ok_or(ContractError::StakeSnapshotNotFound)
+    }
 }
 
 #[cfg(test)]
 mod test;
 #[cfg(test)]
+mod test_account_abstraction;
+#[cfg(test)]
 mod test_economics;
+#[cfg(test)]
+mod test_kyc;
+#[cfg(test)]
+mod test_passkey;
+#[cfg(test)]
+mod test_snapshot;
 #[cfg(test)]
 mod test_migration;
 #[cfg(test)]
