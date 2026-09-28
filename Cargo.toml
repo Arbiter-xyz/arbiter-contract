@@ -25,6 +25,14 @@ upgrade-test-v3 = []
 # Lifts MAX_QUORUM_SIZE so the resource sweep can measure past it.
 bench-uncapped-quorum = []
 
+[workspace]
+# The standalone Rust client crate (issue #69) lives in client/ and is a
+# workspace member so `cargo build -p oracle-escrow-client` works from the
+# repo root. It is intentionally NOT a dependency of this contract crate:
+# it wraps the generated `OracleEscrowClient` and can be published on its
+# own release cycle.
+members = ["client"]
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

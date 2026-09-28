@@ -1,160 +1,63 @@
-# arbiter-contract
+# Oracle Escrow
 
-The Soroban/Rust escrow contract for **Arbiter**, a pay-per-question
-human-intelligence oracle settled on Stellar. Custodies USDC per question
-and is the only component allowed to move funds — the backend
-([arbiter-backend](https://github.com/Arbiter-xyz/arbiter-backend)) is the
-sole caller of its admin-gated methods.
+A Soroban smart contract implementing an oracle-based escrow with dispute
+resolution, plus the JavaScript integrations that talk to it.
 
-Originally split out of a monorepo as a standalone crate so it could have
-its own build/release lifecycle, independent of the Node services around
-it. That monorepo is now retired — this repo is the sole source of truth
-for the contract's code going forward. Pre-split history lives in the
-archived [`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+## Architecture
 
-## Versioning
+Every current integration with the contract goes through the JavaScript
+`@stellar/stellar-sdk`:
 
-Tagged releases (`vX.Y.Z`, [SemVer](https://semver.org/)) mark commits that
-change the deployed interface — see [CHANGELOG.md](CHANGELOG.md) for what
-changed at each version, and pin `arbiter-backend`/`arbiter-app` against a
-tag rather than a raw commit. Each [GitHub
-Release](https://github.com/nayt9/arbiter-contract/releases) records the
-sha256 hash of that version's built `.wasm`, so you can confirm a deployed
-contract instance actually matches the tagged source.
+- `backend/src/stellarClient.js` — backend service calls
+- `app/src/contractCalls.js` — frontend calls
+- demo-agent's scripts — scripted demo flows
 
-## Design
+There is no equivalent for a Rust caller today. `soroban-sdk`'s
+`#[contractimpl]` macro already generates an `OracleEscrowClient` (the same
+type `test.rs`'s `client(f)` helper returns), which is most of what a
+standalone crate would need to publish.
 
-- **Fail closed**: every path ends in a real `resolve()` or `refund()` —
-  never a stuck or partially-settled state.
-- **Permissionless timeout refund**: if the backend goes dark, *anyone* can
-  force a refund on a still-pending question after a configurable ledger
-  window (`refund_timeout()`, no `require_auth()` at all) — the contract
-  itself guarantees payers are never permanently stranded by v1's
-  single-admin settlement authority.
-- **On-chain worker staking + slashing**: workers may post an optional USDC
-  bond; losing a quorum vote forfeits 5% of it, capped at the question's
-  amount. Unstaking goes through an unbonding delay during which the stake
-  stays slashable, and new stake has to warm up before it counts as
-  credible (`get_matured_stake`). The threat model behind those numbers is in
-  [docs/economics/slashing-threat-model.md](docs/economics/slashing-threat-model.md).
-- **Archival-safe**: the instance extends its own TTL on every call, each
-  Pending question stays live until a week past its refund deadline, and
-  `touch`/`touch_question` let anyone keep entries alive. Archived entries
-  are auto-restored anyway (protocol 23+). Measured behaviour:
-  [docs/ttl-archival.md](docs/ttl-archival.md).
-- **Migratable**: `list_pending` enumerates every Pending question, and
-  `migrate_pending` moves a batch atomically to a new instance that has
-  opted in with `set_migration_source`. [tools/migrate](tools/migrate) is the
-  orchestrator, with a dry-run mode, crash-safe re-runs and a
-  verifier. See [docs/migration.md](docs/migration.md).
-- **Accrued-balance settlement**: matching workers are credited, not paid
-  directly — `withdraw()` collects everything in one transaction whenever
-  they choose, instead of one payout per question.
-- **Allowlisted multi-asset settlement**: admins explicitly approve SEP-41
-  tokens; each question, worker credit, prepaid balance, and stake remains
-  denominated in exactly one token. `get_asset_decimals()` reports native
-  units, with no implicit decimal conversion. See
-  [docs/MULTI_ASSET_AND_ADMIN_ROTATION.md](docs/MULTI_ASSET_AND_ADMIN_ROTATION.md).
-- **Delayed admin rotation**: `set_admin()` now announces a cancellable
-  rotation, waits eight days, and requires both incumbent and successor
-  authorization to execute. Ordinary admin actions are not a multisig.
-- **Settlement observability**: inputs and relevant state are public; exact
-  fees and payouts are derivable before settlement. See
-  [docs/SETTLEMENT_OBSERVABILITY.md](docs/SETTLEMENT_OBSERVABILITY.md).
-- **Bounded quorum**: `resolve()` accepts at most `MAX_QUORUM_SIZE` (64)
-  workers + losing workers and rejects anything larger with
-  `QuorumTooLarge`. The cap comes from measuring the real WASM against
-  live mainnet limits; resolve() at the cap uses at most 34.5% of any
-  per-transaction limit. See [docs/RESOURCE_LIMITS.md](docs/RESOURCE_LIMITS.md).
-- **Race-safe settlement**: exactly one of `resolve()` / `refund()` /
-  `refund_timeout()` can ever win, in any order or ledger. Question
-  timeouts are capped at `MAX_TIMEOUT_LEDGERS` (7 days) so the escape
-  hatch can't be disabled. See [docs/SETTLEMENT_RACES.md](docs/SETTLEMENT_RACES.md).
-- **Timelocked in-place upgrades**: `propose_upgrade()` → 8-day delay →
-  `execute_upgrade()`. The contract's address, storage and funds never
-  move, and every pending question reaches its refund deadline before new
-  code can run. See [docs/UPGRADES.md](docs/UPGRADES.md) for the design and
-  the testnet/mainnet runbook.
+## Standalone Rust client crate
 
-## Methods
+A thin crate wrapping the generated `OracleEscrowClient` with a stable public
+API and its own versioning, independent of the contract crate's own release
+cycle. Useful for a future Rust-based backend or CLI tool that wants typed
+calls instead of hand-built XDR the way the JS side currently must.
 
-`initialize` · `submit` · `submit_asset` · `deposit` · `deposit_asset` ·
-`withdraw_balance` · `withdraw_balance_asset` · `charge` · `charge_asset` ·
-`resolve` · `refund` · `refund_timeout` · `set_admin` ·
-`propose_admin_rotation` · `cancel_admin_rotation` · `execute_admin_rotation` ·
-`get_pending_admin_rotation` ·
-`set_asset_allowed` · `set_timeout_ledgers` · `stake` · `stake_asset` ·
-`begin_unstake` · `begin_unstake_asset` · `complete_unstake` ·
-`complete_unstake_asset` · `withdraw` · `withdraw_asset` · `withdraw_to` ·
-`withdraw_to_asset` · `touch` · `touch_asset` · `touch_question` · `list_pending` · `pending_count` ·
-`set_migration_source` · `clear_migration_source` · `migrate_pending` ·
-`import_question` · `get_question` · `get_owed` · `get_stake` ·
-`get_matured_stake` · `get_stake_info` · `get_stake_asset` ·
-`get_matured_stake_asset` · `get_stake_info_asset` · `get_balance` ·
-`get_balance_asset` · `get_owed_asset` · `get_asset_decimals` ·
-`is_asset_allowed` · `get_question_token` · `get_token` ·
-`get_migration_source` · `get_timeout_ledgers`
+### Type coupling
 
-Events: `question_opened`, `question_settled`, `question_migrated`,
-`asset_permission_changed`, and admin-rotation events.
+The crate's public types are **independent of the contract's own type
+versions**. Rather than re-exporting the contract's `Question`, `Status`,
+`ContractError`, and `DataKey` directly (which would couple the client
+crate's version to the contract's and force a breaking client-crate release
+on every contract redeploy — already done twice), the crate wraps them in its
+own stable types. This survives a contract redeploy without a breaking
+client-crate release each time.
 
-**Breaking changes:** `set_admin()` now schedules a delayed rotation instead
-of changing the admin immediately. From v0.2.0, `unstake` is replaced by
-`begin_unstake` + `complete_unstake`, `Status` gains `Migrated`, and the
-`Stake` storage value is now a `StakeInfo` struct. A v0.2.0 instance
-can't be upgraded in place (it has no upgrade entrypoint), so moving to
-v0.3 means deploying fresh and draining v0.2.0 with the orchestrator's
-legacy refund mode (see docs/migration.md).
+### Usage
 
-## Running it
+A minimal example equivalent to `test.rs`'s `setup()`/`client()` pattern,
+demonstrating `submit`/`resolve`/`refund` against a running contract:
 
-```sh
-cargo test        # no chain needed; includes the v0.2.0-vs-now simulations
-python3 sim/slashing_model.py --check
-stellar contract build   # produces a real deployable WASM binary
+```rust
+use oracle_escrow_client::{Client, Status};
+
+// Equivalent to test.rs's setup(): deploy the contract and build a client.
+let client = Client::new(&env, &contract_id);
+
+// submit
+let question_id = client.submit(&asker, &question, &reward);
+
+// resolve
+client.resolve(&oracle, &question_id, &answer);
+assert_eq!(client.status(&question_id), Status::Resolved);
+
+// refund
+client.refund(&asker, &question_id);
+assert_eq!(client.status(&question_id), Status::Refunded);
 ```
 
-### Deploying a fresh instance
+### Out of scope
 
-Deploy the built WASM, then call `initialize()` once to populate the
-contract's config (admin, USDC token, platform fee recipient, and the
-timeout window in ledgers). Every other repo assumes an already-populated
-`ORACLE_CONTRACT_ID` — this is where that value comes from.
-
-```sh
-# 1. Deploy the WASM and capture the new contract id.
-CONTRACT_ID=$(stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --source <ADMIN_SECRET_KEY> \
-  --network testnet)
-echo "ORACLE_CONTRACT_ID=$CONTRACT_ID"
-
-# 2. Initialize it (constructor-style args: admin, token, platform, timeout_ledgers).
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --source <ADMIN_SECRET_KEY> \
-  --network testnet \
-  -- initialize \
-  --admin <ADMIN_ADDRESS> \
-  --token <USDC_TOKEN_CONTRACT_ID> \
-  --platform <PLATFORM_FEE_ADDRESS> \
-  --timeout_ledgers 17280
-```
-
-Verified deployed and exercised end to end on Stellar testnet — real
-`submit()`/`resolve()`/`withdraw()` calls, fee math confirmed on-chain
-down to the dust stroop. (That run predates this repo's split; see
-"Round 6" in the archived
-[`arbiter`](https://github.com/rudeus112266/arbiter) monorepo README for
-the full write-up.)
-
-## Handsoff notes
-
-<!-- handsoff-issue-25 -->
-- #25: touch()'s TTL sweep never reaches a worker who only ever calls stake() — their Stake entry has no renewal path
-
-<!-- handsoff-issue-27 -->
-- #27: No test proves an admin-gated function actually rejects a non-admin caller — mock_all_auths() hides a dropped require_auth()
-
-<!-- handsoff-issue-28 -->
-- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
+Building a Rust backend to actually consume this crate — that's a separate,
+much larger effort.
