@@ -18,6 +18,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test
+      - name: Doc-comment coverage lint
+        # Enforces rustdoc's missing-docs lint on the crate so undocumented
+        # public items (e.g. get_balance, get_stake, get_owed) are caught in
+        # CI instead of relying on a reviewer to notice the gap.
+        run: RUSTFLAGS="-D missing_docs" cargo check --lib
       - name: Slashing model claims
         # Asserts every number docs/economics/slashing-threat-model.md cites
         # from the closed-form model, and that the committed tables are
@@ -60,23 +65,15 @@ jobs:
         # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
         # hand, not a gate. See docs/RESOURCE_LIMITS.md.
         run: cargo test -- --ignored --skip bench_ --nocapture
-      - name: Resource benchmark harness
-        # Runs the public benchmark harness (issue #65): every public entry
-        # point is exercised under the Soroban test environment's budget
-        # tracking, and resolve() is swept across several workers.len()
-        # values so validate_worker_lists()'s O(n^2) duplicate check is
-        # measured rather than assumed. The harness writes a diffable
-        # markdown table to docs/benchmarks.md; this job fails if the
-        # committed table is stale, so cost changes are visible per commit.
+      - name: Gas-cost regression gate
+        # Runs the #65 benchmark harness and compares each measured function's
+        # instruction count against the committed baseline in
+        # bench/baseline.json. Fails if any function grows past the configured
+        # threshold. To accept a deliberate, justified cost increase, regenerate
+        # the baseline with `cargo run --release --bin bench -- --emit-baseline`
+        # and commit the diff (see docs/RESOURCE_LIMITS.md).
         run: |
-          cargo test --test benchmarks -- --ignored --nocapture
-          if ! git diff --quiet -- docs/benchmarks.md; then
-            echo "::error::docs/benchmarks.md is stale; run 'cargo test --test benchmarks -- --ignored' locally and commit the updated table"
-            git --no-pager diff -- docs/benchmarks.md
-            exit 1
-          fi
-          echo "### Resource benchmarks" >> "$GITHUB_STEP_SUMMARY"
-          cat docs/benchmarks.md >> "$GITHUB_STEP_SUMMARY"
+          cargo run --release --bin bench -- --check-baseline bench/baseline.json
       - name: Deep property-based fuzz run
         run: cargo test escrow_invariant_holds_for_every_call_sequence
         env:

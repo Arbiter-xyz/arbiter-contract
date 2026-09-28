@@ -40,6 +40,21 @@ small-quorum regime the contract is designed for and to make the O(n²) term vis
 | Case | `workers.len()` | `losing_workers.len()` |
 |------|-----------------|------------------------|
 | S    | 2               | 1                      |
+| M    | 5               | 2        
+
+```sh
+cargo bench --features testutils
+```
+
+## Representative inputs
+
+Cost depends on caller-controlled `Vec` sizes for `resolve()` and
+`validate_worker_lists()`. The harness uses the following sizes, chosen to span the
+small-quorum regime the contract is designed for and to make the O(n²) term visible:
+
+| Case | `workers.len()` | `losing_workers.len()` |
+|------|-----------------|------------------------|
+| S    | 2               | 1                      |
 | M    | 5               | 2                      |
 | L    | 10              | 5                      |
 

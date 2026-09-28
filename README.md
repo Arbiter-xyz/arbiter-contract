@@ -50,6 +50,17 @@ contract instance actually matches the tagged source.
 - **Accrued-balance settlement**: matching workers are credited, not paid
   directly — `withdraw()` collects everything in one transaction whenever
   they choose, instead of one payout per question.
+- **Allowlisted multi-asset settlement**: admins explicitly approve SEP-41
+  tokens; each question, worker credit, prepaid balance, and stake remains
+  denominated in exactly one token. `get_asset_decimals()` reports native
+  units, with no implicit decimal conversion. See
+  [docs/MULTI_ASSET_AND_ADMIN_ROTATION.md](docs/MULTI_ASSET_AND_ADMIN_ROTATION.md).
+- **Delayed admin rotation**: `set_admin()` now announces a cancellable
+  rotation, waits eight days, and requires both incumbent and successor
+  authorization to execute. Ordinary admin actions are not a multisig.
+- **Settlement observability**: inputs and relevant state are public; exact
+  fees and payouts are derivable before settlement. See
+  [docs/SETTLEMENT_OBSERVABILITY.md](docs/SETTLEMENT_OBSERVABILITY.md).
 - **Bounded quorum**: `resolve()` accepts at most `MAX_QUORUM_SIZE` (64)
   workers + losing workers and rejects anything larger with
   `QuorumTooLarge`. The cap comes from measuring the real WASM against
@@ -67,18 +78,28 @@ contract instance actually matches the tagged source.
 
 ## Methods
 
-`initialize` · `submit` · `deposit` · `withdraw_balance` · `charge` ·
-`resolve` · `refund` · `refund_timeout` · `set_admin` · `set_timeout_ledgers` ·
-`stake` · `begin_unstake` · `complete_unstake` · `withdraw` · `withdraw_to` ·
-`touch` · `touch_question` · `list_pending` · `pending_count` ·
+`initialize` · `submit` · `submit_asset` · `deposit` · `deposit_asset` ·
+`withdraw_balance` · `withdraw_balance_asset` · `charge` · `charge_asset` ·
+`resolve` · `refund` · `refund_timeout` · `set_admin` ·
+`propose_admin_rotation` · `cancel_admin_rotation` · `execute_admin_rotation` ·
+`get_pending_admin_rotation` ·
+`set_asset_allowed` · `set_timeout_ledgers` · `stake` · `stake_asset` ·
+`begin_unstake` · `begin_unstake_asset` · `complete_unstake` ·
+`complete_unstake_asset` · `withdraw` · `withdraw_asset` · `withdraw_to` ·
+`withdraw_to_asset` · `touch` · `touch_asset` · `touch_question` · `list_pending` · `pending_count` ·
 `set_migration_source` · `clear_migration_source` · `migrate_pending` ·
 `import_question` · `get_question` · `get_owed` · `get_stake` ·
-`get_matured_stake` · `get_stake_info` · `get_balance` · `get_token` ·
+`get_matured_stake` · `get_stake_info` · `get_stake_asset` ·
+`get_matured_stake_asset` · `get_stake_info_asset` · `get_balance` ·
+`get_balance_asset` · `get_owed_asset` · `get_asset_decimals` ·
+`is_asset_allowed` · `get_question_token` · `get_token` ·
 `get_migration_source` · `get_timeout_ledgers`
 
-Events: `question_opened`, `question_settled`, `question_migrated`.
+Events: `question_opened`, `question_settled`, `question_migrated`,
+`asset_permission_changed`, and admin-rotation events.
 
-**Breaking changes from v0.2.0:** `unstake` is replaced by
+**Breaking changes:** `set_admin()` now schedules a delayed rotation instead
+of changing the admin immediately. From v0.2.0, `unstake` is replaced by
 `begin_unstake` + `complete_unstake`, `Status` gains `Migrated`, and the
 `Stake` storage value is now a `StakeInfo` struct. A v0.2.0 instance
 can't be upgraded in place (it has no upgrade entrypoint), so moving to
@@ -158,6 +179,24 @@ build.
 
 <!-- handsoff-issue-28 -->
 - #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
+
+<!-- handsoff-issue-21 -->
+- #21: touch() rewrites unchanged Owed/Stake values before extending TTL, costing an avoidable write fee
+
+<!-- handsoff-issue-24 -->
+- #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
+
+<!-- handsoff-issue-46 -->
+- #46: Emergency pause switch
+
+<!-- handsoff-issue-47 -->
+- #47: Proxy/versioned upgrade path
+
+<!-- handsoff-issue-51 -->
+- #51: Time-locked large withdrawals
+
+<!-- handsoff-issue-52 -->
+- #52: Withdrawal destination allowlist
 
 <!-- handsoff-issue-62 -->
 - #62: Mutation testing pass
