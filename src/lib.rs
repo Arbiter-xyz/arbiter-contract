@@ -111,6 +111,13 @@ pub enum Status {
     /// like Resolved/Refunded — the funds and the obligation now live in
     /// the target contract, under the same question_id.
     Migrated,
+    /// #97 dispute-window finality: set by resolve_challengeable() instead
+    /// of Resolved. Nothing has been credited or slashed yet — the actual
+    /// worker lists and payout are held in DataKey::PendingResolution until
+    /// finalize_resolve() (after the dispute window, if undisputed) moves
+    /// the question to Resolved. Distinct from Pending: refund()/
+    /// refund_timeout() no longer apply once a resolution is in flight.
+    ResolvedPending,
 }
 
 #[contracttype]
@@ -203,6 +210,19 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// #95 refund-risk underwriting: admin-approved address allowed to call
+    /// instant_refund(). Value is a bool flag (true = currently approved).
+    Underwriter(Address),
+    /// #96 worker-diversity: admin-attested source-diversity tag for a
+    /// worker (e.g. a region/network-origin code). The admin is the trust
+    /// anchor here rather than a third-party attestation protocol — see
+    /// docs-maintainer-notes/valreb001.md and the PR description for why
+    /// this is scoped down from a real oracle integration.
+    WorkerRegion(Address),
+    /// #97 dispute-window finality: the not-yet-credited resolution recorded
+    /// by resolve_challengeable(), keyed by question_id. Holds the worker
+    /// lists, the dispute deadline and whether it's been disputed.
+    PendingResolution(u64),
     /// A worker's registered secp256r1 public key (SEC-1-encoded, 65
     /// bytes), used by verify_passkey_auth() as a simplified stand-in for a
     /// full WebAuthn/passkey ceremony — see the doc comment on
@@ -258,26 +278,50 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    /// #95: instant_refund() called by an address the admin hasn't
+    /// approved via approve_underwriter().
+    NotUnderwriter = 20,
+    /// #96: resolve_diverse() rejected a worker with no admin-attested
+    /// WorkerRegion tag.
+    UnattestedWorker = 21,
+    /// #96: resolve_diverse()'s `workers` list didn't cover at least
+    /// `min_distinct_regions` distinct attested regions.
+    InsufficientDiversity = 22,
+    /// #97: dispute_resolve()/finalize_resolve() called on a question with
+    /// no in-flight PendingResolution (never went through
+    /// resolve_challengeable(), or already finalized).
+    NoPendingResolution = 23,
+    /// #97: finalize_resolve() called before its dispute window elapsed.
+    DisputeWindowNotElapsed = 24,
+    /// #97: finalize_resolve() called on a resolution a dispute_resolve()
+    /// call already flagged; an admin must resolve the dispute out of band
+    /// (see the Out of scope note on resolve_challengeable()).
+    QuestionDisputed = 25,
+    /// #98: resolve_median() called with an empty answer set.
+    EmptyAnswerSet = 26,
+    /// #98: resolve_median()'s answer set names the same worker Address
+    /// more than once.
+    DuplicateAnswerAddress = 27,
     /// verify_passkey_auth() called before register_passkey() for this
     /// worker.
-    PasskeyNotRegistered = 20,
+    PasskeyNotRegistered = 28,
     /// The secp256r1 signature did not verify against the worker's
     /// registered passkey public key.
-    InvalidPasskeySignature = 21,
+    InvalidPasskeySignature = 29,
     /// attest_kyc() called before set_kyc_attestor() configured a trusted
     /// attestor public key.
-    KycAttestorNotSet = 22,
+    KycAttestorNotSet = 30,
     /// The expiry ledger passed to attest_kyc() is not in the future.
-    InvalidKycExpiry = 23,
+    InvalidKycExpiry = 31,
     /// get_historical_stake() found no snapshot for that worker at that
     /// exact ledger.
-    StakeSnapshotNotFound = 24,
-    AssetNotAllowed = 25,
-    NoAdminRotationPending = 26,
-    AdminRotationNotReady = 27,
-    CannotDisableDefaultAsset = 28,
-    ArithmeticOverflow = 29,
-    AssetLimitReached = 30,
+    StakeSnapshotNotFound = 32,
+    AssetNotAllowed = 33,
+    NoAdminRotationPending = 34,
+    AdminRotationNotReady = 35,
+    CannotDisableDefaultAsset = 36,
+    ArithmeticOverflow = 37,
+    AssetLimitReached = 38,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -314,6 +358,90 @@ pub struct QuestionMigrated {
     pub target: Address,
     pub token: Address,
     pub amount: i128,
+}
+
+/// #95: fee (basis points, deducted from the refunded amount) paid to a
+/// registered underwriter for fronting an instant refund before a question's
+/// permissionless refund_timeout() deadline. See docs-maintainer-notes for
+/// why this is scoped as "an earlier, fee-bearing refund path" rather than
+/// a separately-funded insurance pool (the issue itself flags the latter as
+/// an unresolved design question, out of scope here).
+const UNDERWRITER_FEE_BPS: i128 = 500;
+
+/// Emitted when the admin approves or revokes an underwriter (#95).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnderwriterStatusChanged {
+    #[topic]
+    pub underwriter: Address,
+    pub approved: bool,
+}
+
+/// Emitted when a registered underwriter fronts an instant refund (#95).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstantRefundFronted {
+    #[topic]
+    pub question_id: u64,
+    pub underwriter: Address,
+    pub fee: i128,
+}
+
+/// Emitted when the admin attests a worker's source-diversity region (#96).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerRegionAttested {
+    #[topic]
+    pub worker: Address,
+    pub region: Symbol,
+}
+
+/// #97: the not-yet-credited resolution recorded by resolve_challengeable(),
+/// awaiting either a dispute_resolve() flag or finalize_resolve() after the
+/// window elapses.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingResolution {
+    pub workers: Vec<Address>,
+    pub losing_workers: Vec<Address>,
+    pub dispute_deadline: u32,
+    pub disputed: bool,
+}
+
+/// Emitted when resolve_challengeable() opens a dispute window (#97).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionChallengeable {
+    #[topic]
+    pub question_id: u64,
+    pub dispute_deadline: u32,
+}
+
+/// Emitted when dispute_resolve() flags an in-flight resolution (#97).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionDisputed {
+    #[topic]
+    pub question_id: u64,
+}
+
+/// #98: one worker's numeric answer, as passed to resolve_median(). A
+/// struct (rather than a bare tuple) so it derives #[contracttype] cleanly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerEntry {
+    pub worker: Address,
+    pub value: i128,
+}
+
+/// Emitted when resolve_median() computes its median (#98).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MedianComputed {
+    #[topic]
+    pub question_id: u64,
+    pub median: i128,
+    pub winners: u32,
 }
 
 /// Emitted by register_passkey() when a worker binds (or replaces) a
@@ -374,6 +502,7 @@ pub struct AdminRotationCancelled {
 pub struct AdminRotationExecuted {
     #[topic]
     pub new_admin: Address,
+}
 }
 
 #[contract]
@@ -2151,6 +2280,37 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// Simple insertion sort (O(n^2), fine for resolve()-sized quorums; see
+    /// MAX_QUORUM_SIZE) into a scratch Vec<i128>, then picks the middle
+    /// element(s). No `std::sort`/new dependency needed.
+    fn compute_median(env: &Env, answers: &Vec<AnswerEntry>) -> i128 {
+        let mut values: Vec<i128> = Vec::new(env);
+        for entry in answers.iter() {
+            let mut inserted = false;
+            let mut i = 0u32;
+            while i < values.len() {
+                if entry.value < values.get(i).unwrap() {
+                    values.insert(i, entry.value);
+                    inserted = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !inserted {
+                values.push_back(entry.value);
+            }
+        }
+        let n = values.len();
+        if n % 2 == 1 {
+            values.get(n / 2).unwrap()
+        } else {
+            let a = values.get(n / 2 - 1).unwrap();
+            let b = values.get(n / 2).unwrap();
+            // Integer average, rounding toward zero — floats are never used.
+            (a + b) / 2
+        }
+    }
+
     /// Whether `subject` currently holds an unexpired KYC attestation.
     /// Informational only — see attest_kyc()'s doc comment.
     pub fn is_kyc_verified(env: Env, subject: Address) -> bool {
@@ -2221,3 +2381,11 @@ mod test_snapshot;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
+#[cfg(test)]
+mod test_refund_underwriting;
+#[cfg(test)]
+mod test_worker_diversity;
+#[cfg(test)]
+mod test_dispute_finality;
+#[cfg(test)]
+mod test_median_consensus;
