@@ -1355,6 +1355,8 @@ impl OracleEscrow {
 #[cfg(test)]
 mod test;
 #[cfg(test)]
+mod test_account_abstraction;
+#[cfg(test)]
 mod test_economics;
 #[cfg(test)]
 mod test_migration;
