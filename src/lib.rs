@@ -198,6 +198,11 @@ pub enum DataKey {
     /// of supplying a caller-chosen amount. Admin-managed. Advisory-only
     /// quorum_hint (see QuestionTemplate) — not enforced by this contract.
     Template(u32),
+    /// #89: `owner` has pre-authorized `delegate` to call
+    /// submit_as_delegate() on their behalf, up to this much cumulative
+    /// i128 amount (decremented per use, mirroring a capped allowance
+    /// rather than unlimited authority).
+    Delegate(Address, Address),
 }
 
 #[contracterror]
@@ -233,6 +238,10 @@ pub enum ContractError {
     /// #88: submit_from_template()/register_template() referenced a
     /// template_id with no registered QuestionTemplate.
     TemplateNotFound = 301,
+    /// #89: submit_as_delegate() called by an address with no active
+    /// delegation from `payer`, or whose remaining capped allowance is
+    /// less than the requested amount.
+    DelegateNotAuthorized = 302,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -301,6 +310,25 @@ pub struct TemplateRegistered {
     pub template_id: u32,
     pub price: i128,
     pub quorum_hint: u32,
+}
+
+/// Emitted by grant_delegate() (#89).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegateGranted {
+    #[topic]
+    pub owner: Address,
+    pub delegate: Address,
+    pub cap: i128,
+}
+
+/// Emitted by revoke_delegate() (#89).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegateRevoked {
+    #[topic]
+    pub owner: Address,
+    pub delegate: Address,
 }
 
 #[contract]
@@ -1550,6 +1578,112 @@ impl OracleEscrow {
 
         Self::open_question(&env, payer, question_id, template.price)
     }
+
+    // ---- #89: delegated pre-authorization -------------------------------
+    //
+    // Bespoke DataKey::Delegate allowlist, not Soroban native custom-account
+    // auth (the issue's own open question 1) — a custom-account contract is
+    // a separate project per the issue's explicit out-of-scope line, so this
+    // stays entirely inside OracleEscrow. The allowance is CAPPED and
+    // decremented per use (open question 2), never unlimited, mirroring how
+    // deposit()'s Balance already caps what charge() can draw down.
+    //
+    // submit_as_delegate() below is fully additive — it does not touch
+    // submit()'s own `payer.require_auth()` line. A delegate cannot make
+    // Soroban treat itself as having signed for `payer`'s address, so
+    // letting a delegate open a question on a payer's behalf still needs
+    // the payer's authorization for the token movement itself; this is
+    // obtained via the token's standard SEP-41 `approve()`/`transfer_from()`
+    // allowance (the payer calls token.approve() once, off this contract,
+    // naming this contract as spender) rather than by weakening submit()'s
+    // require_auth(). This is the one deliberate simplification versus the
+    // "OR condition inside an existing function" pattern flagged as
+    // possibly needed in this issue's scoping notes: it was judged safer
+    // than editing submit()'s auth path, since submit() has no delegate
+    // address parameter to check require_auth() against in the first place,
+    // and this approach adds zero risk to the existing submit()/stake()
+    // code paths.
+
+    /// Payer pre-authorizes `delegate` to open up to `cap` (cumulative,
+    /// decremented per submit_as_delegate() call) on their behalf.
+    pub fn grant_delegate(
+        env: Env,
+        owner: Address,
+        delegate: Address,
+        cap: i128,
+    ) -> Result<(), ContractError> {
+        owner.require_auth();
+        if cap <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let key = DataKey::Delegate(owner.clone(), delegate.clone());
+        Self::set_persistent(&env, &key, &cap);
+        Self::bump_instance(&env);
+        DelegateGranted {
+            owner,
+            delegate,
+            cap,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Payer instantly revokes a delegate — answering the issue's open
+    /// question 3. Effective from this transaction: a delegate's next
+    /// submit_as_delegate() call re-reads the (now-absent) allowance.
+    pub fn revoke_delegate(env: Env, owner: Address, delegate: Address) -> Result<(), ContractError> {
+        owner.require_auth();
+        let key = DataKey::Delegate(owner.clone(), delegate.clone());
+        env.storage().persistent().remove(&key);
+        Self::bump_instance(&env);
+        DelegateRevoked { owner, delegate }.publish(&env);
+        Ok(())
+    }
+
+    /// Remaining capped allowance `delegate` has from `owner` (0 if none).
+    pub fn is_delegate(env: Env, owner: Address, delegate: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Delegate(owner, delegate))
+            .unwrap_or(0)
+    }
+
+    /// Delegate opens `question_id` for `payer`, signing themselves instead
+    /// of requiring a fresh `payer` signature — the core ask of #89. Draws
+    /// down `payer`'s token allowance to this contract (see the module note
+    /// above) rather than `payer`'s own signed transfer, and decrements the
+    /// delegate's capped allowance by `amount`, exhausting it exactly at
+    /// zero (the issue's "capped and exhausts correctly" acceptance
+    /// criterion).
+    pub fn submit_as_delegate(
+        env: Env,
+        delegate: Address,
+        payer: Address,
+        question_id: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        delegate.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let key = DataKey::Delegate(payer.clone(), delegate.clone());
+        let remaining: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount > remaining {
+            return Err(ContractError::DelegateNotAuthorized);
+        }
+        Self::set_persistent(&env, &key, &(remaining - amount));
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer_from(
+            &delegate,
+            &payer,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        Self::open_question(&env, payer, question_id, amount)
+    }
 }
 
 #[cfg(test)]
@@ -1564,3 +1698,5 @@ mod test_ttl;
 mod test_reopen_question;
 #[cfg(test)]
 mod test_question_templates;
+#[cfg(test)]
+mod test_delegated_auth;
