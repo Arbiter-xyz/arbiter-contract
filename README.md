@@ -137,3 +137,6 @@ the full write-up.)
 
 <!-- handsoff-issue-28 -->
 - #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
+
+<!-- handsoff-issue-62 -->
+- #62: Mutation testing pass
