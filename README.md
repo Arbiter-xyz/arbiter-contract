@@ -146,3 +146,6 @@ the full write-up.)
 
 <!-- handsoff-issue-51 -->
 - #51: Time-locked large withdrawals
+
+<!-- handsoff-issue-52 -->
+- #52: Withdrawal destination allowlist
