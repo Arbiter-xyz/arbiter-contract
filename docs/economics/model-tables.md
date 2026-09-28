@@ -99,3 +99,57 @@ Break-even stake on v0.2.0 (EV turns negative above it): 0.25 USDC question → 
 | 1 | 0 | 0.05 | 0 | 0.0009 |
 | 10 | 0 | 0.25 | 0 | 0.0088 |
 | 100 | 0 | 0.25 | 0 | 0.0877 |
+
+## A4 — fee-discount auction (issue #101, gated on #117)
+
+Modeling only — no contract change is scoped until the #117 incentive-alignment
+simulation is published and reviewed. `resolve()` keeps its uniform split
+(`share = pool / n`, dust to platform) as the default; a discount auction is a
+dispatch-time (backend) concept and must not make `PLATFORM_FEE_BPS` variable.
+
+### A4.1 — does a discount auction race workers to zero margin?
+
+Each matching worker bids a discount `d ∈ [0, 1]` off its theoretical equal
+share `pool / n`. With `n` workers and a lowest-bid-wins (or share-weighted)
+rule, the symmetric Nash bid is `d* = 0` whenever the marginal cost of
+answering is zero and capacity is unconstrained: any worker can undercut by
+`ε` and capture the whole pool, so the auction collapses to the reserve price.
+
+| regime | reserve (min share) | equilibrium discount | worker margin |
+|---|---|---|---|
+| unconstrained capacity, no reserve | 0 | → 100% (zero margin) | 0 |
+| reserve = honest-error cost (A0) | `c_err` | `d* = 1 - c_err/(pool/n)` | `c_err` |
+| reserve = stake-weighted floor | `f(stake)` | `d* = 1 - f(stake)/(pool/n)` | `f(stake)` |
+
+Conclusion: without a reserve tied to the A0 honest-error cost, the auction
+races margin to zero and destroys the credibility signal staking (#102/#103/#126)
+is meant to provide — a worker with nothing at stake can bid `d = 1` and still
+break even. A reserve floor `≥ c_err` is a precondition for any implementation.
+
+### A4.2 — does the platform capture the discount, or redistribute it?
+
+| routing | discount destination | effect on `PLATFORM_FEE_BPS` | interaction with #128 |
+|---|---|---|---|
+| platform captures | treasury | effective fee becomes variable | conflicts with fixed-bps design; double-counts #128 |
+| redistribute to matching workers | worker pool | fee stays fixed at 20% | neutral; #128 routes the fixed 20% separately |
+
+Conclusion: the discount must be redistributed among matching workers only.
+Capturing it would make the platform fee variable, which the fixed-bps design
+deliberately avoids, and would collide with #128's public-goods routing of the
+fixed fee. `PLATFORM_FEE_BPS` and `SLASH_BPS` stay constant.
+
+### A4.3 — on-chain vs off-chain bidding
+
+| dimension | on-chain bids | off-chain bids, final shares to `resolve()` |
+|---|---|---|
+| verifiability | per-bid, fully verifiable | only final shares verifiable |
+| cost | one tx per bid | one tx per quorum |
+| trust | none beyond contract | re-introduces admin-arithmetic trust |
+| contract change | bidding state machine | `resolve()` accepts per-worker shares |
+
+Conclusion: off-chain bidding with final shares submitted to `resolve()` is
+cheaper but re-introduces the "contract trusts admin's arithmetic" pattern
+`resolve()` already has for the address-list split. If implemented, `resolve()`
+should accept per-worker share amounts and only validate that they sum to
+`pool` (rejecting otherwise), rather than computing shares itself. This is
+out of scope until #117 is published and reviewed.

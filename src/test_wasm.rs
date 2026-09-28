@@ -9,8 +9,8 @@ use std::{format, path::PathBuf, vec::Vec};
 
 /// The deployable contract, exactly as `stellar contract build` emits it.
 pub const RELEASE: &str = "target/wasm32v1-none/release/oracle_escrow.wasm";
-/// Same source built with `--features upgrade-test-v2` (version() == 2).
-pub const UPGRADE_V2: &str = "target/upgrade-test-v2/wasm32v1-none/release/oracle_escrow.wasm";
+/// Same source built with `--features upgrade-test-v3` (version() == 3).
+pub const UPGRADE_V3: &str = "target/upgrade-test-v3/wasm32v1-none/release/oracle_escrow.wasm";
 /// Same source built with `--features bench-uncapped-quorum`.
 pub const UNCAPPED_QUORUM: &str = "target/bench-uncapped-quorum/wasm32v1-none/release/oracle_escrow.wasm";
 

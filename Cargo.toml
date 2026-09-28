@@ -1,6 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "contracts/oracle-escrow",
+    "contracts/fee-vesting",
+]
+
+[workspace.dependencies]
+soroban-sdk = "23"
+
 [package]
 name = "oracle-escrow"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -10,34 +20,50 @@ crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
-soroban-sdk = "23"
+soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
 serde_json = "1"
-soroban-sdk = { version = "23", features = ["testutils"] }
+soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
 # Test fixtures only, built by scripts/build-wasm.sh. Never deploy either.
-# The "v2" contract for the upgrade worked example (version() == 2).
-upgrade-test-v2 = []
+# The "v3" contract for the upgrade worked example (version() == 3).
+upgrade-test-v3 = []
 # Lifts MAX_QUORUM_SIZE so the resource sweep can measure past it.
 bench-uncapped-quorum = []
 
+# Public benchmark harness (issue #65). `cargo bench` runs the budget-tracking
+# harness in benches/resources.rs, which records per-entry-point instruction
+# counts and writes the diffable table in benches/results.md.
+[[bench]]
+name = "resources"
+harness = false
+
+# Size-oriented release profile (issue #64). `stellar contract build` compiles
+# with this profile and then runs wasm-opt, so the deployed bytecode is the
+# post-wasm-opt artifact. These settings are the size budget's first line of
+
+
+# Public benchmark harness (issue #65). `cargo bench` runs the budget-tracking
+# harness in benches/resources.rs, which records per-entry-point instruction
+# counts and writes the diffable table in benches/results.md.
+[[bench]]
+name = "resources"
+harness = false
+
+# Size-oriented release profile (issue #64). `stellar contract build` compiles
+# with this profile and then runs wasm-opt, so the deployed bytecode is the
+# post-wasm-opt artifact. These settings are the size budget's first line of
+# defense; the measured size is recorded in the README and surfaced by CI.
 [profile.release]
 opt-level = "z"
 overflow-checks = true
-debug = 0
+debug = false
 strip = "symbols"
 debug-assertions = false
-panic = "abort"
 codegen-units = 1
 lto = true
-
-# The economics simulations drive the v0.2.0 Wasm through thousands of
-# invocations; an unoptimized wasmi/host makes that take minutes. Optimizing
-# dependencies (not this crate) keeps `cargo test` fast without changing what
-# the tests compile.
-[profile.dev.package."*"]
-opt-level = 2
+panic = "abort"
