@@ -65,7 +65,7 @@ routing new ones.
   whole transaction rolls back. The proposal is still there, the old code
   still runs and every question still settles.
   (`a_failed_upgrade_is_fully_rolled_back`,
-  `upgrading_to_a_hash_that_was_never_uploaded_leaves_v1_running`.)
+  `upgrading_to_a_hash_that_was_never_uploaded_leaves_v2_running`.)
 - **The code swap is a single transaction.** Nothing exists partway
   between "all old code" and "all new code".
 
@@ -86,7 +86,7 @@ Rules for the next version:
    test covers. **Adding** `DataKey` variants, error codes or entrypoints
    is fine.
 2. New per-question data goes in a new key (for example
-   `DataKey::QuestionExt(u64)`), not in new `Question` fields. Or add a new
+  `AssetKey::QuestionToken(u64)`), not in new `Question` fields. Or add a new
    versioned type that the code reads with a fallback to the old one.
 3. Migrations must be lazy: read the old format, write the new one when
    touched. An eager migration pass would need a window where un-migrated
@@ -99,21 +99,21 @@ Rules for the next version:
 
 ### Worked example
 
-`worked_example_v1_to_v2_with_pending_questions` runs on real WASM. v1 is
-the deployable build; v2 is the same source built with `--features
-upgrade-test-v2`, so `version()` returns 2. The test:
+`worked_example_v2_to_v3_with_pending_questions` runs on real WASM. v2 is
+the deployable build; v3 is the same source built with `--features
+upgrade-test-v3`, so `version()` returns 3. The test:
 
-1. deploys v1 and creates: a resolved question (owed carried across), a
+1. deploys v2 and creates: a resolved question (owed carried across), a
    pending `submit()`, a pending `charge()` from a prepaid deposit, a
    staked worker, and a question that later escapes by timeout;
-2. proposes v2 (uploaded), opens one question during the delay and one
+2. proposes v3 (uploaded), opens one question during the delay and one
    close to `executable_at` (clamped to a 9-ledger window). The escaping
-   question's payer calls `refund_timeout()` under v1; an early
+  question's payer calls `refund_timeout()` under v2; an early
    `execute_upgrade()` is rejected;
-3. executes. `version()` is 2 at the same address, and every question,
+3. executes. `version()` is 3 at the same address, and every question,
    owed balance, stake, prepaid balance and the token balance are
    identical;
-4. under v2: resolves (with a slash), admin-refunds, resolves the
+4. under v3: resolves (with a slash), admin-refunds, resolves the
    mid-delay question and timeout-refunds the clamped one. A second
    settlement of any question fails;
 5. drains: every worker withdraws, the staker unstakes, the payer
@@ -187,8 +187,11 @@ The same steps with `--network mainnet`, plus:
   unmodified.
 - Announce publicly when proposing: hash, source tag, `executable_at`,
   and how to verify (`shasum -a 256` of a reproducible `stellar contract
-  build`). Watch for `upgrade_proposed` events you didn't send; that's a
-  compromised key, and the response is `cancel_upgrade` plus `set_admin`.
+  build`). Watch for `upgrade_proposed` events you didn't send and cancel
+  them. `set_admin(new_admin)` is itself a delayed, cancellable rotation;
+  execution requires both the current and proposed admins to authorize.
+  This protects rotation, not ordinary admin calls. Use a multisig contract
+  account if ordinary settlement authority also needs a threshold.
 - The backend should expect `UpgradeInProgress` from `submit()`/`charge()`
   in the last ledger before `executable_at`, and shorter question
   timeouts during the delay. Treat both as "retry after the upgrade".
