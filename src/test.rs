@@ -117,6 +117,59 @@ pub(crate) fn setup() -> Fixture {
     }
 }
 
+fn setup_large_values() -> Fixture {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let platform = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token_address = env.register(SixDecimalAsset, ());
+    let contract_id = env.register(OracleEscrow, ());
+    OracleEscrowClient::new(&env, &contract_id).initialize(
+        &admin,
+        &token_address,
+        &platform,
+        &TIMEOUT_LEDGERS,
+    );
+    Fixture {
+        env,
+        contract_id,
+        admin,
+        platform,
+        payer,
+        token_address,
+    }
+}
+
+fn contract_events(
+    f: &Fixture,
+) -> std::vec::Vec<(
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+)> {
+    f.env
+        .events()
+        .all()
+        .iter()
+        .filter_map(|(emitter, topics, data)| {
+            (emitter == &f.contract_id).then(|| (topics.clone(), data.clone()))
+        })
+        .collect()
+}
+
+fn last_contract_event(
+    f: &Fixture,
+) -> (
+    soroban_sdk::Vec<soroban_sdk::Val>,
+    soroban_sdk::Val,
+) {
+    contract_events(f).pop().unwrap()
+}
+
+fn event_name(f: &Fixture, topics: &soroban_sdk::Vec<soroban_sdk::Val>) -> Symbol {
+    topics.get(0).unwrap().into_val(&f.env)
+}
+
 pub(crate) fn client(f: &Fixture) -> OracleEscrowClient<'_> {
     OracleEscrowClient::new(&f.env, &f.contract_id)
 }
@@ -139,6 +192,13 @@ fn submit_locks_funds() {
     let q = c.get_question(&1);
     assert_eq!(q.amount, AMOUNT);
     assert_eq!(q.status, Status::Pending);
+
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_opened"));
+    assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "payer")).unwrap().into_val(&f.env), f.payer);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), AMOUNT);
 }
 
 #[test]
@@ -158,6 +218,20 @@ fn submit_zero_or_negative_amount_fails() {
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
     let res = c.try_submit(&f.payer, &2, &-1);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
+}
+
+#[test]
+fn charge_zero_or_negative_amount_fails() {
+    let f = setup();
+    let c = client(&f);
+    assert_eq!(
+        c.try_charge(&f.payer, &1, &0),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(
+        c.try_charge(&f.payer, &2, &-1),
+        Err(Ok(ContractError::InvalidAmount))
+    );
 }
 
 #[test]
@@ -214,6 +288,57 @@ fn resolve_sends_dust_to_platform_when_pool_does_not_divide_evenly() {
 }
 
 #[test]
+fn resolve_with_worker_count_exceeding_pool_leaves_each_worker_credited_zero() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &7);
+    let worker_list = Vec::from_array(
+        &f.env,
+        [
+            Address::generate(&f.env),
+            Address::generate(&f.env),
+            Address::generate(&f.env),
+            Address::generate(&f.env),
+            Address::generate(&f.env),
+            Address::generate(&f.env),
+            Address::generate(&f.env),
+        ],
+    );
+    c.resolve(&1, &worker_list, &Vec::new(&f.env));
+
+    for worker in worker_list.iter() {
+        assert_eq!(c.get_owed(&worker), 0);
+    }
+    // The fee is 1, the after-fee pool is 6, and all 6 land on the
+    // platform as dust because the quorum has seven workers.
+    assert_eq!(token_client(&f).balance(&f.platform), 7);
+    assert_eq!(c.get_question(&1).status, Status::Resolved);
+}
+
+#[test]
+fn resolve_fee_computation_does_not_silently_overflow_near_i128_max() {
+    let f = setup_large_values();
+    let c = client(&f);
+    let amount = i128::MAX;
+    let token = SixDecimalAssetClient::new(&f.env, &f.token_address);
+    token.mint(&f.payer, &amount);
+    c.submit(&f.payer, &1, &amount);
+
+    let fee = (amount / BPS_DENOM) * PLATFORM_FEE_BPS
+        + (amount % BPS_DENOM) * PLATFORM_FEE_BPS / BPS_DENOM;
+    let worker = Address::generate(&f.env);
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [worker.clone()]),
+        &Vec::new(&f.env),
+    );
+
+    assert_eq!(c.get_owed(&worker), amount - fee);
+    assert_eq!(token.balance(&f.platform), fee);
+    assert_eq!(c.get_question(&1).status, Status::Resolved);
+}
+
+#[test]
 fn resolve_with_zero_workers_fails() {
     let f = setup();
     let c = client(&f);
@@ -249,6 +374,15 @@ fn refund_returns_full_amount_and_flips_status() {
     assert_eq!(tc.balance(&f.contract_id), 0);
     let q = c.get_question(&1);
     assert_eq!(q.status, Status::Refunded);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_refunded"));
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), AMOUNT);
+    let via_timeout: bool = data
+        .get(Symbol::new(&f.env, "via_timeout"))
+        .unwrap()
+        .into_val(&f.env);
+    assert!(!via_timeout);
 }
 
 #[test]
@@ -419,7 +553,7 @@ fn timeout_refund_before_deadline_fails() {
 }
 
 #[test]
-fn timeout_refund_after_deadline_succeeds_for_anyone() {
+fn refund_timeout_emits_a_refunded_event_with_via_timeout_true() {
     let f = setup();
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
@@ -438,6 +572,15 @@ fn timeout_refund_after_deadline_succeeds_for_anyone() {
     assert_eq!(tc.balance(&f.payer), balance_before + AMOUNT);
     let q = c.get_question(&1);
     assert_eq!(q.status, Status::Refunded);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_refunded"));
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), AMOUNT);
+    let via_timeout: bool = data
+        .get(Symbol::new(&f.env, "via_timeout"))
+        .unwrap()
+        .into_val(&f.env);
+    assert!(via_timeout);
 }
 
 #[test]
@@ -504,7 +647,7 @@ pub(crate) fn fund_worker(f: &Fixture, worker: &Address, amount: i128) {
 }
 
 #[test]
-fn stake_locks_funds_and_get_stake_reflects_it() {
+fn stake_emits_a_stake_changed_event_with_the_new_total() {
     let f = setup();
     let c = client(&f);
     let w1 = Address::generate(&f.env);
@@ -515,6 +658,12 @@ fn stake_locks_funds_and_get_stake_reflects_it() {
     assert_eq!(c.get_stake(&w1), 400_000);
     assert_eq!(token_client(&f).balance(&w1), 600_000);
     assert_eq!(token_client(&f).balance(&f.contract_id), 400_000);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "stake_changed"));
+    assert_eq!(topics.get(1).unwrap().into_val(&f.env), w1);
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), 400_000i128);
+    assert_eq!(data.get(Symbol::new(&f.env, "new_total")).unwrap().into_val(&f.env), 400_000i128);
 }
 
 #[test]
@@ -545,6 +694,11 @@ fn begin_unstake_moves_stake_to_unbonding_without_paying_out() {
         "nothing paid until complete_unstake()"
     );
     assert!(release_at > f.env.ledger().sequence());
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "stake_changed"));
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), -150_000i128);
+    assert_eq!(data.get(Symbol::new(&f.env, "new_total")).unwrap().into_val(&f.env), 250_000i128);
 }
 
 #[test]
@@ -624,6 +778,91 @@ fn resolve_slashes_losing_workers_stake_to_the_platform() {
 }
 
 #[test]
+fn resolve_slashes_multiple_losing_workers_independently() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let winner = Address::generate(&f.env);
+    let loser_one = Address::generate(&f.env);
+    let loser_two = Address::generate(&f.env);
+    fund_worker(&f, &loser_one, 200_000);
+    fund_worker(&f, &loser_two, 500_000);
+    c.stake(&loser_one, &200_000);
+    c.stake(&loser_two, &500_000);
+    let platform_before = token_client(&f).balance(&f.platform);
+
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [winner.clone()]),
+        &Vec::from_array(&f.env, [loser_one.clone(), loser_two.clone()]),
+    );
+
+    assert_eq!(c.get_stake(&loser_one), 190_000);
+    assert_eq!(c.get_stake(&loser_two), 475_000);
+    assert_eq!(token_client(&f).balance(&f.platform), platform_before + 535_000);
+    let events = contract_events(&f);
+    let resolved = events
+        .iter()
+        .find(|(topics, _)| event_name(&f, topics) == Symbol::new(&f.env, "question_resolved"))
+        .unwrap();
+    assert_eq!(resolved.0.get(1).unwrap().into_val(&f.env), 1u64);
+    let resolved_data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = resolved.1.clone().into_val(&f.env);
+    assert_eq!(resolved_data.get(Symbol::new(&f.env, "worker_count")).unwrap().into_val(&f.env), 1u32);
+    assert_eq!(resolved_data.get(Symbol::new(&f.env, "fee")).unwrap().into_val(&f.env), 500_000i128);
+    assert_eq!(resolved_data.get(Symbol::new(&f.env, "total_slashed")).unwrap().into_val(&f.env), 35_000i128);
+
+    let slash_events = events
+        .iter()
+        .filter(|(topics, _)| event_name(&f, topics) == Symbol::new(&f.env, "worker_slashed"))
+        .collect::<std::vec::Vec<_>>();
+    assert_eq!(slash_events.len(), 2);
+    let mut total_slashed = 0;
+    for (topics, data) in slash_events {
+        assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
+        let worker: Address = topics.get(2).unwrap().into_val(&f.env);
+        let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.clone().into_val(&f.env);
+        let slashed: i128 = data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env);
+        if worker == loser_one {
+            assert_eq!(slashed, 10_000);
+        } else {
+            assert_eq!(worker, loser_two);
+            assert_eq!(slashed, 25_000);
+        }
+        total_slashed += slashed;
+    }
+    assert_eq!(total_slashed, 35_000);
+}
+
+#[test]
+fn stake_slash_computation_does_not_silently_overflow_near_i128_max() {
+    let f = setup_large_values();
+    let c = client(&f);
+    let amount = i128::MAX / 4;
+    let stake = i128::MAX - amount;
+    let token = SixDecimalAssetClient::new(&f.env, &f.token_address);
+    token.mint(&f.payer, &amount);
+    let loser = Address::generate(&f.env);
+    token.mint(&loser, &stake);
+    c.submit(&f.payer, &1, &amount);
+    c.stake(&loser, &stake);
+
+    let expected_slash = (stake / BPS_DENOM) * SLASH_BPS
+        + (stake % BPS_DENOM) * SLASH_BPS / BPS_DENOM;
+    let fee = (amount / BPS_DENOM) * PLATFORM_FEE_BPS
+        + (amount % BPS_DENOM) * PLATFORM_FEE_BPS / BPS_DENOM;
+    let winner = Address::generate(&f.env);
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [winner.clone()]),
+        &Vec::from_array(&f.env, [loser.clone()]),
+    );
+
+    assert_eq!(c.get_stake(&loser), stake - expected_slash);
+    assert_eq!(token.balance(&f.platform), fee + expected_slash);
+    assert_eq!(c.get_owed(&winner), amount - fee);
+}
+
+#[test]
 fn resolve_slashing_an_unstaked_losing_worker_is_a_harmless_no_op() {
     let f = setup();
     let c = client(&f);
@@ -669,6 +908,12 @@ fn withdraw_pays_out_full_accrued_balance_and_zeroes_it() {
     assert_eq!(withdrawn, 2_000_000);
     assert_eq!(c.get_owed(&w1), 0);
     assert_eq!(token_client(&f).balance(&w1), 2_000_000);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "worker_paid"));
+    assert_eq!(topics.get(1).unwrap().into_val(&f.env), w1);
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "recipient")).unwrap().into_val(&f.env), w1);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), 2_000_000i128);
 }
 
 #[test]
@@ -801,6 +1046,18 @@ fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
     assert_eq!(c.get_owed(&w1), 0);
     assert_eq!(token_client(&f).balance(&w1), 0);
     assert_eq!(token_client(&f).balance(&beneficiary), 2_000_000);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "worker_paid"));
+    assert_eq!(topics.get(1).unwrap().into_val(&f.env), w1);
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(
+        data.get(Symbol::new(&f.env, "recipient")).unwrap().into_val(&f.env),
+        beneficiary
+    );
+    assert_eq!(
+        data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env),
+        2_000_000i128
+    );
 }
 
 #[test]
@@ -872,6 +1129,12 @@ fn set_admin_rotates_authority_to_a_new_key() {
     f.env.ledger().set_sequence_number(pending.executable_at);
     c.execute_admin_rotation();
     assert_eq!(c.get_pending_admin_rotation(), None);
+    let rotated = contract_events(&f)
+        .into_iter()
+        .find(|(topics, _)| event_name(&f, topics) == Symbol::new(&f.env, "admin_rotated"))
+        .unwrap();
+    assert_eq!(rotated.0.get(1).unwrap().into_val(&f.env), f.admin);
+    assert_eq!(rotated.0.get(2).unwrap().into_val(&f.env), new_admin);
 
     // mock_all_auths() cannot distinguish old and new signers; a separate
     // test covers proposal visibility, delay, and cancellation.
@@ -913,6 +1176,21 @@ fn set_timeout_ledgers_applies_to_questions_submitted_afterward() {
     let f = setup();
     let c = client(&f);
     c.set_timeout_ledgers(&10u32);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "timeout_ledgers_changed"));
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(
+        data.get(Symbol::new(&f.env, "old_timeout_ledgers"))
+            .unwrap()
+            .into_val(&f.env),
+        TIMEOUT_LEDGERS
+    );
+    assert_eq!(
+        data.get(Symbol::new(&f.env, "new_timeout_ledgers"))
+            .unwrap()
+            .into_val(&f.env),
+        10u32
+    );
     c.submit(&f.payer, &1, &AMOUNT);
 
     let res = c.try_refund_timeout(&1);
@@ -1010,6 +1288,12 @@ fn deposit_locks_funds_and_get_balance_reflects_it() {
 
     assert_eq!(c.get_balance(&f.payer), AMOUNT);
     assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "prepaid_balance_changed"));
+    assert_eq!(topics.get(1).unwrap().into_val(&f.env), f.payer);
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), AMOUNT);
+    assert_eq!(data.get(Symbol::new(&f.env, "new_total")).unwrap().into_val(&f.env), AMOUNT);
 }
 
 #[test]
@@ -1046,6 +1330,28 @@ fn withdraw_balance_returns_funds_and_decrements_balance() {
 
     assert_eq!(c.get_balance(&f.payer), AMOUNT - 400_000);
     assert_eq!(token_client(&f).balance(&f.payer), payer_before + 400_000);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "prepaid_balance_changed"));
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), -400_000i128);
+    assert_eq!(
+        data.get(Symbol::new(&f.env, "new_total")).unwrap().into_val(&f.env),
+        AMOUNT - 400_000
+    );
+}
+
+#[test]
+fn withdraw_balance_zero_or_negative_amount_fails() {
+    let f = setup();
+    let c = client(&f);
+    assert_eq!(
+        c.try_withdraw_balance(&f.payer, &0),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(
+        c.try_withdraw_balance(&f.payer, &-1),
+        Err(Ok(ContractError::InvalidAmount))
+    );
 }
 
 #[test]
@@ -1071,6 +1377,12 @@ fn charge_draws_down_balance_and_opens_a_normal_question() {
     c.deposit(&f.payer, &(AMOUNT * 3));
 
     c.charge(&f.payer, &1, &AMOUNT);
+    let (topics, data) = last_contract_event(&f);
+    assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_opened"));
+    assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    assert_eq!(data.get(Symbol::new(&f.env, "payer")).unwrap().into_val(&f.env), f.payer);
+    assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), AMOUNT);
 
     assert_eq!(c.get_balance(&f.payer), AMOUNT * 2);
     let q = c.get_question(&1);
