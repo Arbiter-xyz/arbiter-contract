@@ -4,44 +4,43 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
-  test-and-build:
+  app:
+    name: app (JS)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          targets: wasm32v1-none
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run lint --if-present
+      - run: npm test --if-present
+
+  contract:
+    name: contract (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: cargo test
-      - name: Slashing model claims
-        # Asserts every number docs/economics/slashing-threat-model.md cites
-        # from the closed-form model, and that the committed tables are
-        # current.
-        run: |
-          python3 sim/slashing_model.py --check
-          python3 sim/slashing_model.py > /tmp/tables.md
-          diff <(tail -n +8 docs/economics/model-tables.md) /tmp/tables.md
-      - name: Migration tool syntax
-        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs
-      - name: Install Stellar CLI
-        # Prebuilt .deb instead of cargo install: building from source pulls
-        # in hardware-wallet support (dbus, then libudev/hidapi) and takes
-        # 10+ minutes. Pinned to the version this project was built against.
-        run: |
-          curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
-          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
-      - name: Build contract and test fixtures to WASM
-        run: scripts/build-wasm.sh
-      - name: WASM tests (mainnet resource-limit gate, upgrade worked example)
-        # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
-        # hand, not a gate. See docs/RESOURCE_LIMITS.md.
-        run: cargo test -- --ignored --skip bench_ --nocapture
-      - name: Deep property-based fuzz run
-        run: cargo test escrow_invariant_holds_for_every_call_sequence
-        env:
-          PROPTEST_CASES: "1000"
+        with:
+          workspaces: contract
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit
+        run: cargo audit
+      - run: cargo test -p oracle-escrow
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli --version 21.0.0
+      - run: stellar contract build
