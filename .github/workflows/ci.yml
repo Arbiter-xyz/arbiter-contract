@@ -41,6 +41,15 @@ jobs:
         # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
         # hand, not a gate. See docs/RESOURCE_LIMITS.md.
         run: cargo test -- --ignored --skip bench_ --nocapture
+      - name: Gas-cost regression gate
+        # Runs the #65 benchmark harness and compares each measured function's
+        # instruction count against the committed baseline in
+        # bench/baseline.json. Fails if any function grows past the configured
+        # threshold. To accept a deliberate, justified cost increase, regenerate
+        # the baseline with `cargo run --release --bin bench -- --emit-baseline`
+        # and commit the diff (see docs/RESOURCE_LIMITS.md).
+        run: |
+          cargo run --release --bin bench -- --check-baseline bench/baseline.json
       - name: Deep property-based fuzz run
         run: cargo test escrow_invariant_holds_for_every_call_sequence
         env:

@@ -117,16 +117,36 @@ Native tests that run in plain `cargo test` pin the guard itself: exactly
 64 settles, 65 is rejected with `QuorumTooLarge` in every split without
 touching state, and the size check wins over the O(n²) duplicate check.
 
-## Re-running it
+### Baseline and threshold
+
+The gate compares against a **committed baseline**, not a fresh run with
+no comparison point. `bench/gas-baseline.json` records the measured
+instruction count for each entry point at the snapshot above, and is
+diffable in review like any other file. The gate fails a PR when any
+measured function's instruction count grows past `REGRESSION_THRESHOLD`
+(10%) over its baseline entry. The threshold is a percentage regression,
+not an absolute ceiling: the absolute ceilings are already enforced by the
+safety-margin test above, so the baseline gate only has to catch silent
+growth relative to what was last accepted.
+
+### Updating the baseline
+
+A deliberate, justified cost increase has a documented path: run the
+harness, confirm the new numbers still pass the safety-margin gate, then
+regenerate the baseline and commit it in the same PR as the change that
+caused it.
 
 ```sh
 scripts/fetch-network-settings.sh              # refresh bench/mainnet-soroban-settings.json
 scripts/build-wasm.sh                          # deployable WASM + fixtures
 cargo test bench_resolve_resource_sweep -- --ignored --nocapture   # full table + ceilings
 cargo test resolve_at_max_quorum -- --ignored --nocapture          # the CI gate
+scripts/update-gas-baseline.sh                 # rewrite bench/gas-baseline.json
 ```
 
-The sweep runs on a fixture build with the cap lifted (`--features
+The baseline update is reviewed like any other diff, so the cost increase
+is visible and has to be justified in the PR description. The sweep runs
+on a fixture build with the cap lifted (`--features
 bench-uncapped-quorum`). It also asserts `MAX_QUORUM_SIZE` is at or below
 the measured safe ceiling.
 
