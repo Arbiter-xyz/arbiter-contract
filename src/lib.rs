@@ -194,6 +194,10 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// #88: a fixed-price template a payer can open a question from, instead
+    /// of supplying a caller-chosen amount. Admin-managed. Advisory-only
+    /// quorum_hint (see QuestionTemplate) — not enforced by this contract.
+    Template(u32),
 }
 
 #[contracterror]
@@ -226,6 +230,9 @@ pub enum ContractError {
     /// #87: reopen_question() called on a question that isn't Refunded (or
     /// isn't owned by the caller).
     QuestionNotRefunded = 300,
+    /// #88: submit_from_template()/register_template() referenced a
+    /// template_id with no registered QuestionTemplate.
+    TemplateNotFound = 301,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -272,6 +279,28 @@ pub struct QuestionReopened {
     pub amount: i128,
     pub created_at: u32,
     pub timeout_ledgers: u32,
+}
+
+/// #88: a fixed on-chain price a question can be opened at via
+/// submit_from_template(), instead of a caller-supplied amount.
+/// `quorum_hint` is advisory only — this contract does not enforce it
+/// against resolve()'s actual worker/losing_worker counts; overlaps with
+/// #85 if that enforcement is added later.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionTemplate {
+    pub price: i128,
+    pub quorum_hint: u32,
+}
+
+/// Emitted by register_template() (#88).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateRegistered {
+    #[topic]
+    pub template_id: u32,
+    pub price: i128,
+    pub quorum_hint: u32,
 }
 
 #[contract]
@@ -1453,6 +1482,74 @@ impl OracleEscrow {
         .publish(&env);
         Ok(())
     }
+
+    // ---- #88: fixed-price question templates ---------------------------
+
+    /// Admin-only. Registers (or overwrites) a fixed-price template.
+    /// Templates are admin-mutable, not immutable-once-created (the issue's
+    /// open question 3) — simplest to implement and reason about, and an
+    /// admin who could mis-set a template can already mis-price arbitrary
+    /// submit()/charge() calls, so this adds no new trust assumption.
+    pub fn register_template(
+        env: Env,
+        template_id: u32,
+        price: i128,
+        quorum_hint: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if price <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let template = QuestionTemplate { price, quorum_hint };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Template(template_id), &template);
+        Self::extend_persistent(&env, &DataKey::Template(template_id));
+        Self::bump_instance(&env);
+        TemplateRegistered {
+            template_id,
+            price,
+            quorum_hint,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn get_template(env: Env, template_id: u32) -> Result<QuestionTemplate, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Template(template_id))
+            .ok_or(ContractError::TemplateNotFound)
+    }
+
+    /// Opens `question_id` at the template's fixed on-chain price instead of
+    /// a caller-supplied amount — the contract-level sanity check the issue
+    /// asks for, layered on top of (not replacing) submit(). `quorum_hint`
+    /// is read but NOT enforced here (stays purely advisory, per the
+    /// issue's out-of-scope line and open question 2); enforcing it against
+    /// resolve()'s actual quorum is left to #85.
+    pub fn submit_from_template(
+        env: Env,
+        payer: Address,
+        question_id: u64,
+        template_id: u32,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        let template: QuestionTemplate = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Template(template_id))
+            .ok_or(ContractError::TemplateNotFound)?;
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &template.price,
+        );
+
+        Self::open_question(&env, payer, question_id, template.price)
+    }
 }
 
 #[cfg(test)]
@@ -1465,3 +1562,5 @@ mod test_migration;
 mod test_ttl;
 #[cfg(test)]
 mod test_reopen_question;
+#[cfg(test)]
+mod test_question_templates;
