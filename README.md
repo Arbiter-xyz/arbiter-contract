@@ -174,6 +174,37 @@ tradeoff: aggressive optimization can make a failed transaction's trap
 less readable, so debugging a revert may require a separate unoptimized
 build.
 
+## WASM hash verification
+
+CI proves the contract *compiles* to a valid, deployable WASM, but that alone
+doesn't prove a specific *deployed* contract id corresponds to a specific
+`lib.rs` commit. The `wasm-hash-verify` workflow closes that gap: it builds the
+WASM from the current commit with the same `stellar contract build` command CI
+already runs, fetches the deployed contract's actual on-chain WASM
+(`stellar contract fetch`), and diffs the two sha256 hashes. On a mismatch the
+check fails loudly in CI.
+
+This is only meaningful when the build is reproducible (bit-for-bit identical
+output from the same source) — otherwise a legitimate deployment can show a
+false mismatch purely from a different build environment. See the
+reproducible-build work tracked separately.
+
+The target contract id is parameterized. It defaults to the pinned testnet
+deployment (`CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36`) and can
+be overridden via the `CONTRACT_ID` repository variable or the
+`workflow_dispatch` inputs, so the same action is reusable for a future
+mainnet deployment:
+
+```sh
+gh workflow run wasm-hash-verify.yml \
+  -f contract_id=<contract-id> \
+  -f network=mainnet
+```
+
+There is no incident-alerting wiring in this repo, so the action does not
+assume a notification channel exists — a mismatch is surfaced as a failed CI
+check.
+
 ## Handsoff notes
 
 `submit()` and `deposit()` both require `payer.require_auth()` and a direct
@@ -214,48 +245,4 @@ build.
 - #79: On-chain aggregate stats view
 
 <!-- handsoff-issue-21 -->
-- #21: touch() rewrites unchanged Owed/Stake values before extending TTL, costing an avoidable write fee
-
-<!-- handsoff-issue-24 -->
-- #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
-
-<!-- handsoff-issue-46 -->
-- #46: Emergency pause switch
-
-<!-- handsoff-issue-47 -->
-- #47: Proxy/versioned upgrade path
-
-<!-- handsoff-issue-51 -->
-- #51: Time-locked large withdrawals
-
-<!-- handsoff-issue-52 -->
-- #52: Withdrawal destination allowlist
-
-<!-- handsoff-issue-62 -->
-- #62: Mutation testing pass
-
-<!-- handsoff-issue-63 -->
-- #63: Formal state-machine spec
-
-<!-- handsoff-issue-64 -->
-- #64: WASM binary size optimization
-
-<!-- handsoff-issue-102 -->
-- #102: Third-party stake sponsorship
-
-<!-- handsoff-issue-103 -->
-- #103: Cooperative staking pools
-
-### Chosen rail: Circle CCTP + a Stellar forwarder
-
-We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
-Stellar, rather than Axelar GMP.
-
-- CCTP is a *burn-and-mint* rail for native USDC: the payer burns USDC on
-  their origin chain and CCTP mints the same amount of native USDC on Stellar.
-  The escrowed token stays native USDC, so `resolve()`/`refund()` keep
-  settling with the existing `token_client.transfer` — no change to the
-  settlement path.
-- CCTP already requires a forwarder contract for Stellar recipients, so the
-
-/* … truncated 2044 chars — edit only what you need near the top … */
+- #21: touch() rewrites u
