@@ -2,8 +2,8 @@
 
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contracterror, contractevent, contractimpl, contracttype, token, vec, Address, Env,
-    IntoVal, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec, Address,
+    Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 /// 20% platform fee, integer basis points. Never floats.
@@ -194,6 +194,11 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// A worker's registered secp256r1 public key (SEC-1-encoded, 65
+    /// bytes), used by verify_passkey_auth() as a simplified stand-in for a
+    /// full WebAuthn/passkey ceremony — see the doc comment on
+    /// register_passkey() for what this deliberately does not model.
+    PasskeyPubkey(Address),
 }
 
 #[contracterror]
@@ -219,6 +224,12 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    /// verify_passkey_auth() called before register_passkey() for this
+    /// worker.
+    PasskeyNotRegistered = 20,
+    /// The secp256r1 signature did not verify against the worker's
+    /// registered passkey public key.
+    InvalidPasskeySignature = 21,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -253,6 +264,15 @@ pub struct QuestionMigrated {
     pub question_id: u64,
     pub target: Address,
     pub amount: i128,
+}
+
+/// Emitted by register_passkey() when a worker binds (or replaces) a
+/// secp256r1 passkey public key to their Address.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasskeyRegistered {
+    #[topic]
+    pub worker: Address,
 }
 
 #[contract]
@@ -1350,6 +1370,75 @@ impl OracleEscrow {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
+
+    /// Binds `pubkey` (a SEC-1-encoded secp256r1 public key, 65 bytes) to
+    /// `worker`'s Address for use with verify_passkey_auth() (issue #74).
+    /// The worker still signs this call with their existing Address
+    /// (keypair or smart-wallet, see #73) — this is a registration step,
+    /// not itself a passkey authentication. Calling it again replaces the
+    /// previously registered key.
+    ///
+    /// This is a SIMPLIFIED STAND-IN for full WebAuthn passkey support, not
+    /// an implementation of the WebAuthn ceremony: it does not verify
+    /// `authenticatorData`/`clientDataJSON` or any origin/RP-ID binding, and
+    /// it does not implement Soroban's `CustomAccountInterface` — a real
+    /// passkey-backed smart wallet would do that at the account-abstraction
+    /// layer (see #73/docs/account-abstraction.md), not here. This just
+    /// gives the worker console a way to register a device-held
+    /// secp256r1 key pair and later prove possession of it via a plain
+    /// signature, using `Env::crypto().secp256r1_verify`, which is the one
+    /// primitive Soroban actually exposes on this path today.
+    pub fn register_passkey(
+        env: Env,
+        worker: Address,
+        pubkey: BytesN<65>,
+    ) -> Result<(), ContractError> {
+        worker.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::PasskeyPubkey(worker.clone()), &pubkey);
+        Self::extend_persistent(&env, &DataKey::PasskeyPubkey(worker.clone()));
+        Self::bump_instance(&env);
+        PasskeyRegistered { worker }.publish(&env);
+        Ok(())
+    }
+
+    pub fn get_passkey_pubkey(env: Env, worker: Address) -> Option<BytesN<65>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PasskeyPubkey(worker))
+    }
+
+    /// Verifies that `signature` is a valid secp256r1 signature over
+    /// `message` under `worker`'s registered passkey public key. Returns
+    /// `Ok(())` on success; the underlying host call panics the whole
+    /// transaction on an invalid signature rather than returning through
+    /// this Result (consistent with how Soroban's crypto verifiers work
+    /// generally), so a failing check never both partially runs and
+    /// reports success.
+    ///
+    /// This does not call `worker.require_auth()` — it's a standalone
+    /// possession check a caller (e.g. the worker console backend
+    /// completing workerAuth.js's challenge/response flow) can use
+    /// alongside, not instead of, the contract's normal auth model. Nothing
+    /// currently gates on this; wiring it into an entry point is left to
+    /// the worker-console integration issue #74 scopes as depending on
+    /// this verification primitive.
+    pub fn verify_passkey_auth(
+        env: Env,
+        worker: Address,
+        message: Bytes,
+        signature: BytesN<64>,
+    ) -> Result<(), ContractError> {
+        let pubkey: BytesN<65> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PasskeyPubkey(worker))
+            .ok_or(ContractError::PasskeyNotRegistered)?;
+        let digest = env.crypto().sha256(&message);
+        env.crypto().secp256r1_verify(&pubkey, &digest, &signature);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1358,6 +1447,8 @@ mod test;
 mod test_account_abstraction;
 #[cfg(test)]
 mod test_economics;
+#[cfg(test)]
+mod test_passkey;
 #[cfg(test)]
 mod test_migration;
 #[cfg(test)]
