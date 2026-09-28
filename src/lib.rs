@@ -80,6 +80,12 @@ pub const MAX_QUORUM_SIZE: u32 = 64;
 #[cfg(feature = "bench-uncapped-quorum")]
 pub const MAX_QUORUM_SIZE: u32 = u32::MAX;
 
+/// Issue #83: max number of entries kept in the on-chain leaderboard. Small
+/// on purpose (top 20, not top 100) to keep the insertion-sort update added
+/// to resolve()'s per-worker credit loop cheap — it is O(LEADERBOARD_CAP)
+/// per credited worker, not O(n) over all workers ever staked.
+pub const LEADERBOARD_CAP: u32 = 20;
+
 /// Ledgers between propose_upgrade() and the earliest execute_upgrade().
 /// Strictly longer than MAX_TIMEOUT_LEDGERS, so every question pending when
 /// an upgrade is proposed reaches its refund_timeout() deadline while the
@@ -210,6 +216,23 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// Admin-settable lower bound on `workers.len() + losing_workers.len()`
+    /// for resolve() (issue #85). Absent means unbounded (today's
+    /// behavior) — see `set_quorum_bounds()` / `get_quorum_bounds()`.
+    MinQuorum,
+    /// Admin-settable upper bound, same shape as `MinQuorum`. Independent
+    /// of the fixed `MAX_QUORUM_SIZE` resource-safety cap, which always
+    /// applies regardless of this being configured.
+    MaxQuorum,
+    /// Issue #83: total number of resolve() calls a worker has been in the
+    /// credited `workers` list for. Maintained alongside (not instead of)
+    /// `LeaderboardEntries` so a worker's full count survives even after
+    /// falling out of the bounded top-N.
+    ResolvedCount(Address),
+    /// Issue #83: bounded `Vec<(Address, u32)>`, capped at LEADERBOARD_CAP,
+    /// sorted descending by resolved count. Instance storage, since it's
+    /// small and read/written on essentially every resolve().
+    LeaderboardEntries,
     /// #91: payer-set floor on their own Balance(Address). Checked only by
     /// the new permissionless check_top_up_threshold() — see that fn's docs
     /// for why charge() itself is left untouched.
@@ -302,6 +325,20 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    /// `workers.len() + losing_workers.len()` exceeds the hard, compile-time
+    /// MAX_QUORUM_SIZE cap. This variant was already referenced by resolve()
+    /// on upstream main but never defined in this enum, leaving the crate
+    /// unable to compile — defined here (see issue #85) since it is exactly
+    /// the kind of quorum-size-bound variant that issue is about. Codes
+    /// 200+ are used for this PR's new variants to avoid colliding with the
+    /// 20s range used by a sibling in-flight PR and the 100s range used by
+    /// another.
+    QuorumTooLarge = 200,
+    /// `workers.len() + losing_workers.len()` falls outside the
+    /// admin-configured `MinQuorum`/`MaxQuorum` bounds (see
+    /// `set_quorum_bounds()`). Distinct from `QuorumTooLarge`, which is the
+    /// fixed, always-enforced resource-safety ceiling.
+    QuorumOutOfBounds = 201,
     // Numeric codes 20-99 are intentionally skipped: this repo has other
     // open PRs (upstream #142, #143) adding their own ContractError variants
     // in that range against the same upstream main. Starting at 100 keeps
@@ -394,6 +431,32 @@ pub struct QuestionSettled {
     #[topic]
     pub question_id: u64,
     pub status: Status,
+}
+
+/// Issue #84: the would-be outcome of calling resolve() with the given
+/// question_id/workers/losing_workers, computed WITHOUT mutating any
+/// storage or transferring/crediting anything. Mirrors resolve()'s
+/// fee/pool/share/dust/slash arithmetic exactly (same constants, same
+/// integer division), so a caller can check the exact split beforehand
+/// instead of hand-replicating it off-chain.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvePreview {
+    /// Platform fee taken off the top (PLATFORM_FEE_BPS of the question's
+    /// amount).
+    pub fee: i128,
+    /// Integer-division remainder from splitting `pool` evenly across
+    /// `workers`, which resolve() folds into the platform's take.
+    pub dust: i128,
+    /// What EACH matching worker in `workers` would be credited.
+    pub share_per_worker: i128,
+    /// Sum of what would be slashed from all `losing_workers` combined
+    /// (each capped individually the same way `slash()` caps it; a
+    /// worker with no stake contributes 0, same as the real resolve()).
+    pub total_slashed: i128,
+    /// What the platform address would end up with: fee + dust +
+    /// total_slashed.
+    pub platform_take: i128,
 }
 
 /// Emitted on the SOURCE contract for each question migrate_pending() moves.
@@ -1089,6 +1152,11 @@ impl OracleEscrow {
         if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
             return Err(ContractError::QuorumTooLarge);
         }
+        // Issue #85: one guard clause enforcing admin-configured quorum
+        // bounds, in addition to (not instead of) the fixed MAX_QUORUM_SIZE
+        // check above. Unconfigured bounds (never called set_quorum_bounds())
+        // default to unbounded, preserving today's behavior.
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
@@ -1125,6 +1193,10 @@ impl OracleEscrow {
         }
         for worker in workers.iter() {
             Self::credit_owed(&env, &question_token, &worker, share)?;
+            // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
+            // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not
+            // O(all workers ever staked).
+            Self::record_resolved_credit(&env, &worker);
         }
 
         if platform_take > 0 {
@@ -1575,24 +1647,7 @@ impl OracleEscrow {
     /// question's entry (or the whole contract instance) has archived: see
     /// docs/ttl-archival.md and src/test_ttl.rs.
     pub fn refund_timeout(env: Env, question_id: u64) -> Result<(), ContractError> {
-        let key = DataKey::Question(question_id);
-        let question: Question = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        // saturating: an overflow panic here would make the question
-        // permanently un-refundable by anyone but the admin.
-        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
-        if env.ledger().sequence() < deadline {
-            return Err(ContractError::TooEarlyForTimeout);
-        }
-
-        Self::do_refund(&env, question_id)
+        Self::try_refund_timeout(&env, question_id)
     }
 
     /// Compatibility entrypoint: schedules, but no longer immediately
@@ -2321,6 +2376,35 @@ impl OracleEscrow {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
+    // ---- Issue #85: admin-settable quorum-size bounds ----------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Bounds are global (one Min/Max pair), matching the contract's
+    //    existing lack of a tier concept (same tradeoff set_timeout_ledgers()
+    //    already makes).
+    //  - `losing_workers.len()` counts toward the bound, same as it already
+    //    does for MAX_QUORUM_SIZE just above, since validate_worker_lists()'s
+    //    O(n^2) cost scales with the combined list.
+    //  - Never-configured bounds default to fully unbounded (0 / u32::MAX),
+    //    preserving today's behavior exactly, per the issue's own open
+    //    question.
+
+    /// Admin-only. Sets the inclusive `[min, max]` bounds on
+    /// `workers.len() + losing_workers.len()` that resolve() will accept, in
+    /// addition to the fixed MAX_QUORUM_SIZE ceiling. Pass `min = 0` and
+    /// `max = u32::MAX` to effectively clear the bounds back to unbounded.
+    pub fn set_quorum_bounds(env: Env, min: u32, max: u32) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if min > max {
+            return Err(ContractError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::MinQuorum, &min);
+        env.storage().instance().set(&DataKey::MaxQuorum, &max);
+
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
     // ---- #91: auto-top-up threshold ----------------------------------
     //
     // Scoped down from the issue's open questions: the contract cannot pull
@@ -2349,7 +2433,86 @@ impl OracleEscrow {
             .persistent()
             .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
         Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
+
         Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// Returns the currently configured `(min, max)` quorum bounds, or the
+    /// unbounded defaults `(0, u32::MAX)` if `set_quorum_bounds()` has never
+    /// been called.
+    pub fn get_quorum_bounds(env: Env) -> (u32, u32) {
+        let min: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinQuorum)
+            .unwrap_or(0);
+        let max: u32 = env
+            .storage()
+          
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// Returns the currently configured `(min, max)` quorum bounds, or the
+    /// unbounded defaults `(0, u32::MAX)` if `set_quorum_bounds()` has never
+    /// been called.
+    pub fn get_quorum_bounds(env: Env) -> (u32, u32) {
+        let min: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinQuorum)
+            .unwrap_or(0);
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxQuorum)
+            .unwrap_or(u32::MAX);
+        (min, max)
+    }
+
+    /// Shared by resolve() (and available for callers previewing it, see
+    /// `preview_resolve()`) to enforce the admin-configured bounds.
+    fn check_quorum_bounds(env: &Env, quorum_size: u32) -> Result<(), ContractError> {
+        let (min, max) = Self::get_quorum_bounds(env.clone());
+        if quorum_size < min || quorum_size > max {
+            return Err(ContractError::QuorumOutOfBounds);
+        }
+        Ok(())
+    }
+
+    // ---- Issue #84: dry-run resolve() simulation ----------------------
+    //
+    // Simplifications vs. the full issue:
+    //  - This duplicates resolve()'s validation + arithmetic rather than
+    //    refactoring resolve() itself to share a common "compute" path with
+    //    it, to keep this change purely additive and resolve() itself
+    //    byte-for-byte unchanged (other than the #85 guard clause above).
+    //  - Does not call require_auth() at all (not even a read-only check),
+    //    matching the issue's explicit ask; it is intentionally viewable by
+    //    anyone, same as other getters like get_question()/get_owed().
+    //  - Validates the question exists and is Pending, returning the same
+    //    errors resolve() would for a hypothetical call, per the issue's
+    //    resolved open question.
+
+    /// Read-only. Computes what resolve(question_id, workers, losing_workers)
+    /// WOULD do — the platform fee, per-worker share, integer-division dust,
+    /// and total slash taken from `losing_workers` — without writing any
+    /// storage, transferring/crediting any funds, or requiring any
+    /// authorization. See `ResolvePreview`.
+    pub fn preview_resolve(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<ResolvePreview, ContractError> {
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()) as u32)?;
         Ok(())
     }
 
@@ -2540,23 +2703,6 @@ impl OracleEscrow {
         Ok(())
     }
 
-    /// Admin-only. Sets the pubkey that attest_kyc() will accept
-    /// (issue #75). Replacing it does not retroactively invalidate
-    /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
-    pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::KycAttestorPubkey, &attestor_pubkey);
-        Self::bump_instance(&env);
-        Ok(())
-    }
-
-        }
-        .publish(&env);
-        Ok(())
-    }
-
     /// Returns None for a question with no minted claim yet (unresolved or
     /// simply not minted), matching this issue's third acceptance criterion.
     pub fn get_claim(env: Env, question_id: u64) -> Option<ClaimRecord> {
@@ -2581,6 +2727,216 @@ impl OracleEscrow {
     /// validation (list overlap, size cap) — this trusts the same admin
     /// that already authorized resolve() and is meant to be called
     /// immediately alongside it.
+    pub fn record_reputation(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<ResolvePreview, ContractError> {
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let amount = question.amount;
+        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        let share_per_worker = pool / n;
+        let dust = pool - share_per_worker * n;
+
+        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let mut total_slashed: i128 = 0;
+        for loser in losing_workers.iter() {
+            total_slashed += Self::preview_slash(&env, &loser, slash_cap);
+        }
+
+        Ok(ResolvePreview {
+            fee,
+            dust,
+            share_per_worker,
+            total_slashed,
+            platform_take: fee + dust + total_slashed,
+        })
+    }
+
+    /// Pure counterpart to `slash()`: computes the same amount that slash()
+    /// would take from `worker`'s slashable stake (capped the same way),
+    /// but never writes it back. Used only by `preview_resolve()`.
+    fn preview_slash(env: &Env, worker: &Address, cap: i128) -> i128 {
+        let key = DataKey::Stake(worker.clone());
+        if !env.storage().persistent().has(&key) {
+            return 0;
+        }
+        let info = Self::stake_info(env, worker);
+        let slashable = info.settled + info.warming + info.unbonding;
+        if slashable <= 0 {
+            return 0;
+        }
+        (slashable * SLASH_BPS / BPS_DENOM).min(cap).min(slashable).max(0)
+    }
+
+    // ---- Issue #86: permissionless batch-expiry sweep -----------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Caller supplies exact question_ids (no on-chain enumeration of
+    //    which Pending questions are past deadline), same as the existing
+    //    single-id refund_timeout() — explicitly out of scope per the issue.
+    //  - Best-effort/continue-past-failures, returning one Result per id in
+    //    the same order, rather than aborting the whole batch on the first
+    //    ineligible id.
+    //  - No explicit batch-size cap beyond the existing MAX_QUORUM_SIZE
+    //    precedent elsewhere in the contract; callers are expected to size
+    //    batches sensibly (each iteration is O(1), no O(n^2) work).
+    //
+    // The one non-additive change: refund_timeout()'s body was extracted
+    // into try_refund_timeout() below so both it and sweep_timeouts() share
+    // the identical per-question deadline-check + do_refund() logic.
+    // refund_timeout()'s own behavior, error cases and signature are
+    // unchanged.
+
+    /// The per-question logic refund_timeout() has always run: only
+    /// eligible once Pending and past its deadline, verbatim.
+    fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
+        let key = DataKey::Question(question_id);
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        // saturating: an overflow panic here would make the question
+        // permanently un-refundable by anyone but the admin.
+        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
+        if env.ledger().sequence() < deadline {
+            return Err(ContractError::TooEarlyForTimeout);
+        }
+
+        Self::do_refund(env, question_id)
+    }
+
+    /// Permissionless batch version of refund_timeout(): attempts the same
+    /// per-question deadline check and refund for every id in
+    /// `question_ids`, continuing past individual failures (a question
+    /// that's not-yet-eligible or already settled) instead of reverting the
+    /// whole call. Returns one `Result` per input id, in the same order, so
+    /// the caller can see exactly which ones actually refunded.
+    pub fn sweep_timeouts(env: Env, question_ids: Vec<u64>) -> Vec<Result<(), ContractError>> {
+        let mut results = Vec::new(&env);
+        for question_id in question_ids.iter() {
+            results.push_back(Self::try_refund_timeout(&env, question_id));
+        }
+        results
+    }
+
+    // ---- Issue #83: on-chain leaderboard -------------------------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Bounded top-N (LEADERBOARD_CAP = 20), not trustlessly-complete —
+    //    this is a "verifiable top ranking" primitive, not a full worker
+    //    registry. A worker's true total is always available via
+    //    get_resolved_count() even after falling out of the top N.
+    //  - Ranking is purely resolved_count (times credited by resolve());
+    //    match-ratio/reputation scoring itself stays backend-owned, per the
+    //    issue's explicit "out of scope".
+    //  - Maintained with a simple O(LEADERBOARD_CAP) linear scan + insert
+    //    per credited worker rather than a fancier data structure, since
+    //    LEADERBOARD_CAP is small and fixed.
+
+    /// Called once per credited worker inside resolve()'s existing loop.
+    /// Bumps that worker's total ResolvedCount and re-sorts them into the
+    /// bounded LeaderboardEntries if they now qualify for the top N.
+    fn record_resolved_credit(env: &Env, worker: &Address) {
+        let count_key = DataKey::ResolvedCount(worker.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0) + 1;
+        Self::set_persistent(env, &count_key, &count);
+        Self::update_leaderboard(env, worker, count);
+    }
+
+    fn update_leaderboard(env: &Env, worker: &Address, count: u32) {
+        let mut entries: Vec<(Address, u32)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LeaderboardEntries)
+            .unwrap_or(Vec::new(env));
+
+        // Remove any existing entry for this worker so it can be
+        // re-inserted at its new, correct position.
+        let mut existing_idx: Option<u32> = None;
+        for i in 0..entries.len() {
+            if entries.get(i).unwrap().0 == *worker {
+                existing_idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = existing_idx {
+            entries.remove(i);
+        }
+
+        // Insertion sort, descending by count: find the first entry with a
+        // strictly smaller count and insert just before it.
+        let mut insert_at = entries.len();
+        for i in 0..entries.len() {
+            if entries.get(i).unwrap().1 < count {
+                insert_at = i;
+                break;
+            }
+        }
+        entries.insert(insert_at, (worker.clone(), count));
+
+        if entries.len() > LEADERBOARD_CAP {
+            entries.remove(entries.len() - 1);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LeaderboardEntries, &entries);
+        Self::bump_instance(env);
+    }
+
+    /// Read-only. Returns the bounded top-LEADERBOARD_CAP workers by
+    /// resolved_count, sorted descending.
+    pub fn get_leaderboard(env: Env) -> Vec<(Address, u32)> {
+        env.storage()
+            .instance()
+            .get(&DataKey::LeaderboardEntries)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Read-only. Returns a worker's full resolved_count, even if they've
+    /// fallen out of the bounded top-N leaderboard.
+    pub fn get_resolved_count(env: Env, worker: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ResolvedCount(worker))
+            .unwrap_or(0)
+    }
+
     pub fn record_reputation(
         env: Env,
         question_id: u64,
@@ -2732,6 +3088,7 @@ mod test_migration;
 #[cfg(test)]
 mod test_ttl;
 #[cfg(test)]
+#[cfg(test)]
 mod test_auto_topup;
 #[cfg(test)]
 mod test_owed_collateral;
@@ -2747,3 +3104,11 @@ mod test_worker_diversity;
 mod test_dispute_finality;
 #[cfg(test)]
 mod test_median_consensus;
+#[cfg(test)]
+mod test_quorum_bounds;
+#[cfg(test)]
+mod test_dry_run_resolve;
+#[cfg(test)]
+mod test_batch_expiry_sweep;
+#[cfg(test)]
+mod test_leaderboard;
