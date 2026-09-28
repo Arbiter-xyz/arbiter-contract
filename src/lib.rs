@@ -203,6 +203,11 @@ pub enum DataKey {
     /// i128 amount (decremented per use, mirroring a capped allowance
     /// rather than unlimited authority).
     Delegate(Address, Address),
+    /// #90: a claimable-vesting stream from `payer` to `beneficiary` — the
+    /// practical on-chain approximation of "payment streaming" (see Stream
+    /// doc comment). Keyed by (payer, beneficiary) so one payer can run at
+    /// most one active stream per beneficiary at a time.
+    Stream(Address, Address),
 }
 
 #[contracterror]
@@ -242,6 +247,14 @@ pub enum ContractError {
     /// delegation from `payer`, or whose remaining capped allowance is
     /// less than the requested amount.
     DelegateNotAuthorized = 302,
+    /// #90: create_stream() called with end_ledger <= start_ledger, or a
+    /// duplicate (payer, beneficiary) stream already exists.
+    InvalidStreamRange = 303,
+    /// #90: claim_stream()/get_stream()/cancel_stream() referenced a
+    /// (payer, beneficiary) pair with no active stream.
+    StreamNotFound = 304,
+    /// #90: claim_stream() called with nothing newly vested to claim.
+    NothingToClaim = 305,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -329,6 +342,42 @@ pub struct DelegateRevoked {
     #[topic]
     pub owner: Address,
     pub delegate: Address,
+}
+
+/// #90: a claimable-vesting stream, the practical on-chain approximation of
+/// "payment streaming" — see create_stream()/claim_stream() doc comments
+/// for why this contract does not attempt real per-ledger push-transfers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stream {
+    pub payer: Address,
+    pub beneficiary: Address,
+    pub total: i128,
+    pub claimed: i128,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+}
+
+/// Emitted by create_stream() (#90).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamCreated {
+    #[topic]
+    pub payer: Address,
+    pub beneficiary: Address,
+    pub total: i128,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+}
+
+/// Emitted by claim_stream()/cancel_stream() (#90).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamClaimed {
+    #[topic]
+    pub payer: Address,
+    pub beneficiary: Address,
+    pub amount: i128,
 }
 
 #[contract]
@@ -1684,6 +1733,179 @@ impl OracleEscrow {
 
         Self::open_question(&env, payer, question_id, amount)
     }
+
+    // ---- #90: payment streaming (claimable-vesting approximation) ------
+    //
+    // Stellar/Soroban has no native payment-streaming primitive and no
+    // on-chain scheduler to push funds on a timer (the issue's own
+    // motivation and open question 2), so this is NOT real per-block/
+    // per-second streaming — it's a claimable-vesting schedule: the payer
+    // locks `total` up front, and `claim_stream()` computes, on read, how
+    // much has linearly vested between `start_ledger` and `end_ledger`
+    // using only env.ledger().sequence() and integer arithmetic (no new
+    // dependency). This is the practical on-chain approximation the
+    // issue's own "Approach" section anticipates, and is deliberately
+    // simpler than lazy per-read accrual bolted onto the existing
+    // Balance/charge() flow, which the issue's own open questions leave
+    // genuinely unresolved (its acceptance criteria are explicitly
+    // conditional on "if pursued").
+
+    /// Payer locks `total` for linear vesting to `beneficiary` between
+    /// `start_ledger` and `end_ledger`. One active stream per
+    /// (payer, beneficiary) pair at a time — a second create_stream() call
+    /// for the same pair while one is still active is rejected, the same
+    /// way record_question() rejects a duplicate id, so it can never
+    /// silently clobber an existing schedule.
+    pub fn create_stream(
+        env: Env,
+        payer: Address,
+        beneficiary: Address,
+        total: i128,
+        start_ledger: u32,
+        end_ledger: u32,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if total <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if end_ledger <= start_ledger {
+            return Err(ContractError::InvalidStreamRange);
+        }
+
+        let key = DataKey::Stream(payer.clone(), beneficiary.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(ContractError::InvalidStreamRange);
+        }
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &total,
+        );
+
+        let stream = Stream {
+            payer: payer.clone(),
+            beneficiary: beneficiary.clone(),
+            total,
+            claimed: 0,
+            start_ledger,
+            end_ledger,
+        };
+        Self::set_persistent(&env, &key, &stream);
+        Self::bump_instance(&env);
+        StreamCreated {
+            payer,
+            beneficiary,
+            total,
+            start_ledger,
+            end_ledger,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Computes how much of `stream` has vested as of now (linear between
+    /// start_ledger and end_ledger, clamped to [0, total]). Pure; callers
+    /// decide what to do with the result.
+    fn vested_amount(env: &Env, stream: &Stream) -> i128 {
+        let now = env.ledger().sequence();
+        if now >= stream.end_ledger {
+            stream.total
+        } else if now <= stream.start_ledger {
+            0
+        } else {
+            let elapsed = (now - stream.start_ledger) as i128;
+            let span = (stream.end_ledger - stream.start_ledger) as i128;
+            stream.total * elapsed / span
+        }
+    }
+
+    /// Beneficiary claims whatever has newly vested since the last claim,
+    /// computed lazily from env.ledger().sequence() — no scheduler, no
+    /// per-ledger job, and no write is needed between two reads for the
+    /// math to stay correct (get_stream() reflects the same underlying
+    /// schedule without ever needing a "touch").
+    pub fn claim_stream(env: Env, payer: Address, beneficiary: Address) -> Result<i128, ContractError> {
+        beneficiary.require_auth();
+
+        let key = DataKey::Stream(payer.clone(), beneficiary.clone());
+        let mut stream: Stream = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::StreamNotFound)?;
+
+        let vested = Self::vested_amount(&env, &stream);
+        let claimable = vested - stream.claimed;
+        if claimable <= 0 {
+            return Err(ContractError::NothingToClaim);
+        }
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &env.current_contract_address(),
+            &beneficiary,
+            &claimable,
+        );
+
+        stream.claimed = vested;
+        Self::set_persistent(&env, &key, &stream);
+        Self::bump_instance(&env);
+        StreamClaimed {
+            payer,
+            beneficiary,
+            amount: claimable,
+        }
+        .publish(&env);
+        Ok(claimable)
+    }
+
+    pub fn get_stream(env: Env, payer: Address, beneficiary: Address) -> Result<Stream, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Stream(payer, beneficiary))
+            .ok_or(ContractError::StreamNotFound)
+    }
+
+    /// Payer cancels a stream early: whatever has vested so far is paid to
+    /// `beneficiary` immediately (cancelling never claws back funds
+    /// `beneficiary` already earned by the passage of ledgers), and the
+    /// unvested remainder is returned to `payer`. Answers the issue's
+    /// third "if pursued" acceptance criterion.
+    pub fn cancel_stream(env: Env, payer: Address, beneficiary: Address) -> Result<i128, ContractError> {
+        payer.require_auth();
+
+        let key = DataKey::Stream(payer.clone(), beneficiary.clone());
+        let stream: Stream = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::StreamNotFound)?;
+
+        let vested = Self::vested_amount(&env, &stream);
+        let owed_to_beneficiary = vested - stream.claimed;
+        let refund_to_payer = stream.total - vested;
+
+        let token_addr = Self::token(&env)?;
+        let token_client = token::Client::new(&env, &token_addr);
+        if owed_to_beneficiary > 0 {
+            token_client.transfer(&env.current_contract_address(), &beneficiary, &owed_to_beneficiary);
+        }
+        if refund_to_payer > 0 {
+            token_client.transfer(&env.current_contract_address(), &payer, &refund_to_payer);
+        }
+
+        env.storage().persistent().remove(&key);
+        Self::bump_instance(&env);
+        StreamClaimed {
+            payer,
+            beneficiary,
+            amount: owed_to_beneficiary,
+        }
+        .publish(&env);
+        Ok(refund_to_payer)
+    }
 }
 
 #[cfg(test)]
@@ -1700,3 +1922,5 @@ mod test_reopen_question;
 mod test_question_templates;
 #[cfg(test)]
 mod test_delegated_auth;
+#[cfg(test)]
+mod test_payment_streaming;
