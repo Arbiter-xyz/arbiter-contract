@@ -146,3 +146,6 @@ the full write-up.)
 
 <!-- handsoff-issue-78 -->
 - #78: Multi-treasury fee routing
+
+<!-- handsoff-issue-79 -->
+- #79: On-chain aggregate stats view
