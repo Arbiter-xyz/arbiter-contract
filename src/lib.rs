@@ -198,6 +198,15 @@ pub enum DataKey {
     /// the new permissionless check_top_up_threshold() — see that fn's docs
     /// for why charge() itself is left untouched.
     TopUpThreshold(Address),
+    /// #92: amount of a worker's Owed(Address) currently pledged as
+    /// collateral and therefore excluded from what do_withdraw() will pay
+    /// out. Set only via lock_owed()/release_owed(), gated to whichever
+    /// single address set_lending_authority() has registered.
+    OwedLock(Address),
+    /// #92: the one address (e.g. a lending protocol contract) authorized to
+    /// call lock_owed()/release_owed(). Admin-registered, mirroring the
+    /// MigrationSource single-authority pattern above.
+    LendingAuthority,
 }
 
 #[contracterror]
@@ -223,6 +232,22 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    // Numeric codes 20-99 are intentionally skipped: this repo has other
+    // open PRs (upstream #142, #143) adding their own ContractError variants
+    // in that range against the same upstream main. Starting at 100 keeps
+    // these new variants collision-free regardless of merge order.
+    /// #92: lock_owed() was asked to lock more than the worker's current
+    /// Owed(Address) minus what is already locked.
+    LockExceedsOwed = 101,
+    /// #92: release_owed() was asked to release more than is currently
+    /// locked for that worker.
+    NoLockToRelease = 102,
+    /// #92: lock_owed()/release_owed() called by an address other than the
+    /// one registered via set_lending_authority().
+    NotLendingAuthority = 107,
+    /// #92: lock_owed()/release_owed() called before any
+    /// set_lending_authority() call has ever succeeded.
+    LendingAuthorityNotSet = 108,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -272,6 +297,26 @@ pub struct TopUpNeeded {
     pub payer: Address,
     pub balance: i128,
     pub threshold: i128,
+}
+
+/// #92: emitted by lock_owed().
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedLocked {
+    #[topic]
+    pub worker: Address,
+    pub amount: i128,
+    pub total_locked: i128,
+}
+
+/// #92: emitted by release_owed().
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedReleased {
+    #[topic]
+    pub worker: Address,
+    pub amount: i128,
+    pub total_locked: i128,
 }
 
 #[contract]
@@ -694,7 +739,16 @@ impl OracleEscrow {
         if owed <= 0 {
             return Err(ContractError::NothingOwed);
         }
-        if amount > owed {
+        // #92, the one non-additive change this PR makes: caps what's
+        // withdrawable at owed minus whatever lock_owed() has pledged as
+        // collateral. Locked amount defaults to 0, so this is a no-op for
+        // every worker who never has anything locked.
+        let locked: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OwedLock(worker.clone()))
+            .unwrap_or(0);
+        if amount > owed - locked {
             return Err(ContractError::InsufficientOwed);
         }
 
@@ -1441,6 +1495,119 @@ impl OracleEscrow {
         .publish(&env);
         true
     }
+
+    // ---- #92: owed balance as collateral -----------------------------
+    //
+    // Scoped down per the issue's out-of-scope note: no liquidation logic,
+    // no price oracle — purely the lock/lien primitive. The lock is a FIXED
+    // amount (not a percentage), so if resolve() credits more Owed after a
+    // lock is placed, the lock does not float — it stays exactly what
+    // lock_owed() set it to (open question 3). Authorization is a single
+    // admin-registered address (open question 2), the same shape as
+    // set_migration_source()/MigrationSource above.
+
+    /// Admin-only. Registers the one address allowed to call
+    /// lock_owed()/release_owed() — e.g. a separate lending-protocol
+    /// contract. Overwrites any previous registration.
+    pub fn set_lending_authority(env: Env, authority: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::LendingAuthority, &authority);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_lending_authority(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::LendingAuthority)
+    }
+
+    /// Lending-authority-only. Pledges `amount` more of `worker`'s Owed
+    /// balance as collateral, capping the total locked amount at `worker`'s
+    /// current Owed (a lock can never exceed what's actually owed at lock
+    /// time, and does not grow automatically if more is credited later).
+    /// do_withdraw() enforces this via the one-line guard documented there.
+    pub fn lock_owed(
+        env: Env,
+        authority: Address,
+        worker: Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        Self::require_lending_authority(&env, &authority)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let owed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Owed(worker.clone()))
+            .unwrap_or(0);
+        let lock_key = DataKey::OwedLock(worker.clone());
+        let locked: i128 = env.storage().persistent().get(&lock_key).unwrap_or(0);
+        let new_locked = locked + amount;
+        if new_locked > owed {
+            return Err(ContractError::LockExceedsOwed);
+        }
+        Self::set_persistent(&env, &lock_key, &new_locked);
+        Self::bump_instance(&env);
+        OwedLocked {
+            worker,
+            amount,
+            total_locked: new_locked,
+        }
+        .publish(&env);
+        Ok(new_locked)
+    }
+
+    /// Lending-authority-only. Releases up to `amount` of previously locked
+    /// collateral, restoring that much of `worker`'s Owed to being
+    /// withdrawable again.
+    pub fn release_owed(
+        env: Env,
+        authority: Address,
+        worker: Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        Self::require_lending_authority(&env, &authority)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let lock_key = DataKey::OwedLock(worker.clone());
+        let locked: i128 = env.storage().persistent().get(&lock_key).unwrap_or(0);
+        if amount > locked {
+            return Err(ContractError::NoLockToRelease);
+        }
+        let new_locked = locked - amount;
+        Self::set_persistent(&env, &lock_key, &new_locked);
+        Self::bump_instance(&env);
+        OwedReleased {
+            worker,
+            amount,
+            total_locked: new_locked,
+        }
+        .publish(&env);
+        Ok(new_locked)
+    }
+
+    pub fn get_locked_owed(env: Env, worker: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwedLock(worker))
+            .unwrap_or(0)
+    }
+
+    fn require_lending_authority(env: &Env, authority: &Address) -> Result<(), ContractError> {
+        let registered: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::LendingAuthority)
+            .ok_or(ContractError::LendingAuthorityNotSet)?;
+        if *authority != registered {
+            return Err(ContractError::NotLendingAuthority);
+        }
+        authority.require_auth();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1453,3 +1620,5 @@ mod test_migration;
 mod test_ttl;
 #[cfg(test)]
 mod test_auto_topup;
+#[cfg(test)]
+mod test_owed_collateral;
