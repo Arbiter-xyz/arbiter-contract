@@ -127,6 +127,27 @@ down to the dust stroop. (That run predates this repo's split; see
 [`arbiter`](https://github.com/rudeus112266/arbiter) monorepo README for
 the full write-up.)
 
+## WASM binary size
+
+The release profile in `Cargo.toml` is tuned for size (`opt-level = "z"`,
+`lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`), and
+`stellar contract build` runs `wasm-opt` on the result. Smaller bytecode
+lowers the storage rent every deployment (and re-deployment) pays, so the
+size is treated as a budget to defend rather than a one-off observation.
+
+Measure it with the same command CI uses:
+
+```sh
+stellar contract build
+ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
+```
+
+**Baseline: 15.5KB** (optimized). The build must stay at or below this
+number; a PR that regresses it should be visible in CI output. Note the
+tradeoff: aggressive optimization can make a failed transaction's trap
+less readable, so debugging a revert may require a separate unoptimized
+build.
+
 ## Handsoff notes
 
 <!-- handsoff-issue-25 -->
@@ -143,3 +164,6 @@ the full write-up.)
 
 <!-- handsoff-issue-63 -->
 - #63: Formal state-machine spec
+
+<!-- handsoff-issue-64 -->
+- #64: WASM binary size optimization

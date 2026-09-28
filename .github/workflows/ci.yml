@@ -37,6 +37,25 @@ jobs:
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - name: Build contract and test fixtures to WASM
         run: scripts/build-wasm.sh
+      - name: WASM size budget
+        # Records the optimized contract bytecode size and fails if it
+        # regresses past the 15.5KB baseline cited in the README. The size
+        # is measured from the same `stellar contract build` output that
+        # scripts/build-wasm.sh produces, so it is reproducible locally.
+        run: |
+          WASM=target/wasm32v1-none/release/escrow_contract.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::error::expected WASM artifact not found at $WASM"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$WASM")
+          echo "Optimized WASM size: ${SIZE} bytes ($(awk "BEGIN { printf \"%.1f\", $SIZE/1024 }" ) KB)"
+          echo "### WASM size: ${SIZE} bytes" >> "$GITHUB_STEP_SUMMARY"
+          BASELINE=15872 # 15.5KB
+          if [ "$SIZE" -gt "$BASELINE" ]; then
+            echo "::error::WASM size ${SIZE} bytes exceeds the ${BASELINE}-byte (15.5KB) baseline"
+            exit 1
+          fi
       - name: WASM tests (mainnet resource-limit gate, upgrade worked example)
         # The benchmark sweep (bench_*) is for re-deriving MAX_QUORUM_SIZE by
         # hand, not a gate. See docs/RESOURCE_LIMITS.md.

@@ -25,6 +25,10 @@ upgrade-test-v2 = []
 # Lifts MAX_QUORUM_SIZE so the resource sweep can measure past it.
 bench-uncapped-quorum = []
 
+# Size-oriented release profile (issue #64). `stellar contract build` compiles
+# with this profile and then runs wasm-opt, so the deployed bytecode is the
+# post-wasm-opt artifact. These settings are the size budget's first line of
+# defense; the measured size is recorded in the README and surfaced by CI.
 [profile.release]
 opt-level = "z"
 overflow-checks = true
