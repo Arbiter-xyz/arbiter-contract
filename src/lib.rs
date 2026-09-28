@@ -211,6 +211,13 @@ pub enum DataKey {
     /// question, keyed by question_id. Minted opt-in via mint_claim() — see
     /// that fn's docs for why resolve() itself doesn't mint automatically.
     Claim(u64),
+    /// #94: a worker's on-chain win/loss tally. Updated opt-in via
+    /// record_reputation() — see that fn's docs for why resolve() itself
+    /// isn't touched.
+    Reputation(Address),
+    /// #94: guards record_reputation() against being called twice for the
+    /// same question_id, which would double-count that resolution.
+    ReputationRecorded(u64),
 }
 
 #[contracterror]
@@ -257,6 +264,8 @@ pub enum ContractError {
     QuestionNotResolved = 103,
     /// #93: mint_claim() called twice for the same question_id.
     ClaimAlreadyExists = 104,
+    /// #94: record_reputation() called twice for the same question_id.
+    ReputationAlreadyRecorded = 106,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -351,6 +360,27 @@ pub struct ClaimMinted {
     pub question_id: u64,
     pub payer: Address,
     pub minted_at: u32,
+}
+
+/// #94: a worker's cumulative on-chain win/loss tally. "Soulbound" here
+/// means: no function in this contract ever moves one address's Reputation
+/// entry to another address, and there is no owner-settable transfer path —
+/// the record is bound to the Address key it lives under for the life of
+/// the contract. See record_reputation()'s doc comment for scoping.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReputationInfo {
+    pub matched: u32,
+    pub lost: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReputationUpdated {
+    #[topic]
+    pub worker: Address,
+    pub matched: u32,
+    pub lost: u32,
 }
 
 #[contract]
@@ -1697,6 +1727,72 @@ impl OracleEscrow {
     pub fn get_claim(env: Env, question_id: u64) -> Option<ClaimRecord> {
         env.storage().persistent().get(&DataKey::Claim(question_id))
     }
+
+    // ---- #94: soulbound reputation counters --------------------------
+    //
+    // Scoped down per the issue's own open questions: no burn-and-reissue
+    // token mint on every resolve() (question 1's cost concern) — this
+    // keeps a plain per-worker counter struct instead, updated by an
+    // opt-in call rather than inside resolve()'s hot path, so resolve()'s
+    // body and cost are unchanged. "Soulbound" here (question 3) means
+    // there is no function anywhere in this contract that moves a
+    // Reputation entry between addresses.
+
+    /// Admin-only, opt-in companion to resolve(): records the same
+    /// workers/losing_workers outcome for `question_id` into each worker's
+    /// running Reputation tally. Guarded against being called twice for the
+    /// same question_id so a resolved question's counters can't be
+    /// double-counted. Intentionally does not duplicate resolve()'s
+    /// validation (list overlap, size cap) — this trusts the same admin
+    /// that already authorized resolve() and is meant to be called
+    /// immediately alongside it.
+    pub fn record_reputation(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let recorded_key = DataKey::ReputationRecorded(question_id);
+        if env.storage().persistent().has(&recorded_key) {
+            return Err(ContractError::ReputationAlreadyRecorded);
+        }
+        Self::set_persistent(&env, &recorded_key, &true);
+
+        for worker in workers.iter() {
+            let key = DataKey::Reputation(worker.clone());
+            let mut info: ReputationInfo = env.storage().persistent().get(&key).unwrap_or_default();
+            info.matched += 1;
+            Self::set_persistent(&env, &key, &info);
+            ReputationUpdated {
+                worker,
+                matched: info.matched,
+                lost: info.lost,
+            }
+            .publish(&env);
+        }
+        for loser in losing_workers.iter() {
+            let key = DataKey::Reputation(loser.clone());
+            let mut info: ReputationInfo = env.storage().persistent().get(&key).unwrap_or_default();
+            info.lost += 1;
+            Self::set_persistent(&env, &key, &info);
+            ReputationUpdated {
+                worker: loser,
+                matched: info.matched,
+                lost: info.lost,
+            }
+            .publish(&env);
+        }
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_reputation(env: Env, worker: Address) -> ReputationInfo {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Reputation(worker))
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -1713,3 +1809,5 @@ mod test_auto_topup;
 mod test_owed_collateral;
 #[cfg(test)]
 mod test_claim_nft;
+#[cfg(test)]
+mod test_soulbound_reputation;
