@@ -194,6 +194,14 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
+    /// Admin-settable lower bound on `workers.len() + losing_workers.len()`
+    /// for resolve() (issue #85). Absent means unbounded (today's
+    /// behavior) — see `set_quorum_bounds()` / `get_quorum_bounds()`.
+    MinQuorum,
+    /// Admin-settable upper bound, same shape as `MinQuorum`. Independent
+    /// of the fixed `MAX_QUORUM_SIZE` resource-safety cap, which always
+    /// applies regardless of this being configured.
+    MaxQuorum,
 }
 
 #[contracterror]
@@ -219,6 +227,20 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    /// `workers.len() + losing_workers.len()` exceeds the hard, compile-time
+    /// MAX_QUORUM_SIZE cap. This variant was already referenced by resolve()
+    /// on upstream main but never defined in this enum, leaving the crate
+    /// unable to compile — defined here (see issue #85) since it is exactly
+    /// the kind of quorum-size-bound variant that issue is about. Codes
+    /// 200+ are used for this PR's new variants to avoid colliding with the
+    /// 20s range used by a sibling in-flight PR and the 100s range used by
+    /// another.
+    QuorumTooLarge = 200,
+    /// `workers.len() + losing_workers.len()` falls outside the
+    /// admin-configured `MinQuorum`/`MaxQuorum` bounds (see
+    /// `set_quorum_bounds()`). Distinct from `QuorumTooLarge`, which is the
+    /// fixed, always-enforced resource-safety ceiling.
+    QuorumOutOfBounds = 201,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -483,6 +505,11 @@ impl OracleEscrow {
         if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
             return Err(ContractError::QuorumTooLarge);
         }
+        // Issue #85: one guard clause enforcing admin-configured quorum
+        // bounds, in addition to (not instead of) the fixed MAX_QUORUM_SIZE
+        // check above. Unconfigured bounds (never called set_quorum_bounds())
+        // default to unbounded, preserving today's behavior.
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
@@ -1350,6 +1377,61 @@ impl OracleEscrow {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
+
+    // ---- Issue #85: admin-settable quorum-size bounds ----------------
+    //
+    // Simplifications vs. the full issue:
+    //  - Bounds are global (one Min/Max pair), matching the contract's
+    //    existing lack of a tier concept (same tradeoff set_timeout_ledgers()
+    //    already makes).
+    //  - `losing_workers.len()` counts toward the bound, same as it already
+    //    does for MAX_QUORUM_SIZE just above, since validate_worker_lists()'s
+    //    O(n^2) cost scales with the combined list.
+    //  - Never-configured bounds default to fully unbounded (0 / u32::MAX),
+    //    preserving today's behavior exactly, per the issue's own open
+    //    question.
+
+    /// Admin-only. Sets the inclusive `[min, max]` bounds on
+    /// `workers.len() + losing_workers.len()` that resolve() will accept, in
+    /// addition to the fixed MAX_QUORUM_SIZE ceiling. Pass `min = 0` and
+    /// `max = u32::MAX` to effectively clear the bounds back to unbounded.
+    pub fn set_quorum_bounds(env: Env, min: u32, max: u32) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if min > max {
+            return Err(ContractError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::MinQuorum, &min);
+        env.storage().instance().set(&DataKey::MaxQuorum, &max);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// Returns the currently configured `(min, max)` quorum bounds, or the
+    /// unbounded defaults `(0, u32::MAX)` if `set_quorum_bounds()` has never
+    /// been called.
+    pub fn get_quorum_bounds(env: Env) -> (u32, u32) {
+        let min: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinQuorum)
+            .unwrap_or(0);
+        let max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxQuorum)
+            .unwrap_or(u32::MAX);
+        (min, max)
+    }
+
+    /// Shared by resolve() (and available for callers previewing it, see
+    /// `preview_resolve()`) to enforce the admin-configured bounds.
+    fn check_quorum_bounds(env: &Env, quorum_size: u32) -> Result<(), ContractError> {
+        let (min, max) = Self::get_quorum_bounds(env.clone());
+        if quorum_size < min || quorum_size > max {
+            return Err(ContractError::QuorumOutOfBounds);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1360,3 +1442,5 @@ mod test_economics;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
+#[cfg(test)]
+mod test_quorum_bounds;
