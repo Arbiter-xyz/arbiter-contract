@@ -158,3 +158,15 @@ the full write-up.)
 
 <!-- handsoff-issue-28 -->
 - #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
+
+<!-- handsoff-issue-21 -->
+- #21: touch() rewrites unchanged Owed/Stake values before extending TTL, costing an avoidable write fee
+
+<!-- handsoff-issue-24 -->
+- #24: refund_timeout()'s deadline computation can overflow u32 when timeout_ledgers is set unreasonably large, permanently disabling the escape hatch
+
+<!-- handsoff-issue-51 -->
+- #51: Time-locked large withdrawals
+
+<!-- handsoff-issue-52 -->
+- #52: Withdrawal destination allowlist
