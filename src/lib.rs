@@ -219,6 +219,13 @@ pub enum ContractError {
     MigrationNotAuthorized = 17,
     TokenMismatch = 18,
     InvalidMigrationTarget = 19,
+    // 300s: new-feature error codes for #87/#88/#89/#90. Starting at 300
+    // deliberately avoids colliding with other in-flight PRs touching this
+    // same file (20s, 100s, 200s already claimed elsewhere) — see this
+    // PR's description for the full breakdown.
+    /// #87: reopen_question() called on a question that isn't Refunded (or
+    /// isn't owned by the caller).
+    QuestionNotRefunded = 300,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -253,6 +260,18 @@ pub struct QuestionMigrated {
     pub question_id: u64,
     pub target: Address,
     pub amount: i128,
+}
+
+/// Emitted by reopen_question() (#87).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionReopened {
+    #[topic]
+    pub question_id: u64,
+    pub payer: Address,
+    pub amount: i128,
+    pub created_at: u32,
+    pub timeout_ledgers: u32,
 }
 
 #[contract]
@@ -1350,6 +1369,90 @@ impl OracleEscrow {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
+
+    // ---- #87: reopen a refunded question -------------------------------
+    //
+    // Scope, per the issue's own resolution of its open question 1: a
+    // triggered refund still means "the payer got their money back, full
+    // stop" — do_refund()/refund_timeout() are UNCHANGED here, funds still
+    // leave the contract unconditionally. What's added is narrower: a
+    // Refunded question's id can be turned back into a fresh Pending
+    // question, funded by a brand-new deposit from the ORIGINAL payer only
+    // (answering open question 2 — no admin path), with created_at and the
+    // timeout clock reset to "now" (open question 3 — deliberately a NEW
+    // window, not a resurrection of the old one, since the old window's
+    // deadline already passed and prompted the refund).
+
+    /// Turns a Refunded question back into a fresh, fully-funded Pending
+    /// one under the SAME question_id, requiring a brand-new deposit from
+    /// the original payer — reusing the id doesn't reuse the old funds,
+    /// which already left the contract when it was refunded. Only the
+    /// original `question.payer` may reopen (their own require_auth()); a
+    /// Resolved/Pending/Migrated question is out of scope and rejected with
+    /// QuestionNotRefunded, matching the issue's explicit scope line.
+    pub fn reopen_question(
+        env: Env,
+        payer: Address,
+        question_id: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let key = DataKey::Question(question_id);
+        let existing: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if existing.status != Status::Refunded {
+            return Err(ContractError::QuestionNotRefunded);
+        }
+        if existing.payer != payer {
+            return Err(ContractError::QuestionNotRefunded);
+        }
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let timeout_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimeoutLedgers)
+            .ok_or(ContractError::NotInitialized)?;
+        let created_at = env.ledger().sequence();
+        let question = Question {
+            payer,
+            amount,
+            status: Status::Pending,
+            created_at,
+            timeout_ledgers,
+        };
+
+        // Deliberately not record_question(): that fn's QuestionAlreadyExists
+        // guard must keep protecting every other status, so this repeats its
+        // remaining body (store, extend TTL, re-index, emit) rather than
+        // loosening a check that import_question() also relies on.
+        env.storage().persistent().set(&key, &question);
+        Self::extend_question_ttl(&env, &key, &question);
+        Self::index_add(&env, question_id);
+        Self::bump_instance(&env);
+        QuestionReopened {
+            question_id,
+            payer: question.payer,
+            amount: question.amount,
+            created_at: question.created_at,
+            timeout_ledgers: question.timeout_ledgers,
+        }
+        .publish(&env);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1360,3 +1463,5 @@ mod test_economics;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
+#[cfg(test)]
+mod test_reopen_question;
