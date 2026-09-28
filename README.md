@@ -140,3 +140,6 @@ the full write-up.)
 
 <!-- handsoff-issue-62 -->
 - #62: Mutation testing pass
+
+<!-- handsoff-issue-63 -->
+- #63: Formal state-machine spec
