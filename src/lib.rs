@@ -258,6 +258,11 @@ pub enum ContractError {
     /// call already flagged; an admin must resolve the dispute out of band
     /// (see the Out of scope note on resolve_challengeable()).
     QuestionDisputed = 25,
+    /// #98: resolve_median() called with an empty answer set.
+    EmptyAnswerSet = 26,
+    /// #98: resolve_median()'s answer set names the same worker Address
+    /// more than once.
+    DuplicateAnswerAddress = 27,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -357,6 +362,25 @@ pub struct ResolutionChallengeable {
 pub struct ResolutionDisputed {
     #[topic]
     pub question_id: u64,
+}
+
+/// #98: one worker's numeric answer, as passed to resolve_median(). A
+/// struct (rather than a bare tuple) so it derives #[contracttype] cleanly.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerEntry {
+    pub worker: Address,
+    pub value: i128,
+}
+
+/// Emitted when resolve_median() computes its median (#98).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MedianComputed {
+    #[topic]
+    pub question_id: u64,
+    pub median: i128,
+    pub winners: u32,
 }
 
 #[contract]
@@ -1793,6 +1817,137 @@ impl OracleEscrow {
             .persistent()
             .get(&DataKey::PendingResolution(question_id))
     }
+
+    // ---- #98: on-chain median-consensus mode -------------------------------
+    //
+    // Scoped-down implementation: a NEW, opt-in resolve_median() that takes
+    // numeric worker answers directly and computes winners/losers itself
+    // from a tolerance band around the median, instead of trusting a
+    // pre-split workers/losing_workers list from the backend. Coexists with
+    // resolve() rather than replacing it — the issue flags this choice as
+    // open, and opt-in is the least disruptive option. Median/sort is a
+    // simple O(n^2) insertion sort (answer sets here are bounded by the same
+    // small quorum sizes resolve() already assumes); no new dependency is
+    // used. `tolerance_bps` is caller-supplied per call, not a stored global
+    // config — out of scope: choosing/enforcing one canonical tolerance
+    // policy.
+
+    /// Same payout mechanics as resolve() (20% platform fee, even split of
+    /// the remainder, SLASH_BPS taken from losers), but takes numeric
+    /// `answers` instead of pre-split worker lists: the median of all
+    /// submitted values is computed on-chain, any answer within
+    /// `tolerance_bps` of it (relative; an answer must equal a zero median
+    /// exactly) is a winner, and every other answer's worker is treated as
+    /// a losing worker for slashing purposes.
+    pub fn resolve_median(
+        env: Env,
+        question_id: u64,
+        answers: Vec<AnswerEntry>,
+        tolerance_bps: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        if answers.is_empty() {
+            return Err(ContractError::EmptyAnswerSet);
+        }
+        for i in 0..answers.len() {
+            let a = answers.get(i).unwrap();
+            for j in (i + 1)..answers.len() {
+                if answers.get(j).unwrap().worker == a.worker {
+                    return Err(ContractError::DuplicateAnswerAddress);
+                }
+            }
+        }
+
+        let median = Self::compute_median(&env, &answers);
+
+        let mut winners: Vec<Address> = Vec::new(&env);
+        let mut losers: Vec<Address> = Vec::new(&env);
+        for entry in answers.iter() {
+            let within = if median == 0 {
+                entry.value == 0
+            } else {
+                let diff = (entry.value - median).abs();
+                diff * BPS_DENOM / median.abs() <= tolerance_bps as i128
+            };
+            if within {
+                winners.push_back(entry.worker);
+            } else {
+                losers.push_back(entry.worker);
+            }
+        }
+        if winners.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+
+        let key = DataKey::Question(question_id);
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let amount = question.amount;
+        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let pool = amount - fee;
+        let n = winners.len() as i128;
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let mut platform_take = fee + dust;
+        for loser in losers.iter() {
+            platform_take += Self::slash(&env, &loser, slash_cap);
+        }
+        let winners_count = winners.len();
+        for worker in winners.iter() {
+            Self::credit_owed(&env, &worker, share);
+        }
+        let _ = platform_take;
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        MedianComputed {
+            question_id,
+            median,
+            winners: winners_count,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Simple insertion sort (O(n^2), fine for resolve()-sized quorums; see
+    /// MAX_QUORUM_SIZE) into a scratch Vec<i128>, then picks the middle
+    /// element(s). No `std::sort`/new dependency needed.
+    fn compute_median(env: &Env, answers: &Vec<AnswerEntry>) -> i128 {
+        let mut values: Vec<i128> = Vec::new(env);
+        for entry in answers.iter() {
+            let mut inserted = false;
+            let mut i = 0u32;
+            while i < values.len() {
+                if entry.value < values.get(i).unwrap() {
+                    values.insert(i, entry.value);
+                    inserted = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !inserted {
+                values.push_back(entry.value);
+            }
+        }
+        let n = values.len();
+        if n % 2 == 1 {
+            values.get(n / 2).unwrap()
+        } else {
+            let a = values.get(n / 2 - 1).unwrap();
+            let b = values.get(n / 2).unwrap();
+            // Integer average, rounding toward zero — floats are never used.
+            (a + b) / 2
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1809,3 +1964,5 @@ mod test_refund_underwriting;
 mod test_worker_diversity;
 #[cfg(test)]
 mod test_dispute_finality;
+#[cfg(test)]
+mod test_median_consensus;
