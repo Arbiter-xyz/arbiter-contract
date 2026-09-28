@@ -2,8 +2,8 @@
 
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contracterror, contractevent, contractimpl, contracttype, token, vec, Address, Env,
-    IntoVal, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, vec,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
 /// 20% platform fee, integer basis points. Never floats.
@@ -60,6 +60,7 @@ const MIN_UNBONDING_LEDGERS: u32 = 3 * DAY_LEDGERS;
 /// Max page size for list_pending(). Each id is one persistent read; 100
 /// stays well inside every network's per-tx read limits.
 const MAX_PENDING_PAGE: u32 = 100;
+const MAX_ALLOWED_ASSETS: u32 = 32;
 
 /// Upper bound on any question's refund_timeout() window: 7 days of ledgers
 /// at a 5s close time. Unbounded, a huge value would overflow
@@ -87,17 +88,18 @@ pub const MAX_QUORUM_SIZE: u32 = u32::MAX;
 /// withdrawable at any time. Nobody's funds depend on trusting the new code.
 pub const UPGRADE_DELAY_LEDGERS: u32 = MAX_TIMEOUT_LEDGERS + 17_280;
 const _: () = assert!(UPGRADE_DELAY_LEDGERS > MAX_TIMEOUT_LEDGERS);
+pub const ADMIN_ROTATION_DELAY_LEDGERS: u32 = UPGRADE_DELAY_LEDGERS;
 // A pending question can't archive before its refund window opens either.
 const _: () = assert!(MAX_TIMEOUT_LEDGERS < PERSISTENT_TTL_EXTEND_TO);
 
 /// Reported by version(). Storage layout compatibility across versions is
 /// pinned by the golden-XDR tests in test_upgrade.rs.
-#[cfg(not(feature = "upgrade-test-v2"))]
-pub const CONTRACT_VERSION: u32 = 1;
-/// Upgrade test fixture only (never deploy): the "v2" in test_upgrade.rs's
-/// worked example.
-#[cfg(feature = "upgrade-test-v2")]
+#[cfg(not(feature = "upgrade-test-v3"))]
 pub const CONTRACT_VERSION: u32 = 2;
+/// Upgrade test fixture only (never deploy): the next version after the
+/// multi-asset/admin-rotation release.
+#[cfg(feature = "upgrade-test-v3")]
+pub const CONTRACT_VERSION: u32 = 3;
 
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,6 +138,13 @@ pub struct Question {
     pub timeout_ledgers: u32,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAdminRotation {
+    pub new_admin: Address,
+    pub executable_at: u32,
+}
+
 /// A worker's bond. `settled + warming` is the active stake get_stake()
 /// reports; `unbonding` has left the active stake but is still slashable
 /// until `unbonding_release_at`.
@@ -167,8 +176,8 @@ pub enum DataKey {
     /// are never permanently stuck waiting on it.
     TimeoutLedgers,
     Question(u64),
-    /// Worker's posted USDC bond (a StakeInfo). Staking is opt-in — a worker
-    /// who never stakes is never slashed, they just don't carry the
+    /// Worker's posted default-asset bond (a StakeInfo). Staking is opt-in —
+    /// a worker who never stakes is never slashed, they just don't carry the
     /// credibility a stake signals. This contract never reads Stake to gate
     /// participation (that would mean an on-chain read on every dispatch
     /// decision, which doesn't scale) — the backend does that off-chain
@@ -177,14 +186,14 @@ pub enum DataKey {
     /// safe: a worker can no longer unstake to zero between answering and
     /// resolve() and escape the slash.
     Stake(Address),
-    /// Worker's accrued-but-unwithdrawn earnings from resolve() calls.
-    /// resolve() credits this instead of transferring USDC to each worker
+    /// Worker's accrued-but-unwithdrawn default-asset earnings from
+    /// resolve() calls. resolve() credits this instead of transferring funds
     /// individually, so a worker who answers many questions pays one
     /// network fee (via withdraw()) instead of receiving N separate
     /// incoming transfers.
     Owed(Address),
-    /// Payer's prepaid balance, mirror image of Owed: deposit() locks funds
-    /// in once (one signature, one network fee), then charge() — admin-only,
+    /// Payer's default-asset prepaid balance, mirror image of Owed: deposit()
+    /// locks funds in once (one signature, one network fee), then charge() — admin-only,
     /// no payer signature per call — draws down against it to open questions
     /// exactly as submit() does. Lets a metered integrator pay like an API
     /// key + invoice instead of signing a transaction per question.
@@ -214,6 +223,36 @@ pub enum DataKey {
     /// by resolve_challengeable(), keyed by question_id. Holds the worker
     /// lists, the dispute deadline and whether it's been disputed.
     PendingResolution(u64),
+    /// A worker's registered secp256r1 public key (SEC-1-encoded, 65
+    /// bytes), used by verify_passkey_auth() as a simplified stand-in for a
+    /// full WebAuthn/passkey ceremony — see the doc comment on
+    /// register_passkey() for what this deliberately does not model.
+    PasskeyPubkey(Address),
+    /// Ed25519 public key of the trusted KYC attestor, set by the admin via
+    /// set_kyc_attestor(). Absent means no attestor is configured and
+    /// attest_kyc() always fails — see docs/kyc-attestation.md for why this
+    /// contract never itself gates on the resulting attestation.
+    KycAttestorPubkey,
+    /// Ledger sequence until which `Address` is considered KYC-attested,
+    /// written by attest_kyc().
+    KycAttestation(Address),
+    /// A worker's stake (as get_stake() would have reported it at the time)
+    /// captured at a specific ledger sequence by snapshot_stake(). See
+    /// docs/stake-snapshot.md for why this is an explicit, caller-paid
+    /// checkpoint rather than continuous on-chain history.
+    StakeSnapshot(Address, u32),
+}
+
+#[contracttype]
+pub enum AssetKey {
+    QuestionToken(u64),
+    AllowedToken(Address),
+    TokenDecimals(Address),
+    OwedAsset(Address, Address),
+    BalanceAsset(Address, Address),
+    StakeAsset(Address, Address),
+    AllowedAssetCount,
+    PendingAdminRotation,
 }
 
 #[contracterror]
@@ -263,6 +302,26 @@ pub enum ContractError {
     /// #98: resolve_median()'s answer set names the same worker Address
     /// more than once.
     DuplicateAnswerAddress = 27,
+    /// verify_passkey_auth() called before register_passkey() for this
+    /// worker.
+    PasskeyNotRegistered = 28,
+    /// The secp256r1 signature did not verify against the worker's
+    /// registered passkey public key.
+    InvalidPasskeySignature = 29,
+    /// attest_kyc() called before set_kyc_attestor() configured a trusted
+    /// attestor public key.
+    KycAttestorNotSet = 30,
+    /// The expiry ledger passed to attest_kyc() is not in the future.
+    InvalidKycExpiry = 31,
+    /// get_historical_stake() found no snapshot for that worker at that
+    /// exact ledger.
+    StakeSnapshotNotFound = 32,
+    AssetNotAllowed = 33,
+    NoAdminRotationPending = 34,
+    AdminRotationNotReady = 35,
+    CannotDisableDefaultAsset = 36,
+    ArithmeticOverflow = 37,
+    AssetLimitReached = 38,
 }
 
 /// Emitted whenever a question becomes Pending — by submit(), charge(), or
@@ -275,6 +334,7 @@ pub struct QuestionOpened {
     #[topic]
     pub question_id: u64,
     pub payer: Address,
+    pub token: Address,
     pub amount: i128,
     pub created_at: u32,
     pub timeout_ledgers: u32,
@@ -296,6 +356,7 @@ pub struct QuestionMigrated {
     #[topic]
     pub question_id: u64,
     pub target: Address,
+    pub token: Address,
     pub amount: i128,
 }
 
@@ -383,6 +444,67 @@ pub struct MedianComputed {
     pub winners: u32,
 }
 
+/// Emitted by register_passkey() when a worker binds (or replaces) a
+/// secp256r1 passkey public key to their Address.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasskeyRegistered {
+    #[topic]
+    pub worker: Address,
+}
+
+/// Emitted by attest_kyc() when a subject's KYC attestation is recorded or
+/// refreshed.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KycAttested {
+    #[topic]
+    pub subject: Address,
+    pub expiry_ledger: u32,
+}
+
+/// Emitted by snapshot_stake() when a worker's stake is checkpointed at a
+/// ledger.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StakeSnapshotted {
+    #[topic]
+    pub worker: Address,
+    pub ledger: u32,
+    pub stake: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetPermissionChanged {
+    #[topic]
+    pub token: Address,
+    pub allowed: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRotationProposed {
+    #[topic]
+    pub new_admin: Address,
+    pub executable_at: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRotationCancelled {
+    #[topic]
+    pub new_admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminRotationExecuted {
+    #[topic]
+    pub new_admin: Address,
+}
+}
+
 #[contract]
 pub struct OracleEscrow;
 
@@ -409,6 +531,12 @@ impl OracleEscrow {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
+        env.storage().instance().set(&AssetKey::AllowedToken(token.clone()), &true);
+        env.storage().instance().set(&AssetKey::AllowedAssetCount, &1u32);
+        let decimals = token::Client::new(&env, &token).decimals();
+        env.storage()
+            .instance()
+            .set(&AssetKey::TokenDecimals(token), &decimals);
         env.storage().instance().set(&DataKey::Platform, &platform);
         env.storage()
             .instance()
@@ -439,7 +567,29 @@ impl OracleEscrow {
             &amount,
         );
 
-        Self::open_question(&env, payer, question_id, amount)
+        Self::open_question(&env, payer, question_id, amount, token_addr)
+    }
+
+    /// Payer locks an admin-allowlisted SEP-41 asset for one question.
+    /// Amounts are always native token units; no decimal conversion occurs.
+    pub fn submit_asset(
+        env: Env,
+        payer: Address,
+        token: Address,
+        question_id: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        Self::require_allowed_token(&env, &token)?;
+        token::Client::new(&env, &token).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &amount,
+        );
+        Self::open_question(&env, payer, question_id, amount, token)
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -461,9 +611,38 @@ impl OracleEscrow {
 
         let key = DataKey::Balance(payer);
         let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        Self::set_persistent(&env, &key, &(existing + amount));
+        let updated = existing
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Self::set_persistent(&env, &key, &updated);
         Self::bump_instance(&env);
 
+        Ok(())
+    }
+
+    pub fn deposit_asset(
+        env: Env,
+        payer: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        Self::require_allowed_token(&env, &token)?;
+        token::Client::new(&env, &token).transfer(
+            &payer,
+            &env.current_contract_address(),
+            &amount,
+        );
+        let key = Self::balance_key(&env, &token, &payer)?;
+        let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let updated = existing
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Self::set_persistent(&env, &key, &updated);
+        Self::bump_instance(&env);
         Ok(())
     }
 
@@ -494,11 +673,121 @@ impl OracleEscrow {
         Ok(())
     }
 
+    pub fn withdraw_balance_asset(
+        env: Env,
+        payer: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let key = Self::balance_key(&env, &token, &payer)?;
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount > balance {
+            return Err(ContractError::InsufficientBalance);
+        }
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &payer,
+            &amount,
+        );
+        Self::set_persistent(&env, &key, &(balance - amount));
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
     pub fn get_balance(env: Env, payer: Address) -> i128 {
         env.storage()
             .persistent()
             .get(&DataKey::Balance(payer))
             .unwrap_or(0)
+    }
+
+    pub fn get_balance_asset(env: Env, payer: Address, token: Address) -> i128 {
+        Self::balance_key(&env, &token, &payer)
+            .ok()
+            .and_then(|key| env.storage().persistent().get(&key))
+            .unwrap_or(0)
+    }
+
+    pub fn set_asset_allowed(
+        env: Env,
+        token: Address,
+        allowed: bool,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let was_allowed: bool = env
+            .storage()
+            .instance()
+            .get(&AssetKey::AllowedToken(token.clone()))
+            .unwrap_or(false);
+        let is_default = token == Self::token(&env)?;
+        if !allowed && is_default {
+            return Err(ContractError::CannotDisableDefaultAsset);
+        }
+        if allowed && !was_allowed {
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&AssetKey::AllowedAssetCount)
+                .unwrap_or(if is_default { 0 } else { 1 });
+            if !is_default && count >= MAX_ALLOWED_ASSETS {
+                return Err(ContractError::AssetLimitReached);
+            }
+            let decimals = token::Client::new(&env, &token).decimals();
+            env.storage()
+                .instance()
+                .set(&AssetKey::AllowedToken(token.clone()), &true);
+            env.storage()
+                .instance()
+                .set(&AssetKey::TokenDecimals(token.clone()), &decimals);
+            env.storage().instance().set(
+                &AssetKey::AllowedAssetCount,
+                &(if is_default { count.max(1) } else { count + 1 }),
+            );
+        } else if !allowed && was_allowed {
+            env.storage()
+                .instance()
+                .remove(&AssetKey::AllowedToken(token.clone()));
+            let count: u32 = env
+                .storage()
+                .instance()
+                .get(&AssetKey::AllowedAssetCount)
+                .unwrap_or(1);
+            env.storage()
+                .instance()
+                .set(&AssetKey::AllowedAssetCount, &count.saturating_sub(1));
+        }
+        AssetPermissionChanged { token, allowed }.publish(&env);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn is_asset_allowed(env: Env, token: Address) -> bool {
+        let is_default = Self::token(&env)
+            .map(|default_token| default_token == token.clone())
+            .unwrap_or(false);
+        is_default
+            || env.storage()
+            .instance()
+            .get(&AssetKey::AllowedToken(token))
+            .unwrap_or(false)
+    }
+
+    pub fn get_asset_decimals(env: Env, token: Address) -> Result<u32, ContractError> {
+        if let Some(decimals) = env.storage()
+            .instance()
+            .get(&AssetKey::TokenDecimals(token.clone()))
+        {
+            return Ok(decimals);
+        }
+        let default_token = Self::token(&env)?;
+        if token == default_token {
+            return Ok(token::Client::new(&env, &token).decimals());
+        }
+        Err(ContractError::AssetNotAllowed)
     }
 
     /// Admin-only. Draws `amount` out of `payer`'s already-deposited balance
@@ -514,18 +803,41 @@ impl OracleEscrow {
         amount: i128,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        let token = Self::token(&env)?;
+        Self::charge_for_token(&env, payer, question_id, amount, token)
+    }
+
+    pub fn charge_asset(
+        env: Env,
+        payer: Address,
+        token: Address,
+        question_id: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        Self::require_allowed_token(&env, &token)?;
+        Self::charge_for_token(&env, payer, question_id, amount, token)
+    }
+
+    fn charge_for_token(
+        env: &Env,
+        payer: Address,
+        question_id: u64,
+        amount: i128,
+        token: Address,
+    ) -> Result<(), ContractError> {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
 
-        let key = DataKey::Balance(payer.clone());
+        let key = Self::balance_key(env, &token, &payer)?;
         let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         if amount > existing {
             return Err(ContractError::InsufficientBalance);
         }
         Self::set_persistent(&env, &key, &(existing - amount));
 
-        Self::open_question(&env, payer, question_id, amount)
+        Self::open_question(env, payer, question_id, amount, token)
     }
 
     /// Shared by submit() (fresh transfer) and charge() (drawn from an
@@ -538,6 +850,7 @@ impl OracleEscrow {
         payer: Address,
         question_id: u64,
         amount: i128,
+        token: Address,
     ) -> Result<(), ContractError> {
         let timeout_ledgers: u32 = env
             .storage()
@@ -548,6 +861,7 @@ impl OracleEscrow {
         Self::record_question(
             env,
             question_id,
+            token.clone(),
             Question {
                 payer,
                 amount,
@@ -555,7 +869,8 @@ impl OracleEscrow {
                 created_at: env.ledger().sequence(),
                 timeout_ledgers,
             },
-        )
+        )?;
+        Ok(())
     }
 
     /// Stores a brand-new Pending question, indexes it, and emits
@@ -564,6 +879,7 @@ impl OracleEscrow {
     fn record_question(
         env: &Env,
         question_id: u64,
+        token: Address,
         question: Question,
     ) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
@@ -573,12 +889,17 @@ impl OracleEscrow {
 
         env.storage().persistent().set(&key, &question);
         Self::extend_question_ttl(env, &key, &question);
+        env.storage()
+            .persistent()
+            .set(&AssetKey::QuestionToken(question_id), &token);
+        Self::extend_asset_ttl(env, &AssetKey::QuestionToken(question_id));
         Self::index_add(env, question_id);
         Self::bump_instance(env);
 
         QuestionOpened {
             question_id,
             payer: question.payer,
+            token,
             amount: question.amount,
             created_at: question.created_at,
             timeout_ledgers: question.timeout_ledgers,
@@ -588,7 +909,7 @@ impl OracleEscrow {
     }
 
     /// Admin-only. Pays a 20% platform fee (+ integer-division dust)
-    /// immediately, then CREDITS (does not transfer) the remaining 80%
+    /// immediately, then CREDITS the remaining 80%
     /// split evenly across `workers` into their accrued Owed balance —
     /// see `withdraw()`. `losing_workers` (submitted but didn't match
     /// consensus) each forfeit SLASH_BPS of their slashable stake, capped at
@@ -628,29 +949,40 @@ impl OracleEscrow {
             .instance()
             .get(&DataKey::Platform)
             .ok_or(ContractError::NotInitialized)?;
-        let token_client = token::Client::new(&env, &Self::token(&env)?);
+        let question_token = Self::question_token(&env, question_id)?;
+        let token_client = token::Client::new(&env, &question_token);
 
         let amount = question.amount;
-        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
         let pool = amount - fee;
         let n = workers.len() as i128;
         let share = pool / n;
         let dust = pool - share * n;
 
-        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
         let mut platform_take = fee + dust;
         for loser in losing_workers.iter() {
-            platform_take += Self::slash(&env, &loser, slash_cap);
+            platform_take = platform_take
+                .checked_add(Self::slash(&env, &question_token, &loser, slash_cap))
+                .ok_or(ContractError::ArithmeticOverflow)?;
         }
         for worker in workers.iter() {
-            Self::credit_owed(&env, &worker, share);
+            Self::credit_owed(&env, &question_token, &worker, share)?;
+        }
+
+        if platform_take > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &platform,
+                &platform_take,
+            );
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
         Ok(())
     }
 
-    /// Worker posts a USDC bond, signaling credibility. Purely opt-in;
+    /// Worker posts a default-token bond, signaling credibility. Purely opt-in;
     /// never required to submit answers or be paid. The new amount warms up
     /// for STAKE_WARMUP_LEDGERS before get_matured_stake() counts it; any
     /// already-warming amount has its clock restarted along with it.
@@ -668,11 +1000,42 @@ impl OracleEscrow {
         );
 
         let mut info = Self::stake_info(&env, &worker);
-        info.warming += amount;
+        info.warming = info
+            .warming
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         info.warming_since = env.ledger().sequence();
         Self::set_persistent(&env, &DataKey::Stake(worker), &info);
         Self::bump_instance(&env);
 
+        Ok(())
+    }
+
+    pub fn stake_asset(
+        env: Env,
+        worker: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        worker.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        Self::require_allowed_token(&env, &token)?;
+        token::Client::new(&env, &token).transfer(
+            &worker,
+            &env.current_contract_address(),
+            &amount,
+        );
+        let key = Self::stake_key(&env, &token, &worker)?;
+        let mut info = Self::stake_info_for_token(&env, &token, &worker)?;
+        info.warming = info
+            .warming
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        info.warming_since = env.ledger().sequence();
+        Self::set_persistent(&env, &key, &info);
+        Self::bump_instance(&env);
         Ok(())
     }
 
@@ -707,7 +1070,10 @@ impl OracleEscrow {
             .ledger()
             .sequence()
             .saturating_add(MIN_UNBONDING_LEDGERS.max(timeout_ledgers));
-        info.unbonding += amount;
+        info.unbonding = info
+            .unbonding
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         info.unbonding_release_at = release_at;
 
         Self::set_persistent(&env, &DataKey::Stake(worker), &info);
@@ -744,6 +1110,70 @@ impl OracleEscrow {
         Ok(amount)
     }
 
+    pub fn begin_unstake_asset(
+        env: Env,
+        worker: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<u32, ContractError> {
+        worker.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let mut info = Self::stake_info_for_token(&env, &token, &worker)?;
+        if amount > info.settled + info.warming {
+            return Err(ContractError::InsufficientStake);
+        }
+        let from_warming = amount.min(info.warming);
+        info.warming -= from_warming;
+        info.settled -= amount - from_warming;
+        let timeout_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimeoutLedgers)
+            .ok_or(ContractError::NotInitialized)?;
+        let release_at = env
+            .ledger()
+            .sequence()
+            .saturating_add(MIN_UNBONDING_LEDGERS.max(timeout_ledgers));
+        info.unbonding = info
+            .unbonding
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        info.unbonding_release_at = release_at;
+        let key = Self::stake_key(&env, &token, &worker)?;
+        Self::set_persistent(&env, &key, &info);
+        Self::bump_instance(&env);
+        Ok(release_at)
+    }
+
+    pub fn complete_unstake_asset(
+        env: Env,
+        worker: Address,
+        token: Address,
+    ) -> Result<i128, ContractError> {
+        worker.require_auth();
+        let mut info = Self::stake_info_for_token(&env, &token, &worker)?;
+        if info.unbonding <= 0 {
+            return Err(ContractError::NothingUnbonding);
+        }
+        if env.ledger().sequence() < info.unbonding_release_at {
+            return Err(ContractError::UnbondingNotElapsed);
+        }
+        let amount = info.unbonding;
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &worker,
+            &amount,
+        );
+        info.unbonding = 0;
+        info.unbonding_release_at = 0;
+        let key = Self::stake_key(&env, &token, &worker)?;
+        Self::set_persistent(&env, &key, &info);
+        Self::bump_instance(&env);
+        Ok(amount)
+    }
+
     /// Active stake (settled + warming): what the worker has bonded and not
     /// asked to withdraw. Excludes the unbonding bucket.
     pub fn get_stake(env: Env, worker: Address) -> i128 {
@@ -762,6 +1192,22 @@ impl OracleEscrow {
         Self::stake_info(&env, &worker)
     }
 
+    pub fn get_stake_asset(env: Env, worker: Address, token: Address) -> i128 {
+        Self::stake_info_for_token(&env, &token, &worker)
+            .map(|info| info.settled + info.warming)
+            .unwrap_or(0)
+    }
+
+    pub fn get_matured_stake_asset(env: Env, worker: Address, token: Address) -> i128 {
+        Self::stake_info_for_token(&env, &token, &worker)
+            .map(|info| info.settled)
+            .unwrap_or(0)
+    }
+
+    pub fn get_stake_info_asset(env: Env, worker: Address, token: Address) -> StakeInfo {
+        Self::stake_info_for_token(&env, &token, &worker).unwrap_or_default()
+    }
+
     /// Worker withdraws up to `amount` of their accrued balance from past
     /// resolve() calls, regardless of how many questions it came from —
     /// this is what turns "N on-chain payouts" into "N credits, as few
@@ -771,6 +1217,16 @@ impl OracleEscrow {
     pub fn withdraw(env: Env, worker: Address, amount: i128) -> Result<i128, ContractError> {
         worker.require_auth();
         Self::do_withdraw(&env, &worker, &worker, amount)
+    }
+
+    pub fn withdraw_asset(
+        env: Env,
+        worker: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        worker.require_auth();
+        Self::do_withdraw_for_token(&env, &worker, &worker, &token, amount)
     }
 
     /// Same as withdraw(), but sends the funds to `beneficiary` instead of
@@ -788,17 +1244,39 @@ impl OracleEscrow {
         Self::do_withdraw(&env, &worker, &beneficiary, amount)
     }
 
+    pub fn withdraw_to_asset(
+        env: Env,
+        worker: Address,
+        beneficiary: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        worker.require_auth();
+        Self::do_withdraw_for_token(&env, &worker, &beneficiary, &token, amount)
+    }
+
     fn do_withdraw(
         env: &Env,
         worker: &Address,
         recipient: &Address,
         amount: i128,
     ) -> Result<i128, ContractError> {
+        let token = Self::token(env)?;
+        Self::do_withdraw_for_token(env, worker, recipient, &token, amount)
+    }
+
+    fn do_withdraw_for_token(
+        env: &Env,
+        worker: &Address,
+        recipient: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
 
-        let key = DataKey::Owed(worker.clone());
+        let key = Self::owed_key(env, token, worker)?;
         let owed: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         if owed <= 0 {
             return Err(ContractError::NothingOwed);
@@ -807,8 +1285,7 @@ impl OracleEscrow {
             return Err(ContractError::InsufficientOwed);
         }
 
-        let token_addr = Self::token(env)?;
-        token::Client::new(env, &token_addr).transfer(
+        token::Client::new(env, token).transfer(
             &env.current_contract_address(),
             recipient,
             &amount,
@@ -823,6 +1300,13 @@ impl OracleEscrow {
         env.storage()
             .persistent()
             .get(&DataKey::Owed(worker))
+            .unwrap_or(0)
+    }
+
+    pub fn get_owed_asset(env: Env, worker: Address, token: Address) -> i128 {
+        Self::owed_key(&env, &token, &worker)
+            .ok()
+            .and_then(|key| env.storage().persistent().get(&key))
             .unwrap_or(0)
     }
 
@@ -850,6 +1334,30 @@ impl OracleEscrow {
         Ok(())
     }
 
+    pub fn touch_asset(
+        env: Env,
+        account: Address,
+        token: Address,
+    ) -> Result<(), ContractError> {
+        if let Ok(key) = Self::owed_key(&env, &token, &account) {
+            if env.storage().persistent().has(&key) {
+                Self::extend_persistent(&env, &key);
+            }
+        }
+        if let Ok(key) = Self::balance_key(&env, &token, &account) {
+            if env.storage().persistent().has(&key) {
+                Self::extend_persistent(&env, &key);
+            }
+        }
+        if let Ok(key) = Self::stake_key(&env, &token, &account) {
+            if env.storage().persistent().has(&key) {
+                Self::extend_persistent(&env, &key);
+            }
+        }
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
     /// Permissionless TTL refresh for one question — and, while it's
     /// Pending, its pending-index entries and the contract instance too.
     /// Pending entries are already created live until REFUND_GRACE_LEDGERS
@@ -867,6 +1375,10 @@ impl OracleEscrow {
             .get(&key)
             .ok_or(ContractError::QuestionNotFound)?;
         Self::extend_question_ttl(&env, &key, &question);
+        let token_key = AssetKey::QuestionToken(question_id);
+        if env.storage().persistent().has(&token_key) {
+            Self::extend_asset_ttl(&env, &token_key);
+        }
 
         if question.status == Status::Pending {
             let pos_key = DataKey::PendingPos(question_id);
@@ -917,16 +1429,59 @@ impl OracleEscrow {
         Self::do_refund(&env, question_id)
     }
 
-    /// Admin-only key rotation. The current admin must sign to authorize
-    /// handing off control. There is deliberately no recovery path if the
-    /// admin key is lost outright — that's exactly why every other
-    /// settlement path (refund_timeout) is permissionless instead of
-    /// relying on a backdoor.
+    /// Compatibility entrypoint: schedules, but no longer immediately
+    /// applies, an administrator change.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        Self::schedule_admin_rotation(&env, new_admin);
+        Ok(())
+    }
+
+    pub fn propose_admin_rotation(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        Self::schedule_admin_rotation(&env, new_admin);
+        Ok(())
+    }
+
+    pub fn cancel_admin_rotation(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let pending: PendingAdminRotation = env
+            .storage()
+            .instance()
+            .get(&AssetKey::PendingAdminRotation)
+            .ok_or(ContractError::NoAdminRotationPending)?;
+        env.storage().instance().remove(&AssetKey::PendingAdminRotation);
+        AdminRotationCancelled {
+            new_admin: pending.new_admin,
+        }
+        .publish(&env);
         Self::bump_instance(&env);
         Ok(())
+    }
+
+    pub fn execute_admin_rotation(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let pending: PendingAdminRotation = env
+            .storage()
+            .instance()
+            .get(&AssetKey::PendingAdminRotation)
+            .ok_or(ContractError::NoAdminRotationPending)?;
+        if env.ledger().sequence() < pending.executable_at {
+            return Err(ContractError::AdminRotationNotReady);
+        }
+        pending.new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &pending.new_admin);
+        env.storage().instance().remove(&AssetKey::PendingAdminRotation);
+        AdminRotationExecuted {
+            new_admin: pending.new_admin,
+        }
+        .publish(&env);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_pending_admin_rotation(env: Env) -> Option<PendingAdminRotation> {
+        env.storage().instance().get(&AssetKey::PendingAdminRotation)
     }
 
     /// Admin-only. Updates the GLOBAL default timeout_ledgers used for
@@ -1032,6 +1587,10 @@ impl OracleEscrow {
         Self::token(&env)
     }
 
+    pub fn get_question_token(env: Env, question_id: u64) -> Result<Address, ContractError> {
+        Self::question_token(&env, question_id)
+    }
+
     /// Number of questions currently Pending.
     pub fn pending_count(env: Env) -> u32 {
         env.storage()
@@ -1124,7 +1683,6 @@ impl OracleEscrow {
             return Err(ContractError::InvalidMigrationTarget);
         }
 
-        let token_addr = Self::token(&env)?;
         let target_client = OracleEscrowClient::new(&env, &target);
         let transfer_fn = Symbol::new(&env, "transfer");
         let mut total: i128 = 0;
@@ -1139,6 +1697,7 @@ impl OracleEscrow {
             if question.status != Status::Pending {
                 return Err(ContractError::QuestionNotPending);
             }
+            let token_addr = Self::question_token(&env, question_id)?;
 
             // The target pulls the funds (rather than us pushing them) so the
             // target only ever records what it actually received. That pull
@@ -1165,10 +1724,13 @@ impl OracleEscrow {
                 &question.timeout_ledgers,
             );
 
-            total += question.amount;
+            total = total
+                .checked_add(question.amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
             QuestionMigrated {
                 question_id,
                 target: target.clone(),
+                token: token_addr,
                 amount: question.amount,
             }
             .publish(&env);
@@ -1204,8 +1766,8 @@ impl OracleEscrow {
         }
         source.require_auth();
 
-        let token_addr = Self::token(&env)?;
-        if token != token_addr {
+        let default_token = Self::token(&env)?;
+        if token != default_token && Self::require_allowed_token(&env, &token).is_err() {
             return Err(ContractError::TokenMismatch);
         }
         if amount <= 0 {
@@ -1222,7 +1784,7 @@ impl OracleEscrow {
             return Err(ContractError::QuestionAlreadyExists);
         }
 
-        token::Client::new(&env, &token_addr).transfer(
+        token::Client::new(&env, &token).transfer(
             &source,
             &env.current_contract_address(),
             &amount,
@@ -1231,6 +1793,7 @@ impl OracleEscrow {
         Self::record_question(
             &env,
             question_id,
+            token,
             Question {
                 payer,
                 amount,
@@ -1247,17 +1810,19 @@ impl OracleEscrow {
     /// first, then settled, then unbonding. Returns the slashed amount
     /// without transferring it — the caller batches it into a single
     /// platform transfer alongside the fee.
-    fn slash(env: &Env, worker: &Address, cap: i128) -> i128 {
-        let key = DataKey::Stake(worker.clone());
+    fn slash(env: &Env, token: &Address, worker: &Address, cap: i128) -> i128 {
+        let Ok(key) = Self::stake_key(env, token, worker) else {
+            return 0;
+        };
         if !env.storage().persistent().has(&key) {
             return 0;
         }
-        let mut info = Self::stake_info(env, worker);
+        let mut info = Self::stake_info_for_token(env, token, worker).unwrap_or_default();
         let slashable = info.settled + info.warming + info.unbonding;
         if slashable <= 0 {
             return 0;
         }
-        let amount = (slashable * SLASH_BPS / BPS_DENOM).min(cap).min(slashable);
+        let amount = Self::mul_bps(slashable, SLASH_BPS).min(cap).min(slashable);
         if amount <= 0 {
             return 0;
         }
@@ -1276,18 +1841,26 @@ impl OracleEscrow {
     /// rolled into `settled`. Pure: callers that want the roll persisted
     /// write the result back themselves.
     fn stake_info(env: &Env, worker: &Address) -> StakeInfo {
-        let mut info: StakeInfo = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Stake(worker.clone()))
-            .unwrap_or_default();
+        let Ok(token) = Self::token(env) else {
+            return StakeInfo::default();
+        };
+        Self::stake_info_for_token(env, &token, worker).unwrap_or_default()
+    }
+
+    fn stake_info_for_token(
+        env: &Env,
+        token: &Address,
+        worker: &Address,
+    ) -> Result<StakeInfo, ContractError> {
+        let key = Self::stake_key(env, token, worker)?;
+        let mut info: StakeInfo = env.storage().persistent().get(&key).unwrap_or_default();
         if info.warming > 0
             && env.ledger().sequence() >= info.warming_since.saturating_add(STAKE_WARMUP_LEDGERS)
         {
             info.settled += info.warming;
             info.warming = 0;
         }
-        info
+        Ok(info)
     }
 
     /// Rejects duplicate addresses within either list, and any address
@@ -1322,10 +1895,23 @@ impl OracleEscrow {
         Ok(())
     }
 
-    fn credit_owed(env: &Env, worker: &Address, amount: i128) {
-        let key = DataKey::Owed(worker.clone());
+    fn mul_bps(value: i128, bps: i128) -> i128 {
+        (value / BPS_DENOM) * bps + (value % BPS_DENOM) * bps / BPS_DENOM
+    }
+
+    fn credit_owed(
+        env: &Env,
+        token: &Address,
+        worker: &Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        let key = Self::owed_key(env, token, worker)?;
         let existing: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        Self::set_persistent(env, &key, &(existing + amount));
+        let updated = existing
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Self::set_persistent(env, &key, &updated);
+        Ok(())
     }
 
     fn pending_upgrade(env: &Env) -> Result<PendingUpgrade, ContractError> {
@@ -1355,11 +1941,93 @@ impl OracleEscrow {
         Ok(())
     }
 
+    fn schedule_admin_rotation(env: &Env, new_admin: Address) {
+        let executable_at = env
+            .ledger()
+            .sequence()
+            .saturating_add(ADMIN_ROTATION_DELAY_LEDGERS);
+        let pending = PendingAdminRotation {
+            new_admin: new_admin.clone(),
+            executable_at,
+        };
+        env.storage()
+            .instance()
+            .set(&AssetKey::PendingAdminRotation, &pending);
+        AdminRotationProposed {
+            new_admin,
+            executable_at,
+        }
+        .publish(env);
+        Self::bump_instance(env);
+    }
+
     fn token(env: &Env) -> Result<Address, ContractError> {
         env.storage()
             .instance()
             .get(&DataKey::Token)
             .ok_or(ContractError::NotInitialized)
+    }
+
+    fn question_token(env: &Env, question_id: u64) -> Result<Address, ContractError> {
+        if let Some(token) = env
+            .storage()
+            .persistent()
+            .get(&AssetKey::QuestionToken(question_id))
+        {
+            return Ok(token);
+        }
+        Self::token(env)
+    }
+
+    fn require_allowed_token(env: &Env, token: &Address) -> Result<(), ContractError> {
+        let default_token = Self::token(env)?;
+        if token == &default_token
+            || env
+            .storage()
+            .instance()
+            .get(&AssetKey::AllowedToken(token.clone()))
+            .unwrap_or(false)
+        {
+            Ok(())
+        } else {
+            Err(ContractError::AssetNotAllowed)
+        }
+    }
+
+    fn owed_key(
+        env: &Env,
+        token: &Address,
+        worker: &Address,
+    ) -> Result<soroban_sdk::Val, ContractError> {
+        if *token == Self::token(env)? {
+            Ok(DataKey::Owed(worker.clone()).into_val(env))
+        } else {
+            Ok(AssetKey::OwedAsset(token.clone(), worker.clone()).into_val(env))
+        }
+    }
+
+    fn stake_key(
+        env: &Env,
+        token: &Address,
+        worker: &Address,
+    ) -> Result<soroban_sdk::Val, ContractError> {
+        if *token == Self::token(env)? {
+            Ok(DataKey::Stake(worker.clone()).into_val(env))
+        } else {
+            Ok(AssetKey::StakeAsset(token.clone(), worker.clone()).into_val(env))
+        }
+    }
+
+    fn balance_key(
+        env: &Env,
+        token: &Address,
+        payer: &Address,
+    ) -> Result<soroban_sdk::Val, ContractError> {
+        if *token == Self::token(env)? {
+            Ok(DataKey::Balance(payer.clone()).into_val(env))
+        } else {
+            Ok(AssetKey::BalanceAsset(token.clone(), payer.clone()).into_val(env))
+        }
     }
 
     fn do_refund(env: &Env, question_id: u64) -> Result<(), ContractError> {
@@ -1373,7 +2041,7 @@ impl OracleEscrow {
             return Err(ContractError::QuestionNotPending);
         }
 
-        let token_client = token::Client::new(env, &Self::token(env)?);
+        let token_client = token::Client::new(env, &Self::question_token(env, question_id)?);
         token_client.transfer(
             &env.current_contract_address(),
             &question.payer,
@@ -1441,12 +2109,16 @@ impl OracleEscrow {
         Self::set_persistent(env, &DataKey::PendingCount, &last);
     }
 
-    fn set_persistent<V: IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &DataKey, value: &V) {
+    fn set_persistent<K: IntoVal<Env, soroban_sdk::Val>, V: IntoVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &K,
+        value: &V,
+    ) {
         env.storage().persistent().set(key, value);
         Self::extend_persistent(env, key);
     }
 
-    fn extend_persistent(env: &Env, key: &DataKey) {
+    fn extend_persistent<K: IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
         env.storage().persistent().extend_ttl(
             key,
             PERSISTENT_TTL_THRESHOLD,
@@ -1473,446 +2145,136 @@ impl OracleEscrow {
         );
     }
 
+    fn extend_asset_ttl<K: IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+        Self::extend_persistent(env, key);
+    }
+
     fn bump_instance(env: &Env) {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
-    // ---- #95: third-party refund-risk underwriting ------------------------
-    //
-    // Scoped-down implementation: rather than a separately-funded insurance
-    // pool (the issue flags where that pool's revenue would even come from
-    // as an open question), a registered underwriter can trigger an early,
-    // fee-bearing refund on a still-Pending question, before the
-    // permissionless refund_timeout() deadline would otherwise unlock it.
-    // The fee comes out of the already-escrowed `amount` itself (the payer
-    // gets slightly less, in exchange for not having to wait), and is
-    // credited to the underwriter's existing Owed balance via withdraw().
-    // Out of scope: real risk pricing, a separate collateral pool, and any
-    // reimbursement mechanism beyond the fee (the issue's own "out of
-    // scope" section).
-
-    /// Admin-only. Approves `underwriter` to call instant_refund().
-    pub fn approve_underwriter(env: Env, underwriter: Address) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Underwriter(underwriter.clone()), &true);
-        Self::extend_persistent(&env, &DataKey::Underwriter(underwriter.clone()));
-        Self::bump_instance(&env);
-        UnderwriterStatusChanged {
-            underwriter,
-            approved: true,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    /// Admin-only. Revokes a previously-approved underwriter.
-    pub fn revoke_underwriter(env: Env, underwriter: Address) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Underwriter(underwriter.clone()));
-        Self::bump_instance(&env);
-        UnderwriterStatusChanged {
-            underwriter,
-            approved: false,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    pub fn is_underwriter(env: Env, underwriter: Address) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Underwriter(underwriter))
-            .unwrap_or(false)
-    }
-
-    /// Registered-underwriter-only. Refunds a still-Pending question
-    /// immediately (no need to wait for refund_timeout()'s deadline),
-    /// deducting UNDERWRITER_FEE_BPS of the amount as the underwriter's fee
-    /// and crediting it to the underwriter's Owed balance (withdrawable via
-    /// withdraw()). Cannot run on an already-settled question, same as
-    /// refund()/refund_timeout().
-    pub fn instant_refund(env: Env, underwriter: Address, question_id: u64) -> Result<(), ContractError> {
-        underwriter.require_auth();
-        if !Self::is_underwriter(env.clone(), underwriter.clone()) {
-            return Err(ContractError::NotUnderwriter);
-        }
-
-        let key = DataKey::Question(question_id);
-        let mut question: Question = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        let fee = question.amount * UNDERWRITER_FEE_BPS / BPS_DENOM;
-        let payer_amount = question.amount - fee;
-
-        let token_client = token::Client::new(&env, &Self::token(&env)?);
-        token_client.transfer(&env.current_contract_address(), &question.payer, &payer_amount);
-        Self::credit_owed(&env, &underwriter, fee);
-
-        Self::settle_question(&env, question_id, &key, &mut question, Status::Refunded);
-        InstantRefundFronted {
-            question_id,
-            underwriter,
-            fee,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    // ---- #96: worker-diversity requirement ---------------------------------
-    //
-    // Scoped-down implementation: rather than integrating a real third-party
-    // identity/attestation protocol (none is named in the issue, which flags
-    // this as the key open question), the admin itself attests each worker's
-    // source-diversity tag (e.g. region/network-origin) via
-    // attest_worker_region(). resolve_diverse() is a NEW, opt-in variant of
-    // resolve() — the existing resolve() is untouched — that additionally
-    // requires every worker in `workers` to carry an attestation and the set
-    // to span at least `min_distinct_regions` distinct regions before paying
-    // out. Out of scope: signature-verified third-party attestations, and
-    // any change to resolve()'s existing (non-diverse) behavior.
-
-    /// Admin-only. Records `region` as `worker`'s attested source-diversity
-    /// tag, overwriting any previous attestation.
-    pub fn attest_worker_region(env: Env, worker: Address, region: Symbol) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        Self::set_persistent(&env, &DataKey::WorkerRegion(worker.clone()), &region);
-        Self::bump_instance(&env);
-        WorkerRegionAttested { worker, region }.publish(&env);
-        Ok(())
-    }
-
-    pub fn get_worker_region(env: Env, worker: Address) -> Option<Symbol> {
-        env.storage().persistent().get(&DataKey::WorkerRegion(worker))
-    }
-
-    /// Same payout mechanics as resolve() (20% platform fee, even split of
-    /// the remainder across `workers`, SLASH_BPS taken from each
-    /// `losing_workers` entry), but additionally requires every worker in
-    /// `workers` to have an admin-attested WorkerRegion, and the attested
-    /// regions across `workers` to include at least `min_distinct_regions`
-    /// distinct values. An unattested worker or an insufficiently diverse
-    /// set is rejected before anything is credited or slashed.
-    pub fn resolve_diverse(
+    /// Binds `pubkey` (a SEC-1-encoded secp256r1 public key, 65 bytes) to
+    /// `worker`'s Address for use with verify_passkey_auth() (issue #74).
+    /// The worker still signs this call with their existing Address
+    /// (keypair or smart-wallet, see #73) — this is a registration step,
+    /// not itself a passkey authentication. Calling it again replaces the
+    /// previously registered key.
+    ///
+    /// This is a SIMPLIFIED STAND-IN for full WebAuthn passkey support, not
+    /// an implementation of the WebAuthn ceremony: it does not verify
+    /// `authenticatorData`/`clientDataJSON` or any origin/RP-ID binding, and
+    /// it does not implement Soroban's `CustomAccountInterface` — a real
+    /// passkey-backed smart wallet would do that at the account-abstraction
+    /// layer (see #73/docs/account-abstraction.md), not here. This just
+    /// gives the worker console a way to register a device-held
+    /// secp256r1 key pair and later prove possession of it via a plain
+    /// signature, using `Env::crypto().secp256r1_verify`, which is the one
+    /// primitive Soroban actually exposes on this path today.
+    pub fn register_passkey(
         env: Env,
-        question_id: u64,
-        workers: Vec<Address>,
-        losing_workers: Vec<Address>,
-        min_distinct_regions: u32,
+        worker: Address,
+        pubkey: BytesN<65>,
     ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        Self::validate_worker_lists(&workers, &losing_workers)?;
-        Self::validate_worker_diversity(&env, &workers, min_distinct_regions)?;
-
-        let key = DataKey::Question(question_id);
-        let mut question: Question = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        let amount = question.amount;
-        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
-        let pool = amount - fee;
-        let n = workers.len() as i128;
-        let share = pool / n;
-        let dust = pool - share * n;
-
-        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
-        let mut platform_take = fee + dust;
-        for loser in losing_workers.iter() {
-            platform_take += Self::slash(&env, &loser, slash_cap);
-        }
-        for worker in workers.iter() {
-            Self::credit_owed(&env, &worker, share);
-        }
-        let _ = platform_take;
-
-        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
-        Ok(())
-    }
-
-    /// Rejects an unattested worker, or a `workers` set spanning fewer than
-    /// `min_distinct_regions` distinct attested regions. O(n^2) over
-    /// `workers`, same complexity budget as validate_worker_lists().
-    fn validate_worker_diversity(
-        env: &Env,
-        workers: &Vec<Address>,
-        min_distinct_regions: u32,
-    ) -> Result<(), ContractError> {
-        let mut regions: Vec<Symbol> = Vec::new(env);
-        for worker in workers.iter() {
-            let region: Symbol = env
-                .storage()
-                .persistent()
-                .get(&DataKey::WorkerRegion(worker))
-                .ok_or(ContractError::UnattestedWorker)?;
-            if !regions.iter().any(|r| r == region) {
-                regions.push_back(region);
-            }
-        }
-        if regions.len() < min_distinct_regions {
-            return Err(ContractError::InsufficientDiversity);
-        }
-        Ok(())
-    }
-
-    // ---- #97: public dispute-window finality -------------------------------
-    //
-    // Scoped-down implementation: a new, opt-in `Status::ResolvedPending`
-    // state-machine primitive. resolve_challengeable() records the worker
-    // lists without crediting or slashing anything, and starts a dispute
-    // window. Anyone may permissionlessly call dispute_resolve() within that
-    // window to block finalization (mirroring refund_timeout()'s
-    // permissionless philosophy) — what happens to a disputed resolution
-    // afterward (admin adjudication, reversal) is explicitly out of scope,
-    // same as the issue states; today a disputed resolution simply stays
-    // stuck in ResolvedPending pending a future admin-adjudication feature.
-    // finalize_resolve() is permissionless too and, once the window has
-    // elapsed with no dispute, credits/slashes exactly as resolve() does.
-    // The existing resolve() function and its immediate-settlement behavior
-    // are completely untouched; this is purely an additional path.
-
-    /// Admin-only. Starts a `dispute_window_ledgers`-long public challenge
-    /// window on `question_id` instead of crediting/slashing immediately.
-    /// Nothing is paid out until finalize_resolve() succeeds.
-    pub fn resolve_challengeable(
-        env: Env,
-        question_id: u64,
-        workers: Vec<Address>,
-        losing_workers: Vec<Address>,
-        dispute_window_ledgers: u32,
-    ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        Self::validate_worker_lists(&workers, &losing_workers)?;
-
-        let key = DataKey::Question(question_id);
-        let mut question: Question = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        let dispute_deadline = env.ledger().sequence().saturating_add(dispute_window_ledgers);
-        Self::set_persistent(
-            &env,
-            &DataKey::PendingResolution(question_id),
-            &PendingResolution {
-                workers,
-                losing_workers,
-                dispute_deadline,
-                disputed: false,
-            },
-        );
-
-        Self::settle_question(&env, question_id, &key, &mut question, Status::ResolvedPending);
-        ResolutionChallengeable {
-            question_id,
-            dispute_deadline,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
-    /// Permissionless, like refund_timeout(). Flags an in-flight
-    /// (ResolvedPending) resolution as disputed, blocking finalize_resolve()
-    /// until an admin-adjudication process (out of scope here) resolves it.
-    pub fn dispute_resolve(env: Env, question_id: u64) -> Result<(), ContractError> {
-        let rkey = DataKey::PendingResolution(question_id);
-        let mut pending: PendingResolution = env
-            .storage()
-            .persistent()
-            .get(&rkey)
-            .ok_or(ContractError::NoPendingResolution)?;
-        if pending.disputed {
-            return Err(ContractError::QuestionDisputed);
-        }
-        // Deliberately allowed even after `dispute_deadline`: as long as
-        // finalize_resolve() hasn't already run (which would have removed
-        // this PendingResolution entry), a late dispute still meaningfully
-        // blocks finalization. Simplification: no separate "too late" error.
-        pending.disputed = true;
-        Self::set_persistent(&env, &rkey, &pending);
-        Self::bump_instance(&env);
-        ResolutionDisputed { question_id }.publish(&env);
-        Ok(())
-    }
-
-    /// Permissionless. Once `question_id`'s dispute window has elapsed with
-    /// no dispute, performs exactly the crediting/slashing resolve() would
-    /// have performed immediately, and moves the question to Resolved.
-    pub fn finalize_resolve(env: Env, question_id: u64) -> Result<(), ContractError> {
-        let rkey = DataKey::PendingResolution(question_id);
-        let pending: PendingResolution = env
-            .storage()
-            .persistent()
-            .get(&rkey)
-            .ok_or(ContractError::NoPendingResolution)?;
-        if pending.disputed {
-            return Err(ContractError::QuestionDisputed);
-        }
-        if env.ledger().sequence() < pending.dispute_deadline {
-            return Err(ContractError::DisputeWindowNotElapsed);
-        }
-
-        let key = DataKey::Question(question_id);
-        let mut question: Question = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::ResolvedPending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        let amount = question.amount;
-        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
-        let pool = amount - fee;
-        let n = pending.workers.len() as i128;
-        let share = pool / n;
-        let dust = pool - share * n;
-
-        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
-        let mut platform_take = fee + dust;
-        for loser in pending.losing_workers.iter() {
-            platform_take += Self::slash(&env, &loser, slash_cap);
-        }
-        for worker in pending.workers.iter() {
-            Self::credit_owed(&env, &worker, share);
-        }
-        let _ = platform_take;
-
-        env.storage().persistent().remove(&rkey);
-        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
-        Ok(())
-    }
-
-    pub fn get_pending_resolution(env: Env, question_id: u64) -> Option<PendingResolution> {
+        worker.require_auth();
         env.storage()
             .persistent()
-            .get(&DataKey::PendingResolution(question_id))
+            .set(&DataKey::PasskeyPubkey(worker.clone()), &pubkey);
+        Self::extend_persistent(&env, &DataKey::PasskeyPubkey(worker.clone()));
+        Self::bump_instance(&env);
+        PasskeyRegistered { worker }.publish(&env);
+        Ok(())
     }
 
-    // ---- #98: on-chain median-consensus mode -------------------------------
-    //
-    // Scoped-down implementation: a NEW, opt-in resolve_median() that takes
-    // numeric worker answers directly and computes winners/losers itself
-    // from a tolerance band around the median, instead of trusting a
-    // pre-split workers/losing_workers list from the backend. Coexists with
-    // resolve() rather than replacing it — the issue flags this choice as
-    // open, and opt-in is the least disruptive option. Median/sort is a
-    // simple O(n^2) insertion sort (answer sets here are bounded by the same
-    // small quorum sizes resolve() already assumes); no new dependency is
-    // used. `tolerance_bps` is caller-supplied per call, not a stored global
-    // config — out of scope: choosing/enforcing one canonical tolerance
-    // policy.
+    pub fn get_passkey_pubkey(env: Env, worker: Address) -> Option<BytesN<65>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PasskeyPubkey(worker))
+    }
 
-    /// Same payout mechanics as resolve() (20% platform fee, even split of
-    /// the remainder, SLASH_BPS taken from losers), but takes numeric
-    /// `answers` instead of pre-split worker lists: the median of all
-    /// submitted values is computed on-chain, any answer within
-    /// `tolerance_bps` of it (relative; an answer must equal a zero median
-    /// exactly) is a winner, and every other answer's worker is treated as
-    /// a losing worker for slashing purposes.
-    pub fn resolve_median(
+    /// Verifies that `signature` is a valid secp256r1 signature over
+    /// `message` under `worker`'s registered passkey public key. Returns
+    /// `Ok(())` on success; the underlying host call panics the whole
+    /// transaction on an invalid signature rather than returning through
+    /// this Result (consistent with how Soroban's crypto verifiers work
+    /// generally), so a failing check never both partially runs and
+    /// reports success.
+    ///
+    /// This does not call `worker.require_auth()` — it's a standalone
+    /// possession check a caller (e.g. the worker console backend
+    /// completing workerAuth.js's challenge/response flow) can use
+    /// alongside, not instead of, the contract's normal auth model. Nothing
+    /// currently gates on this; wiring it into an entry point is left to
+    /// the worker-console integration issue #74 scopes as depending on
+    /// this verification primitive.
+    pub fn verify_passkey_auth(
         env: Env,
-        question_id: u64,
-        answers: Vec<AnswerEntry>,
-        tolerance_bps: u32,
+        worker: Address,
+        message: Bytes,
+        signature: BytesN<64>,
     ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-
-        if answers.is_empty() {
-            return Err(ContractError::EmptyAnswerSet);
-        }
-        for i in 0..answers.len() {
-            let a = answers.get(i).unwrap();
-            for j in (i + 1)..answers.len() {
-                if answers.get(j).unwrap().worker == a.worker {
-                    return Err(ContractError::DuplicateAnswerAddress);
-                }
-            }
-        }
-
-        let median = Self::compute_median(&env, &answers);
-
-        let mut winners: Vec<Address> = Vec::new(&env);
-        let mut losers: Vec<Address> = Vec::new(&env);
-        for entry in answers.iter() {
-            let within = if median == 0 {
-                entry.value == 0
-            } else {
-                let diff = (entry.value - median).abs();
-                diff * BPS_DENOM / median.abs() <= tolerance_bps as i128
-            };
-            if within {
-                winners.push_back(entry.worker);
-            } else {
-                losers.push_back(entry.worker);
-            }
-        }
-        if winners.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-
-        let key = DataKey::Question(question_id);
-        let mut question: Question = env
+        let pubkey: BytesN<65> = env
             .storage()
             .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
+            .get(&DataKey::PasskeyPubkey(worker))
+            .ok_or(ContractError::PasskeyNotRegistered)?;
+        let digest = env.crypto().sha256(&message);
+        env.crypto().secp256r1_verify(&pubkey, &digest, &signature);
+        Ok(())
+    }
+
+    /// Admin-only. Configures the ed25519 public key of the single trusted
+    /// off-chain KYC attestor whose signed claims attest_kyc() will accept
+    /// (issue #75). Replacing it does not retroactively invalidate
+    /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
+    pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::KycAttestorPubkey, &attestor_pubkey);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    pub fn get_kyc_attestor(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&DataKey::KycAttestorPubkey)
+    }
+
+    /// Permissionless: anyone may submit a claim signed by the configured
+    /// KYC attestor recording that `subject` is attested until
+    /// `expiry_ledger`. The signed message is `subject`'s XDR encoding
+    /// followed by `expiry_ledger`'s XDR encoding, so a claim is bound to
+    /// exactly one subject and one expiry and can't be replayed for a
+    /// different pair. This ONLY records the attestation — no entry point
+    /// in this contract (submit()/deposit()/resolve()/...) reads or gates
+    /// on it; see docs/kyc-attestation.md for why that wiring is
+    /// deliberately deferred.
+    pub fn attest_kyc(
+        env: Env,
+        subject: Address,
+        expiry_ledger: u32,
+        signature: BytesN<64>,
+    ) -> Result<(), ContractError> {
+        let attestor_pubkey: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::KycAttestorPubkey)
+            .ok_or(ContractError::KycAttestorNotSet)?;
+        if expiry_ledger <= env.ledger().sequence() {
+            return Err(ContractError::InvalidKycExpiry);
         }
 
-        let amount = question.amount;
-        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
-        let pool = amount - fee;
-        let n = winners.len() as i128;
-        let share = pool / n;
-        let dust = pool - share * n;
+        let mut message = subject.to_xdr(&env);
+        message.append(&expiry_ledger.to_xdr(&env));
+        env.crypto()
+            .ed25519_verify(&attestor_pubkey, &message, &signature);
 
-        let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
-        let mut platform_take = fee + dust;
-        for loser in losers.iter() {
-            platform_take += Self::slash(&env, &loser, slash_cap);
-        }
-        let winners_count = winners.len();
-        for worker in winners.iter() {
-            Self::credit_owed(&env, &worker, share);
-        }
-        let _ = platform_take;
-
-        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
-        MedianComputed {
-            question_id,
-            median,
-            winners: winners_count,
+        Self::set_persistent(&env, &DataKey::KycAttestation(subject.clone()), &expiry_ledger);
+        Self::bump_instance(&env);
+        KycAttested {
+            subject,
+            expiry_ledger,
         }
         .publish(&env);
         Ok(())
@@ -1948,12 +2310,73 @@ impl OracleEscrow {
             (a + b) / 2
         }
     }
+
+    /// Whether `subject` currently holds an unexpired KYC attestation.
+    /// Informational only — see attest_kyc()'s doc comment.
+    pub fn is_kyc_verified(env: Env, subject: Address) -> bool {
+        let expiry: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::KycAttestation(subject));
+        match expiry {
+            Some(expiry) => env.ledger().sequence() < expiry,
+            None => false,
+        }
+    }
+
+    /// Permissionless: checkpoints `worker`'s CURRENT active stake
+    /// (`get_stake()` — settled + warming) under the CURRENT ledger
+    /// sequence, so it can later be read back via get_historical_stake()
+    /// even after Stake(worker) itself has moved on (issue #82). Like
+    /// touch(), anyone may call this — typically an off-chain indexer or
+    /// the backend on a periodic sweep — and the caller pays the storage
+    /// cost of the checkpoint, same TTL model as every other persistent
+    /// entry. Returns the ledger sequence the snapshot was recorded under.
+    pub fn snapshot_stake(env: Env, worker: Address) -> u32 {
+        let stake = Self::stake_info(&env, &worker);
+        let value = stake.settled + stake.warming;
+        let ledger = env.ledger().sequence();
+        Self::set_persistent(&env, &DataKey::StakeSnapshot(worker.clone(), ledger), &value);
+        Self::bump_instance(&env);
+        StakeSnapshotted {
+            worker,
+            ledger,
+            stake: value,
+        }
+        .publish(&env);
+        ledger
+    }
+
+    /// Reads back a checkpoint written by snapshot_stake() for `worker` at
+    /// EXACTLY `ledger` — this is a point lookup, not a range query or an
+    /// interpolation over the nearest earlier snapshot (see
+    /// docs/stake-snapshot.md for why). Callers that need history at an
+    /// arbitrary past ledger must have called snapshot_stake() at that
+    /// ledger, or reconstruct it from this contract's events instead.
+    pub fn get_historical_stake(
+        env: Env,
+        worker: Address,
+        ledger: u32,
+    ) -> Result<i128, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StakeSnapshot(worker, ledger))
+            .ok_or(ContractError::StakeSnapshotNotFound)
+    }
 }
 
 #[cfg(test)]
 mod test;
 #[cfg(test)]
+mod test_account_abstraction;
+#[cfg(test)]
 mod test_economics;
+#[cfg(test)]
+mod test_kyc;
+#[cfg(test)]
+mod test_passkey;
+#[cfg(test)]
+mod test_snapshot;
 #[cfg(test)]
 mod test_migration;
 #[cfg(test)]

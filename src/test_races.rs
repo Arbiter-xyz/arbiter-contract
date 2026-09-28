@@ -410,10 +410,9 @@ fn losing_worker_front_running_resolve_with_unstake_only_escapes_their_own_slash
 }
 
 #[test]
-fn admin_rotation_landing_first_invalidates_the_old_admins_resolve() {
-    // Real auth, not mock_all_auths: the rotation lands first, so the old
-    // admin's already-signed resolve() no longer authorizes anything and
-    // fails without side effects, while the permissionless path still works.
+fn admin_rotation_proposal_leaves_current_authority_active_during_delay() {
+    // Real auth, not mock_all_auths: proposing a rotation is not an immediate
+    // handoff, so the incumbent can still perform ordinary admin actions.
     let w = World::new(0);
     let c = w.client();
     let new_admin = Address::generate(&w.env);
@@ -429,7 +428,6 @@ fn admin_rotation_landing_first_invalidates_the_old_admins_resolve() {
     }])
     .set_admin(&new_admin);
 
-    let before = w.snapshot();
     let workers = Vec::from_array(&w.env, w.workers_a.clone());
     let losers = Vec::from_array(&w.env, [w.loser.clone()]);
     let res = c
@@ -443,12 +441,8 @@ fn admin_rotation_landing_first_invalidates_the_old_admins_resolve() {
             },
         }])
         .try_resolve(&QID, &workers, &losers);
-    assert!(res.is_err(), "old admin's resolve must not authorize");
-    assert_eq!(w.snapshot(), before);
-
-    w.env.set_auths(&[]);
-    c.refund_timeout(&QID);
-    assert_eq!(w.snapshot().status, Status::Refunded);
+    assert_eq!(res, Ok(()));
+    assert_eq!(w.snapshot().status, Status::Resolved);
 }
 
 #[test]
