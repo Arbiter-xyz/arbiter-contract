@@ -249,3 +249,6 @@ build.
 
 <!-- handsoff-issue-44 -->
 - #44: Multisig/timelock admin
+
+<!-- handsoff-issue-45 -->
+- #45: DAO-controlled parameters
