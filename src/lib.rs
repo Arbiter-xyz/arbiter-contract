@@ -3624,6 +3624,10 @@ mod test_economics;
 #[cfg(test)]
 mod test_incentive_math;
 #[cfg(test)]
+mod test_load;
+#[cfg(test)]
+mod test_wasm;
+#[cfg(test)]
 mod test_kyc;
 #[cfg(test)]
 mod test_passkey;
