@@ -249,3 +249,6 @@ build.
 
 <!-- handsoff-issue-36 -->
 - #36: On-chain bonding-curve pricing
+
+<!-- handsoff-issue-38 -->
+- #38: Recurring/subscription questions
