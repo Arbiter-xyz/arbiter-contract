@@ -252,3 +252,6 @@ build.
 
 <!-- handsoff-issue-45 -->
 - #45: DAO-controlled parameters
+
+<!-- handsoff-issue-53 -->
+- #53: On-chain worker category tags
