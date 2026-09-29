@@ -255,3 +255,6 @@ build.
 
 <!-- handsoff-issue-53 -->
 - #53: On-chain worker category tags
+
+<!-- handsoff-issue-54 -->
+- #54: Category-specific stake minimums
