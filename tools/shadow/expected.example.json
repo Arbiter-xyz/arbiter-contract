@@ -1,0 +1,7 @@
+[
+  {
+    "_comment": "One rule per intended behaviour change of the candidate. A divergence matching kind/field/fn (any omitted key matches all) is reported as 'expected' with this reason instead of failing the diff.",
+    "kind": "stake_total",
+    "reason": "candidate lowers SLASH_CAP_BPS_OF_AMOUNT, so losers keep more stake"
+  }
+]

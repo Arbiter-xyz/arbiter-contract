@@ -67,7 +67,7 @@ jobs:
         # (src/test_incentive_math.rs); this runs the model's own tests.
         run: cargo test --manifest-path sim/incentive/Cargo.toml
       - name: Migration tool syntax
-        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs && node --check tools/load/load.mjs
+        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs && node --check tools/load/load.mjs && node --check tools/shadow/shadow.mjs
       - name: Install Stellar CLI
         # Prebuilt .deb instead of cargo install: building from source pulls
         # in hardware-wallet support (dbus, then libudev/hidapi) and takes
