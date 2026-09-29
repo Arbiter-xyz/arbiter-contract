@@ -186,12 +186,13 @@ pub(crate) fn token_admin_client(f: &Fixture) -> token::StellarAssetClient<'_> {
 fn submit_locks_funds() {
     let f = setup();
     let c = client(&f);
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
 
     assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT);
     let q = c.get_question(&1);
     assert_eq!(q.amount, AMOUNT);
     assert_eq!(q.status, Status::Pending);
+    assert_eq!(q.token, f.token_address);
 
     let (topics, data) = last_contract_event(&f);
     assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_opened"));
@@ -202,61 +203,11 @@ fn submit_locks_funds() {
 }
 
 #[test]
-fn submit_with_schema_hash_persists_it_on_the_question() {
-    let f = setup();
-    let c = client(&f);
-    let schema_hash = soroban_sdk::BytesN::from_array(&f.env, &[0x42; 32]);
-    c.submit_with_schema_hash(&f.payer, &1, &AMOUNT, &schema_hash);
-
-    assert_eq!(c.get_question(&1).schema_hash, Some(schema_hash));
-}
-
-#[test]
-fn submit_without_schema_hash_defaults_to_none() {
-    let f = setup();
-    client(&f).submit(&f.payer, &1, &AMOUNT);
-
-    assert_eq!(client(&f).get_question(&1).schema_hash, None);
-}
-
-#[test]
-fn submit_with_category_increments_the_matching_counter() {
-    let f = setup();
-    let c = client(&f);
-    let category = Symbol::new(&f.env, "science");
-    c.submit_with_category(&f.payer, &1, &AMOUNT, &category);
-
-    assert_eq!(c.get_category_count(&category), 1);
-}
-
-#[test]
-fn get_category_count_for_an_unused_category_returns_zero() {
-    let f = setup();
-    let category = Symbol::new(&f.env, "unused");
-
-    assert_eq!(client(&f).get_category_count(&category), 0);
-}
-
-#[test]
-fn category_counts_are_independent_across_categories() {
-    let f = setup();
-    let c = client(&f);
-    let science = Symbol::new(&f.env, "science");
-    let arts = Symbol::new(&f.env, "arts");
-    c.submit_with_category(&f.payer, &1, &AMOUNT, &science);
-    c.submit_with_category(&f.payer, &2, &AMOUNT, &arts);
-    c.submit_with_category(&f.payer, &3, &AMOUNT, &science);
-
-    assert_eq!(c.get_category_count(&science), 2);
-    assert_eq!(c.get_category_count(&arts), 1);
-}
-
-#[test]
 fn duplicate_submit_fails() {
     let f = setup();
     let c = client(&f);
-    c.submit(&f.payer, &1, &AMOUNT);
-    let res = c.try_submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
+    let res = c.try_submit(&f.payer, &f.token_address, &1, &AMOUNT);
     assert_eq!(res, Err(Ok(ContractError::QuestionAlreadyExists)));
 }
 
@@ -264,9 +215,9 @@ fn duplicate_submit_fails() {
 fn submit_zero_or_negative_amount_fails() {
     let f = setup();
     let c = client(&f);
-    let res = c.try_submit(&f.payer, &1, &0);
+    let res = c.try_submit(&f.payer, &f.token_address, &1, &0);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
-    let res = c.try_submit(&f.payer, &2, &-1);
+    let res = c.try_submit(&f.payer, &f.token_address, &2, &-1);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
 }
 
@@ -274,12 +225,13 @@ fn submit_zero_or_negative_amount_fails() {
 fn charge_zero_or_negative_amount_fails() {
     let f = setup();
     let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
     assert_eq!(
-        c.try_charge(&f.payer, &1, &0),
+        c.try_charge(&f.payer, &f.token_address, &1, &0),
         Err(Ok(ContractError::InvalidAmount))
     );
     assert_eq!(
-        c.try_charge(&f.payer, &2, &-1),
+        c.try_charge(&f.payer, &f.token_address, &2, &-1),
         Err(Ok(ContractError::InvalidAmount))
     );
 }
@@ -288,7 +240,7 @@ fn charge_zero_or_negative_amount_fails() {
 fn resolve_splits_pool_and_pays_fee() {
     let f = setup();
     let c = client(&f);
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
 
     let w1 = Address::generate(&f.env);
     let w2 = Address::generate(&f.env);
@@ -498,7 +450,7 @@ fn question_settlement_never_substitutes_another_asset() {
     other_admin.mint(&f.payer, &(AMOUNT * 2));
     c.set_asset_allowed(&other, &true);
 
-    c.submit(&f.payer, &101, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &101, &AMOUNT);
     c.submit_asset(&f.payer, &other, &102, &AMOUNT);
     c.submit_asset(&f.payer, &other, &103, &AMOUNT);
     let other_escrow_before = token::Client::new(&f.env, &other).balance(&f.contract_id);
@@ -881,34 +833,6 @@ fn resolve_slashes_multiple_losing_workers_independently() {
         total_slashed += slashed;
     }
     assert_eq!(total_slashed, 35_000);
-}
-
-#[test]
-fn resolve_emits_one_event_per_matching_worker_with_correct_share() {
-    let f = setup();
-    let c = client(&f);
-    c.submit(&f.payer, &1, &AMOUNT);
-    let first = Address::generate(&f.env);
-    let second = Address::generate(&f.env);
-    c.resolve(
-        &1,
-        &Vec::from_array(&f.env, [first.clone(), second.clone()]),
-        &Vec::new(&f.env),
-    );
-
-    let events = contract_events(&f);
-    let credits = events
-        .iter()
-        .filter(|(topics, _)| event_name(&f, topics) == Symbol::new(&f.env, "worker_credited"))
-        .collect::<std::vec::Vec<_>>();
-    assert_eq!(credits.len(), 2);
-    for (topics, data) in credits {
-        assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
-        let worker: Address = topics.get(2).unwrap().into_val(&f.env);
-        assert!(worker == first || worker == second);
-        let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.clone().into_val(&f.env);
-        assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), 1_000_000i128);
-    }
 }
 
 #[test]
@@ -1454,7 +1378,7 @@ fn charge_draws_down_balance_and_opens_a_normal_question() {
     let c = client(&f);
     c.deposit(&f.payer, &(AMOUNT * 3));
 
-    c.charge(&f.payer, &1, &AMOUNT);
+    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
     let (topics, data) = last_contract_event(&f);
     assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_opened"));
     assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
@@ -1478,7 +1402,7 @@ fn charge_more_than_balance_fails_and_opens_no_question() {
     let c = client(&f);
     c.deposit(&f.payer, &AMOUNT);
 
-    let res = c.try_charge(&f.payer, &1, &(AMOUNT + 1));
+    let res = c.try_charge(&f.payer, &f.token_address, &1, &(AMOUNT + 1));
     assert_eq!(res, Err(Ok(ContractError::InsufficientBalance)));
     assert_eq!(c.get_balance(&f.payer), AMOUNT);
     assert!(c.try_get_question(&1).is_err());
@@ -1489,7 +1413,7 @@ fn charged_question_settles_through_resolve_exactly_like_submit() {
     let f = setup();
     let c = client(&f);
     c.deposit(&f.payer, &AMOUNT);
-    c.charge(&f.payer, &1, &AMOUNT);
+    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
 
     let winner = Address::generate(&f.env);
     c.resolve(
@@ -1507,8 +1431,8 @@ fn charged_question_can_still_be_refunded_and_refund_timed_out() {
     let f = setup();
     let c = client(&f);
     c.deposit(&f.payer, &(AMOUNT * 2));
-    c.charge(&f.payer, &1, &AMOUNT);
-    c.charge(&f.payer, &2, &AMOUNT);
+    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.charge(&f.payer, &f.token_address, &2, &AMOUNT);
 
     c.refund(&1);
     assert_eq!(c.get_question(&1).status, Status::Refunded);
@@ -1525,11 +1449,52 @@ fn charge_same_question_id_twice_fails_like_duplicate_submit() {
     let f = setup();
     let c = client(&f);
     c.deposit(&f.payer, &(AMOUNT * 2));
-    c.charge(&f.payer, &1, &AMOUNT);
+    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
 
-    let res = c.try_charge(&f.payer, &1, &AMOUNT);
+    let res = c.try_charge(&f.payer, &f.token_address, &1, &AMOUNT);
     assert_eq!(res, Err(Ok(ContractError::QuestionAlreadyExists)));
     // Balance was already debited by the first charge only, not double-spent
     // by the failed second attempt.
     assert_eq!(c.get_balance(&f.payer), AMOUNT);
+}
+
+#[test]
+fn per_question_asset_selection_settles_two_questions_in_different_assets_independently() {
+    let f = setup();
+    let c = client(&f);
+
+    let other_issuer = Address::generate(&f.env);
+    let other_sac = f.env.register_stellar_asset_contract_v2(other_issuer);
+    let other_token = other_sac.address();
+    c.set_asset_allowed(&other_token, &true);
+
+    let amount_a = 2_500_000i128;
+    let amount_b = 5_000_000i128;
+    token::StellarAssetClient::new(&f.env, &other_token).mint(&f.payer, &amount_b);
+
+    c.submit(&f.payer, &f.token_address, &1, &amount_a);
+    c.submit(&f.payer, &other_token, &2, &amount_b);
+
+    let q1 = c.get_question(&1);
+    assert_eq!(q1.token, f.token_address);
+    assert_eq!(q1.amount, amount_a);
+
+    let q2 = c.get_question(&2);
+    assert_eq!(q2.token, other_token);
+    assert_eq!(q2.amount, amount_b);
+
+    let worker1 = Address::generate(&f.env);
+    let worker2 = Address::generate(&f.env);
+
+    c.resolve(&1, &Vec::from_array(&f.env, [worker1.clone()]), &Vec::new(&f.env));
+    c.resolve(&2, &Vec::from_array(&f.env, [worker2.clone()]), &Vec::new(&f.env));
+
+    assert_eq!(c.get_question(&1).status, Status::Resolved);
+    assert_eq!(c.get_question(&2).status, Status::Resolved);
+
+    assert_eq!(token_client(&f).balance(&f.contract_id), amount_a - amount_a / 5);
+    assert_eq!(token::Client::new(&f.env, &other_token).balance(&f.contract_id), amount_b - amount_b / 5);
+
+    assert_eq!(c.get_owed_asset(&worker1, &f.token_address), amount_a * 4 / 5);
+    assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
 }

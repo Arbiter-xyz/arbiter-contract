@@ -12,7 +12,7 @@ fn registered_underwriter_can_front_an_instant_refund_before_the_timeout_deadlin
     let c = client(&f);
     let underwriter = Address::generate(&f.env);
 
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
     c.approve_underwriter(&underwriter);
     assert!(c.is_underwriter(&underwriter));
 
@@ -29,7 +29,7 @@ fn underwriter_fee_is_deducted_from_the_refunded_amount_and_paid_to_the_underwri
     let c = client(&f);
     let underwriter = Address::generate(&f.env);
 
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
     c.approve_underwriter(&underwriter);
 
     let payer_before = token_client(&f).balance(&f.payer);
@@ -47,7 +47,7 @@ fn unapproved_address_cannot_instant_refund() {
     let c = client(&f);
     let not_underwriter = Address::generate(&f.env);
 
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
     let res = c.try_instant_refund(&not_underwriter, &1);
     assert_eq!(res, Err(Ok(ContractError::NotUnderwriter)));
 }
@@ -58,7 +58,7 @@ fn revoked_underwriter_cannot_instant_refund() {
     let c = client(&f);
     let underwriter = Address::generate(&f.env);
 
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
     c.approve_underwriter(&underwriter);
     c.revoke_underwriter(&underwriter);
 
@@ -73,7 +73,7 @@ fn instant_refund_on_already_resolved_question_fails() {
     let underwriter = Address::generate(&f.env);
     let worker = Address::generate(&f.env);
 
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
     c.approve_underwriter(&underwriter);
 
     let workers = Vec::from_array(&f.env, [worker]);
