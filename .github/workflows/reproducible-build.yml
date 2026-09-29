@@ -1,0 +1,67 @@
+name: Reproducible build
+
+# #115: builds the same commit in two independent environments — the plain
+# GitHub runner and the repo's pinned Dockerfile — and fails if the two WASM
+# sha256 hashes differ. Both hashes are written to the job summary as the
+# recorded evidence for that commit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "Dockerfile"
+      - "scripts/reproducible-build.sh"
+      - ".github/workflows/reproducible-build.yml"
+  workflow_dispatch:
+
+jobs:
+  runner:
+    name: build on runner
+    runs-on: ubuntu-latest
+    outputs:
+      hash: ${{ steps.build.outputs.hash }}
+    steps:
+      - uses: actions/checkout@v4
+      # rustup reads rust-toolchain.toml, so this installs the pinned rustc.
+      - run: rustup show
+      - name: Install pinned Stellar CLI
+        run: |
+          curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
+      - id: build
+        run: |
+          ./scripts/reproducible-build.sh
+          echo "hash=$(cat target/wasm-hash.txt)" >> "$GITHUB_OUTPUT"
+
+  docker:
+    name: build in pinned container
+    runs-on: ubuntu-latest
+    outputs:
+      hash: ${{ steps.build.outputs.hash }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t arbiter-contract-build .
+      - id: build
+        run: |
+          docker run --rm -v "$PWD:/src" arbiter-contract-build
+          echo "hash=$(cat target/wasm-hash.txt)" >> "$GITHUB_OUTPUT"
+
+  compare:
+    name: compare hashes
+    needs: [runner, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "### Reproducible build (${GITHUB_SHA})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- runner: \`${{ needs.runner.outputs.hash }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- docker: \`${{ needs.docker.outputs.hash }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.runner.outputs.hash }}" != "${{ needs.docker.outputs.hash }}" ]; then
+            echo "::error::build is not reproducible: runner and docker hashes differ"
+            exit 1
+          fi
+          echo "Build is reproducible: ${{ needs.runner.outputs.hash }}"

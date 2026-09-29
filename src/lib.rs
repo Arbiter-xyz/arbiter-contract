@@ -323,6 +323,34 @@ pub enum DataKey {
     /// Number of questions opened with this caller-defined category. Callers
     /// should use a bounded vocabulary to avoid unbounded key growth.
     CategoryCount(Symbol),
+    /// #109 circuit breaker: when true, every entry point that pulls NEW
+    /// payer funds into escrow (submit*/deposit*/charge*/reopen_question)
+    /// fails with ContractPaused. Settlement of already-Pending questions
+    /// (resolve/refund/refund_timeout) and every withdrawal path are
+    /// deliberately NOT gated, so a pause can never strand funds. Set only
+    /// by the admin via set_paused() — the anomaly detection that decides
+    /// *when* to pause runs off-chain (see docs/circuit-breaker.md).
+    /// Instance storage: the instance entry is already loaded on every
+    /// call, so checking this adds no extra ledger-entry read to the hot
+    /// path. Absent means not paused.
+    Paused,
+    /// #110: number of questions currently Pending, maintained as a running
+    /// counter (+1 when a question enters Pending, -1 when it leaves via
+    /// settle_question()). Instance storage for the same hot-path reason as
+    /// Paused. Mirrors PendingCount, but lives next to the other health
+    /// counters so get_health() needs no persistent reads.
+    OpenQuestionCount,
+    /// #110: cumulative number of questions that have ever entered Pending
+    /// (submit/charge/import/reopen). Never decremented.
+    TotalOpenedCount,
+    /// #110: cumulative number of questions settled as Resolved.
+    TotalResolvedCount,
+    /// #110 / #109: cumulative number of questions settled as Refunded
+    /// (admin refund() and permissionless refund_timeout() both count).
+    /// This is the signal an off-chain anomaly detector watches: a spike in
+    /// TotalRefundedCount relative to TotalResolvedCount is what should
+    /// trigger set_paused(true).
+    TotalRefundedCount,
 }
 
 #[contracttype]
@@ -463,6 +491,12 @@ pub enum ContractError {
     StreamNotFound = 304,
     /// #90: claim_stream() called with nothing newly vested to claim.
     NothingToClaim = 305,
+    // 400s: #109 circuit breaker. A fresh range for the same reason as the
+    // 200s/300s blocks above — no collision with other in-flight PRs.
+    /// #109: a funding entry point (submit*/deposit*/charge*/
+    /// reopen_question) was called while the admin has the contract paused
+    /// via set_paused(true). Settlement and withdrawals are never paused.
+    ContractPaused = 400,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -588,6 +622,41 @@ pub struct AdminRotated {
 pub struct TimeoutLedgersChanged {
     pub old_timeout_ledgers: u32,
     pub new_timeout_ledgers: u32,
+}
+
+/// #109 `paused_changed` data: paused. Emitted by set_paused() so an
+/// indexer (and payers) see the circuit breaker trip or reset on-chain.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PausedChanged {
+    pub paused: bool,
+}
+
+/// #110: one-call snapshot of how healthy this deployment is right now.
+/// Everything here is either a running counter maintained alongside the
+/// existing state transitions or a value already in instance storage, so
+/// get_health() never scans storage.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractHealth {
+    /// Questions currently Pending.
+    pub open_question_count: u32,
+    /// Cumulative questions that have ever entered Pending.
+    pub total_opened: u32,
+    /// Cumulative questions settled as Resolved.
+    pub total_resolved: u32,
+    /// Cumulative questions settled as Refunded (admin + timeout).
+    pub total_refunded: u32,
+    /// The contract's own balance of the default token: escrowed questions
+    /// + prepaid balances + stakes + owed-but-unwithdrawn earnings. This is
+    /// TVL in the default asset only; other allowlisted assets are readable
+    /// via their own token contract's balance().
+    pub token_balance: i128,
+    pub admin: Address,
+    pub token: Address,
+    pub platform: Address,
+    /// #109 circuit-breaker state.
+    pub paused: bool,
 }
 
 /// Issue #84: the would-be outcome of calling resolve() with the given
@@ -994,6 +1063,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
 
         if amount <= 0 {
@@ -1017,6 +1087,7 @@ impl OracleEscrow {
         amount: i128,
         schema_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1045,6 +1116,7 @@ impl OracleEscrow {
         amount: i128,
         category: Symbol,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1075,6 +1147,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1093,6 +1166,7 @@ impl OracleEscrow {
     /// underlying custody as submit()'s escrow; the money just isn't
     /// earmarked for a specific question yet.
     pub fn deposit(env: Env, payer: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1129,6 +1203,7 @@ impl OracleEscrow {
         token: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1394,6 +1469,7 @@ impl OracleEscrow {
         schema_hash: Option<BytesN<32>>,
         category: Option<Symbol>,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
@@ -1488,6 +1564,8 @@ impl OracleEscrow {
             .set(&AssetKey::QuestionToken(question_id), &token);
         Self::extend_asset_ttl(env, &AssetKey::QuestionToken(question_id));
         Self::index_add(env, question_id);
+        Self::bump_counter(env, &DataKey::OpenQuestionCount);
+        Self::bump_counter(env, &DataKey::TotalOpenedCount);
         Self::bump_instance(env);
 
         QuestionOpened {
@@ -2287,6 +2365,60 @@ impl OracleEscrow {
             .unwrap_or(0)
     }
 
+    /// #109 circuit breaker. Admin-only. `true` makes every funding entry
+    /// point (submit*/deposit*/charge*/reopen_question) fail with
+    /// ContractPaused; `false` lifts it. resolve()/refund()/refund_timeout()
+    /// and all withdrawals keep working either way, so already-escrowed
+    /// funds can always leave. The decision of *when* to pause is made
+    /// off-chain (e.g. a backend job watching get_health()'s refund
+    /// counters) — see docs/circuit-breaker.md for why the contract does not
+    /// compute a refund rate itself. Only the admin can pause or unpause, so
+    /// a third party cannot trip the breaker to deny service.
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        Self::bump_instance(&env);
+        PausedChanged { paused }.publish(&env);
+        Ok(())
+    }
+
+    /// #109: whether the circuit breaker is currently set.
+    pub fn is_paused(env: Env) -> bool {
+        Self::paused(&env)
+    }
+
+    /// #110: one-call deployment health view — open question count,
+    /// cumulative opened/resolved/refunded totals, the contract's own
+    /// default-token balance (TVL), the configured admin/token/platform, and
+    /// the pause flag. All reads are instance storage plus one token
+    /// balance() call; nothing is scanned.
+    pub fn get_health(env: Env) -> Result<ContractHealth, ContractError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        let token_addr = Self::token(&env)?;
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)?;
+        let token_balance =
+            token::Client::new(&env, &token_addr).balance(&env.current_contract_address());
+        Ok(ContractHealth {
+            open_question_count: Self::counter(&env, &DataKey::OpenQuestionCount),
+            total_opened: Self::counter(&env, &DataKey::TotalOpenedCount),
+            total_resolved: Self::counter(&env, &DataKey::TotalResolvedCount),
+            total_refunded: Self::counter(&env, &DataKey::TotalRefundedCount),
+            token_balance,
+            admin,
+            token: token_addr,
+            platform,
+            paused: Self::paused(&env),
+        })
+    }
+
     /// Read-only convenience so clients can display "auto-refund available
     /// after ledger N" without guessing the configured timeout.
     pub fn get_timeout_ledgers(env: Env) -> Result<u32, ContractError> {
@@ -2653,6 +2785,38 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// #109: fails funding entry points while the circuit breaker is set.
+    /// Reads instance storage only, which every call has already loaded.
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if Self::paused(env) {
+            return Err(ContractError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn counter(env: &Env, key: &DataKey) -> u32 {
+        env.storage().instance().get(key).unwrap_or(0)
+    }
+
+    /// #110 health counters saturate rather than trap: they are
+    /// observability only and must never be able to fail a settlement.
+    fn bump_counter(env: &Env, key: &DataKey) {
+        let next = Self::counter(env, key).saturating_add(1);
+        env.storage().instance().set(key, &next);
+    }
+
+    fn drop_counter(env: &Env, key: &DataKey) {
+        let next = Self::counter(env, key).saturating_sub(1);
+        env.storage().instance().set(key, &next);
+    }
+
     fn schedule_admin_rotation(env: &Env, new_admin: Address) {
         let executable_at = env
             .ledger()
@@ -2783,6 +2947,14 @@ impl OracleEscrow {
         question.status = status;
         Self::store_question(env, question_id, question);
         Self::index_remove(env, question_id);
+        // #110: every exit from Pending (resolve, refund, refund_timeout,
+        // migrate) funnels through here, so the open count can't drift.
+        Self::drop_counter(env, &DataKey::OpenQuestionCount);
+        match status {
+            Status::Resolved => Self::bump_counter(env, &DataKey::TotalResolvedCount),
+            Status::Refunded => Self::bump_counter(env, &DataKey::TotalRefundedCount),
+            _ => {}
+        }
         Self::bump_instance(env);
         QuestionSettled {
             question_id,
@@ -2900,6 +3072,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -2932,6 +3105,8 @@ impl OracleEscrow {
         };
         Self::store_question(&env, question_id, &reopened);
 
+        Self::bump_counter(&env, &DataKey::OpenQuestionCount);
+        Self::bump_counter(&env, &DataKey::TotalOpenedCount);
         Self::bump_instance(&env);
         QuestionReopened {
             question_id,
@@ -3664,3 +3839,7 @@ mod test_question_templates;
 mod test_delegated_auth;
 #[cfg(test)]
 mod test_payment_streaming;
+#[cfg(test)]
+mod test_health;
+#[cfg(test)]
+mod test_circuit_breaker;
