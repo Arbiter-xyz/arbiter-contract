@@ -246,3 +246,6 @@ build.
 
 <!-- handsoff-issue-21 -->
 - #21: touch() rewrites u
+
+<!-- handsoff-issue-44 -->
+- #44: Multisig/timelock admin
