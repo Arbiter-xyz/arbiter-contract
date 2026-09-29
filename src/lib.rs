@@ -86,6 +86,11 @@ pub const MAX_QUORUM_SIZE: u32 = u32::MAX;
 /// per credited worker, not O(n) over all workers ever staked.
 pub const LEADERBOARD_CAP: u32 = 20;
 
+/// Issue #11: default number of credited resolutions (get_resolved_count())
+/// after which a worker counts as established for resolve_by_consensus()'s
+/// lone-dissent slash. Admin-overridable via set_established_answer_count().
+pub const DEFAULT_ESTABLISHED_ANSWER_COUNT: u32 = 20;
+
 /// Ledgers between propose_upgrade() and the earliest execute_upgrade().
 /// Strictly longer than MAX_TIMEOUT_LEDGERS, so every question pending when
 /// an upgrade is proposed reaches its refund_timeout() deadline while the
@@ -323,6 +328,8 @@ pub enum DataKey {
     /// Number of questions opened with this caller-defined category. Callers
     /// should use a bounded vocabulary to avoid unbounded key growth.
     CategoryCount(Symbol),
+    /// Issue #11: admin-set override of DEFAULT_ESTABLISHED_ANSWER_COUNT.
+    EstablishedAnswerCount,
 }
 
 #[contracttype]
@@ -341,24 +348,68 @@ pub enum AssetKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ContractError {
+    /// initialize() called on an instance whose Admin is already set.
     AlreadyInitialized = 1,
+    /// A function that reads Admin, Token, Platform or TimeoutLedgers from
+    /// instance storage (every admin-gated call, resolve(), submit()/charge(),
+    /// the get_admin()/get_token()/get_platform()/get_timeout_ledgers() views,
+    /// ...) was called before initialize().
     NotInitialized = 2,
+    /// An amount argument is zero or negative. Returned by submit*/charge*,
+    /// deposit*/withdraw_balance*, stake*/begin_unstake*, withdraw*,
+    /// import_question(), reopen_question(), set_top_up_threshold() and by
+    /// set_quorum_bounds() when its bounds are inconsistent.
     InvalidAmount = 3,
+    /// submit*/charge*/import_question() used a question_id that already has a
+    /// stored Question in this instance (in any status).
     QuestionAlreadyExists = 4,
+    /// No Question is stored under the given question_id. Returned by
+    /// get_question(), resolve(), refund(), refund_timeout(), migrate_pending()
+    /// and every other call that loads a question by id.
     QuestionNotFound = 5,
+    /// The question exists but its status is not Pending, so it can no longer
+    /// be resolved, refunded or migrated. Returned by resolve(), refund(),
+    /// refund_timeout(), migrate_pending() and preview_resolve().
     QuestionNotPending = 6,
+    /// resolve()/preview_resolve() called with an empty `workers` list — every
+    /// resolution must credit at least one worker.
     NoWorkers = 7,
+    /// refund_timeout() (or a sweep_timeouts() entry) called before the
+    /// question's own `created_at + timeout_ledgers` deadline.
     TooEarlyForTimeout = 8,
+    /// initialize()/set_timeout_ledgers() received a timeout of 0 or above
+    /// MAX_TIMEOUT_LEDGERS, or import_question() received a timeout of 0.
     InvalidTimeout = 9,
+    /// begin_unstake*() asked to unbond more than the worker's active stake
+    /// (settled + warming).
     InsufficientStake = 10,
+    /// withdraw*() called while the worker's owed balance is exactly 0 (or
+    /// below). Distinct from InsufficientOwed, which is a positive balance
+    /// that is smaller than the amount requested.
     NothingOwed = 11,
+    /// resolve()'s `workers`/`losing_workers` contain a duplicate address
+    /// within one list, or the same address in both lists.
     InvalidWorkerLists = 12,
+    /// charge*()/withdraw_balance*() asked for more than the payer's prepaid
+    /// Balance currently holds.
     InsufficientBalance = 13,
+    /// withdraw*() asked for more than the worker's positive owed balance
+    /// minus any amount lock_owed() has pledged as collateral.
     InsufficientOwed = 14,
+    /// complete_unstake*() called while the worker has nothing in the
+    /// unbonding bucket.
     NothingUnbonding = 15,
+    /// complete_unstake*() called before the unbonding bucket's
+    /// `unbonding_release_at` ledger.
     UnbondingNotElapsed = 16,
+    /// import_question() called by an address other than the MigrationSource
+    /// registered via set_migration_source(), or before one was registered.
     MigrationNotAuthorized = 17,
+    /// import_question() received a question denominated in a token that is
+    /// neither this instance's default token nor an allowed asset.
     TokenMismatch = 18,
+    /// migrate_pending() targeted this same contract, or
+    /// set_migration_source() named this same contract as the source.
     InvalidMigrationTarget = 19,
     /// `workers.len() + losing_workers.len()` exceeds the hard, compile-time
     /// MAX_QUORUM_SIZE cap. This variant was already referenced by resolve()
@@ -435,11 +486,22 @@ pub enum ContractError {
     /// get_historical_stake() found no snapshot for that worker at that
     /// exact ledger.
     StakeSnapshotNotFound = 32,
+    /// A *_asset() call or get_asset_decimals() named a token that is not on
+    /// the admin-managed allowlist (see set_asset_allowed()).
     AssetNotAllowed = 33,
+    /// cancel_admin_rotation()/execute_admin_rotation() called with no
+    /// admin rotation proposed.
     NoAdminRotationPending = 34,
+    /// execute_admin_rotation() called before the pending rotation's
+    /// `executable_at` ledger.
     AdminRotationNotReady = 35,
+    /// set_asset_allowed() tried to disallow the instance's default token.
     CannotDisableDefaultAsset = 36,
+    /// A checked i128/u32 addition overflowed (stake, deposit, owed credit,
+    /// category count, migration totals, resolve()'s platform take).
     ArithmeticOverflow = 37,
+    /// set_asset_allowed() tried to allow a new non-default token when
+    /// MAX_ALLOWED_ASSETS are already allowed.
     AssetLimitReached = 38,
     // 300s: new-feature error codes for #87/#88/#89/#90. Starting at 300
     // deliberately avoids colliding with other in-flight PRs touching this
@@ -463,6 +525,10 @@ pub enum ContractError {
     StreamNotFound = 304,
     /// #90: claim_stream() called with nothing newly vested to claim.
     NothingToClaim = 305,
+    /// #11: resolve_by_consensus() received answers that are neither
+    /// unanimous nor unanimous-but-one (with at least two agreeing). Such a
+    /// split quorum must be reconciled and settled through resolve().
+    NoUnanimousConsensus = 400,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -862,6 +928,29 @@ pub struct AnswerEntry {
     pub value: i128,
 }
 
+/// #11: one worker's answer, as passed to resolve_by_consensus(). `answer`
+/// is a commitment (e.g. sha256 of the normalized answer) — the contract
+/// only ever compares these for equality.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsensusAnswer {
+    pub worker: Address,
+    pub answer: BytesN<32>,
+}
+
+/// Emitted by resolve_by_consensus() when one worker alone disagreed with an
+/// otherwise unanimous quorum (#11). `established` says whether they were
+/// past the threshold and therefore slashed (the slash itself is reported
+/// by the usual WorkerSlashed event).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnanimousDissent {
+    #[topic]
+    pub question_id: u64,
+    pub worker: Address,
+    pub established: bool,
+}
+
 /// Emitted when resolve_median() computes its median (#98).
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1224,6 +1313,8 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// Read-only: the payer's default-asset prepaid Balance available to
+    /// charge(), or 0 if they never deposited.
     pub fn get_balance(env: Env, payer: Address) -> i128 {
         env.storage()
             .persistent()
@@ -1549,7 +1640,145 @@ impl OracleEscrow {
         losing_workers: Vec<Address>,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        Self::settle_resolution(&env, question_id, workers, losing_workers)
+    }
 
+    /// Issue #11: admin-only resolution from raw consensus data, which
+    /// slashes an ESTABLISHED worker who alone dissented from an otherwise
+    /// unanimous quorum. Each entry commits to one worker's (normalized,
+    /// hashed) answer; the contract itself decides who agreed:
+    ///
+    /// - every answer identical: all workers are credited, nobody slashed;
+    /// - all but exactly one identical, with at least two in agreement: the
+    ///   agreeing workers are credited. The lone dissenter is slashed through
+    ///   the same slash() path resolve() uses — but only if they are
+    ///   established (get_resolved_count() >= get_established_answer_count()).
+    ///   An unestablished dissenter is neither credited nor slashed;
+    /// - anything else (a split or ambiguous quorum) returns
+    ///   NoUnanimousConsensus and changes nothing — those questions need the
+    ///   Claude-reviewed reconciliation and must go through resolve().
+    ///
+    /// Deliberately checks nothing subjective: the only trigger is "everyone
+    /// else agreed, this established worker alone didn't".
+    pub fn resolve_by_consensus(
+        env: Env,
+        question_id: u64,
+        answers: Vec<ConsensusAnswer>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        let n = answers.len();
+        if n == 0 {
+            return Err(ContractError::EmptyAnswerSet);
+        }
+        // Before the O(n^2) duplicate scan, same as resolve().
+        if n > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        for i in 0..n {
+            let a = answers.get(i).unwrap().worker;
+            for j in (i + 1)..n {
+                if answers.get(j).unwrap().worker == a {
+                    return Err(ContractError::DuplicateAnswerAddress);
+                }
+            }
+        }
+
+        let dissenter_idx = Self::unanimous_dissenter(&answers)?;
+
+        let mut workers = Vec::new(&env);
+        let mut losing_workers = Vec::new(&env);
+        for i in 0..n {
+            let entry = answers.get(i).unwrap();
+            if Some(i) != dissenter_idx {
+                workers.push_back(entry.worker);
+                continue;
+            }
+            let established = Self::get_resolved_count(env.clone(), entry.worker.clone())
+                >= Self::get_established_answer_count(env.clone());
+            UnanimousDissent {
+                question_id,
+                worker: entry.worker.clone(),
+                established,
+            }
+            .publish(&env);
+            if established {
+                losing_workers.push_back(entry.worker);
+            }
+        }
+
+        Self::settle_resolution(&env, question_id, workers, losing_workers)
+    }
+
+    /// Ok(None) when every answer agrees, Ok(Some(i)) when answers[i] alone
+    /// disagrees with a unanimous rest of at least two, and
+    /// Err(NoUnanimousConsensus) for any other shape.
+    fn unanimous_dissenter(answers: &Vec<ConsensusAnswer>) -> Result<Option<u32>, ContractError> {
+        let n = answers.len();
+        let first = answers.get(0).unwrap().answer;
+        let mut mismatches = 0u32;
+        let mut mismatch_idx = 0u32;
+        for i in 1..n {
+            if answers.get(i).unwrap().answer != first {
+                mismatches += 1;
+                mismatch_idx = i;
+            }
+        }
+        if mismatches == 0 {
+            return Ok(None);
+        }
+        // A lone dissenter needs a unanimous rest of at least two, so a
+        // 1-vs-1 disagreement is a split, never a dissent.
+        if n < 3 {
+            return Err(ContractError::NoUnanimousConsensus);
+        }
+        if mismatches == 1 {
+            return Ok(Some(mismatch_idx));
+        }
+        if mismatches == n - 1 {
+            // answers[0] is the odd one out only if everyone else agrees.
+            let second = answers.get(1).unwrap().answer;
+            for i in 2..n {
+                if answers.get(i).unwrap().answer != second {
+                    return Err(ContractError::NoUnanimousConsensus);
+                }
+            }
+            return Ok(Some(0));
+        }
+        Err(ContractError::NoUnanimousConsensus)
+    }
+
+    /// Issue #11: admin-only. Sets how many credited resolutions
+    /// (get_resolved_count()) a worker needs before resolve_by_consensus()
+    /// treats them as established and slashes a lone dissent. Mirrors the
+    /// backend reputation gate's answer-count threshold.
+    pub fn set_established_answer_count(env: Env, count: u32) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::EstablishedAnswerCount, &count);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// Read-only: the configured established-worker threshold, or
+    /// DEFAULT_ESTABLISHED_ANSWER_COUNT if the admin never set one.
+    pub fn get_established_answer_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EstablishedAnswerCount)
+            .unwrap_or(DEFAULT_ESTABLISHED_ANSWER_COUNT)
+    }
+
+    /// Shared settlement body of resolve() and resolve_by_consensus(). The
+    /// caller has already checked admin auth.
+    fn settle_resolution(
+        env: &Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        let env = env.clone();
         if workers.is_empty() {
             return Err(ContractError::NoWorkers);
         }
@@ -1864,8 +2093,9 @@ impl OracleEscrow {
         Ok(amount)
     }
 
-    /// Active stake (settled + warming): what the worker has bonded and not
-    /// asked to withdraw. Excludes the unbonding bucket.
+    /// Read-only: the worker's active default-asset stake (settled +
+    /// warming) — what they have bonded and not asked to withdraw. Excludes
+    /// the unbonding bucket; 0 if they never staked.
     pub fn get_stake(env: Env, worker: Address) -> i128 {
         let info = Self::stake_info(&env, &worker);
         info.settled + info.warming
@@ -2002,6 +2232,8 @@ impl OracleEscrow {
         Ok(amount)
     }
 
+    /// Read-only: the worker's accrued-but-unwithdrawn default-asset earnings
+    /// from resolve(), or 0 if nothing is owed.
     pub fn get_owed(env: Env, worker: Address) -> i128 {
         env.storage()
             .persistent()
@@ -2276,8 +2508,23 @@ impl OracleEscrow {
         CONTRACT_VERSION
     }
 
+    /// Read-only: the stored Question for `question_id` (any status), or
+    /// QuestionNotFound if no such id was ever opened in this instance.
     pub fn get_question(env: Env, question_id: u64) -> Result<Question, ContractError> {
         Self::load_question(&env, question_id)
+    }
+
+    /// Read-only batch form of get_question() for indexers and dashboards:
+    /// one call instead of N. Output is in input order, with `None` at the
+    /// position of any id that doesn't exist rather than failing the whole
+    /// call. No maximum length is enforced here; simulation resource limits
+    /// bound it in practice.
+    pub fn get_questions(env: Env, question_ids: Vec<u64>) -> Vec<Option<Question>> {
+        let mut out = Vec::new(&env);
+        for question_id in question_ids.iter() {
+            out.push_back(Self::load_question(&env, question_id).ok());
+        }
+        out
     }
 
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
@@ -2300,6 +2547,26 @@ impl OracleEscrow {
     /// check two instances escrow the same asset without reading storage.
     pub fn get_token(env: Env) -> Result<Address, ContractError> {
         Self::token(&env)
+    }
+
+    /// Read-only convenience so observers can confirm which address
+    /// currently holds resolve()/refund() authority without decoding raw
+    /// instance storage.
+    pub fn get_admin(env: Env) -> Result<Address, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Read-only convenience so observers can confirm which address receives
+    /// the platform fee and slashed stake without decoding raw instance
+    /// storage.
+    pub fn get_platform(env: Env) -> Result<Address, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)
     }
 
     pub fn get_question_token(env: Env, question_id: u64) -> Result<Address, ContractError> {
@@ -3664,3 +3931,7 @@ mod test_question_templates;
 mod test_delegated_auth;
 #[cfg(test)]
 mod test_payment_streaming;
+#[cfg(test)]
+mod test_unanimous_dissent;
+#[cfg(test)]
+mod test_views;
