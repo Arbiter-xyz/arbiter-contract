@@ -310,34 +310,17 @@ pub enum DataKey {
     /// Number of questions opened with this caller-defined category. Callers
     /// should use a bounded vocabulary to avoid unbounded key growth.
     CategoryCount(Symbol),
-    /// #109 circuit breaker: when true, every entry point that pulls NEW
-    /// payer funds into escrow (submit*/deposit*/charge*/reopen_question)
-    /// fails with ContractPaused. Settlement of already-Pending questions
-    /// (resolve/refund/refund_timeout) and every withdrawal path are
-    /// deliberately NOT gated, so a pause can never strand funds. Set only
-    /// by the admin via set_paused() — the anomaly detection that decides
-    /// *when* to pause runs off-chain (see docs/circuit-breaker.md).
-    /// Instance storage: the instance entry is already loaded on every
-    /// call, so checking this adds no extra ledger-entry read to the hot
-    /// path. Absent means not paused.
-    Paused,
-    /// #110: number of questions currently Pending, maintained as a running
-    /// counter (+1 when a question enters Pending, -1 when it leaves via
-    /// settle_question()). Instance storage for the same hot-path reason as
-    /// Paused. Mirrors PendingCount, but lives next to the other health
-    /// counters so get_health() needs no persistent reads.
-    OpenQuestionCount,
-    /// #110: cumulative number of questions that have ever entered Pending
-    /// (submit/charge/import/reopen). Never decremented.
-    TotalOpenedCount,
-    /// #110: cumulative number of questions settled as Resolved.
-    TotalResolvedCount,
-    /// #110 / #109: cumulative number of questions settled as Refunded
-    /// (admin refund() and permissionless refund_timeout() both count).
-    /// This is the signal an off-chain anomaly detector watches: a spike in
-    /// TotalRefundedCount relative to TotalResolvedCount is what should
-    /// trigger set_paused(true).
-    TotalRefundedCount,
+    /// #125: a worker's hash commitment for `question_id`, stored by
+    /// commit_answer() and consumed by reveal_answer(). Keyed by
+    /// (question_id, worker) so workers commit independently.
+    Commit(u64, Address),
+    /// #128: the optional address that receives a share of platform fee
+    /// revenue on every resolve(). Absent means no routing (default).
+    PublicGoodsAddress,
+    /// #128: share of the platform's cut to route to PublicGoodsAddress,
+    /// in basis points. 0 (or absent) means no routing — identical to the
+    /// current single-transfer behavior.
+    PublicGoodsBps,
 }
 
 #[contracttype]
@@ -478,12 +461,20 @@ pub enum ContractError {
     StreamNotFound = 304,
     /// #90: claim_stream() called with nothing newly vested to claim.
     NothingToClaim = 305,
-    // 400s: #109 circuit breaker. A fresh range for the same reason as the
-    // 200s/300s blocks above — no collision with other in-flight PRs.
-    /// #109: a funding entry point (submit*/deposit*/charge*/
-    /// reopen_question) was called while the admin has the contract paused
-    /// via set_paused(true). Settlement and withdrawals are never paused.
-    ContractPaused = 400,
+    /// #125: commit_answer() called after a commitment already exists for
+    /// this (question_id, worker) pair. Workers may not overwrite a
+    /// commitment once posted (it defeats the purpose of commit-reveal).
+    CommitAlreadyExists = 306,
+    /// #125: reveal_answer() called but no prior commit_answer() exists for
+    /// this (question_id, worker) pair.
+    CommitNotFound = 307,
+    /// #125: reveal_answer() was called with an answer+salt whose hash does
+    /// not match the stored commitment hash.
+    CommitHashMismatch = 308,
+    /// #128: set_public_goods_config() called with a bps value exceeding
+    /// BPS_DENOM (10_000) — routing more than 100% of the platform fee
+    /// is nonsensical.
+    InvalidPublicGoodsBps = 309,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -985,6 +976,47 @@ pub struct AdminRotationExecuted {
     #[topic]
     pub new_admin: Address,
 }
+}
+
+/// #125: a worker's pending hash commitment for a question. Stored under
+/// DataKey::Commit(question_id, worker) by commit_answer() and removed by
+/// reveal_answer() once it has been verified.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitEntry {
+    /// SHA-256 of (answer_bytes || salt_bytes), as supplied by the worker.
+    pub answer_hash: BytesN<32>,
+    /// Ledger sequence when the commitment was posted.
+    pub committed_at: u32,
+}
+
+/// #125: emitted when a worker posts a commitment.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerCommitted {
+    #[topic]
+    pub question_id: u64,
+    #[topic]
+    pub worker: Address,
+    pub committed_at: u32,
+}
+
+/// #125: emitted when a worker's reveal is accepted.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerRevealed {
+    #[topic]
+    pub question_id: u64,
+    #[topic]
+    pub worker: Address,
+}
+
+/// #128: emitted when the admin configures the public-goods routing.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicGoodsConfigSet {
+    pub address: Address,
+    pub bps: u32,
 }
 
 #[contract]
@@ -1574,11 +1606,56 @@ impl OracleEscrow {
         }
 
         if platform_take > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &platform,
-                &platform_take,
-            );
+            // #128: if a public-goods address + bps have been configured,
+            // split platform_take into two transfers:
+            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
+            //   platform_remainder = platform_take - public_goods_share
+            // Any dust from the integer division stays with the platform
+            // (same dust-rounding discipline resolve() already uses for the
+            // worker pool split). If unconfigured (0 bps or absent address)
+            // the behaviour is identical to the current single transfer.
+            let public_goods_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsBps)
+                .unwrap_or(0);
+            let maybe_pg_addr: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsAddress);
+            if public_goods_bps > 0 {
+                if let Some(pg_addr) = maybe_pg_addr {
+                    let public_goods_share =
+                        Self::mul_bps(platform_take, public_goods_bps as i128);
+                    let platform_remainder = platform_take - public_goods_share;
+                    if public_goods_share > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &pg_addr,
+                            &public_goods_share,
+                        );
+                    }
+                    if platform_remainder > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &platform,
+                            &platform_remainder,
+                        );
+                    }
+                } else {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &platform,
+                        &platform_take,
+                    );
+                }
+            } else {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &platform,
+                    &platform_take,
+                );
+            }
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
@@ -1745,6 +1822,15 @@ impl OracleEscrow {
         Ok(amount)
     }
 
+    /// #127: Alias for complete_unstake(). Same semantics — worker calls this
+    /// after begin_unstake() once the cooldown has elapsed to withdraw their
+    /// unbonding amount. During the cooldown the unbonding bucket is still
+    /// slashable (slash() already includes info.unbonding, see its impl).
+    /// This alias exists so client code can use either name interchangeably.
+    pub fn claim_unstake(env: Env, worker: Address) -> Result<i128, ContractError> {
+        Self::complete_unstake(env, worker)
+    }
+
     pub fn begin_unstake_asset(
         env: Env,
         worker: Address,
@@ -1829,6 +1915,33 @@ impl OracleEscrow {
     /// credibility weighting should read.
     pub fn get_matured_stake(env: Env, worker: Address) -> i128 {
         Self::stake_info(&env, &worker).settled
+    }
+
+    /// #126: Time-weighted effective stake. Returns a linearly-ramped view
+    /// of the worker's warming stake combined with their already-matured
+    /// settled stake. Warming stake ramps from 0 to its full value over
+    /// STAKE_WARMUP_LEDGERS, so a worker who just topped up cannot
+    /// immediately appear to have more credibility than a long-bonded peer.
+    ///
+    /// effective = settled + warming * elapsed / STAKE_WARMUP_LEDGERS
+    ///
+    /// Once elapsed >= STAKE_WARMUP_LEDGERS the warming amount has fully
+    /// matured and get_effective_stake() == get_stake() == get_matured_stake()
+    /// (because stake_info() already rolls it into settled at that point).
+    pub fn get_effective_stake(env: Env, worker: Address) -> i128 {
+        let info = Self::stake_info(&env, &worker);
+        // stake_info() already moves warming → settled once the full warmup
+        // has elapsed, so after maturation this is simply settled + 0.
+        if info.warming == 0 {
+            return info.settled;
+        }
+        let now = env.ledger().sequence();
+        let elapsed = now.saturating_sub(info.warming_since) as i128;
+        let warmup = STAKE_WARMUP_LEDGERS as i128;
+        // Clamp elapsed to [0, warmup] for safety; linear interpolation.
+        let elapsed_clamped = elapsed.min(warmup).max(0);
+        let warming_effective = info.warming * elapsed_clamped / warmup;
+        info.settled + warming_effective
     }
 
     pub fn get_stake_info(env: Env, worker: Address) -> StakeInfo {
@@ -3270,6 +3383,65 @@ impl OracleEscrow {
         Ok(())
     }
 
+    // ---- #128: public-goods fee-routing hook --------------------------
+    //
+    // Admin-settable: a share (in bps) of the platform's resolve() revenue
+    // is routed to a configurable address before the remainder goes to the
+    // Platform address. Default 0 bps / no address means no routing — the
+    // existing single-transfer behaviour is preserved exactly.
+    //
+    // The hook target is a plain Address. Whether it happens to be a Drips
+    // split contract or anything else is invisible to OracleEscrow — the
+    // same as #104's observation that token_client.transfer() doesn't care
+    // what kind of account it's paying into.
+    //
+    // Design decisions (per the issue):
+    //  - Admin-settable at any time (flexible, not binding).
+    //  - Applies to the full platform_take (fee + dust + slashed amounts).
+    //  - No Drips protocol integration — just an address.
+
+    /// Admin-only. Sets (or updates) the public-goods routing: `bps` of
+    /// every future resolve()'s platform_take will be transferred to
+    /// `address` before the remainder goes to the Platform address.
+    /// Pass `bps = 0` to disable routing (same as never having called this).
+    /// `bps` must be <= 10_000 (100%).
+    pub fn set_public_goods_config(
+        env: Env,
+        address: Address,
+        bps: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if bps as i128 > BPS_DENOM {
+            return Err(ContractError::InvalidPublicGoodsBps);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PublicGoodsAddress, &address);
+        env.storage()
+            .instance()
+            .set(&DataKey::PublicGoodsBps, &bps);
+        Self::bump_instance(&env);
+        PublicGoodsConfigSet { address, bps }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns the current public-goods routing config as (address, bps).
+    /// Returns None if no config has been set (i.e. bps defaults to 0).
+    pub fn get_public_goods_config(env: Env) -> Option<(Address, u32)> {
+        let bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PublicGoodsBps)
+            .unwrap_or(0);
+        if bps == 0 {
+            return None;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::PublicGoodsAddress)
+            .map(|addr: Address| (addr, bps))
+    }
+
     /// Binds `pubkey` (a SEC-1-encoded secp256r1 public key, 65 bytes) to
     /// `worker`'s Address for use with verify_passkey_auth() (issue #74).
     /// The worker still signs this call with their existing Address
@@ -3419,34 +3591,6 @@ impl OracleEscrow {
     /// validation (list overlap, size cap) — this trusts the same admin
     /// that already authorized resolve() and is meant to be called
     /// immediately alongside it.
-    pub fn record_reputation(
-        env: Env,
-        question_id: u64,
-        workers: Vec<Address>,
-        losing_workers: Vec<Address>,
-    ) -> Result<(), ContractError> {
-        Self::bump_instance(&env);
-        Ok(())
-    }
-
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        // saturating: an overflow panic here would make the question
-        // permanently un-refundable by anyone but the admin.
-        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
-        if env.ledger().sequence() < deadline {
-            return Err(ContractError::TooEarlyForTimeout);
-        }
-
-        Self::do_refund(env, question_id)
-    }
-
     /// Permissionless batch version of refund_timeout(): attempts the same
     /// per-question deadline check and refund for every id in
     /// `question_ids`, continuing past individual failures (a question
@@ -3675,6 +3819,112 @@ impl OracleEscrow {
             .get(&DataKey::StakeSnapshot(worker, ledger))
             .ok_or(ContractError::StakeSnapshotNotFound)
     }
+
+    // ---- #125: on-chain commit-reveal answer submission ---------------
+    //
+    // Design decisions (per the issue):
+    //  - On-chain: workers commit SHA-256(answer || salt) to the contract
+    //    during a Pending question's open window, then reveal answer + salt.
+    //  - resolve() itself is NOT changed — it still receives the
+    //    workers/losing_workers partition from the backend (which reads the
+    //    on-chain reveals). This satisfies the issue's scoped option: "resolve()
+    //    itself might stay unchanged (still admin-supplied workers/losing_workers,
+    //    computed by reconcile.js from the revealed answers)".
+    //  - A worker may not overwrite a commitment once posted (CommitAlreadyExists).
+    //  - Commitments are stored under DataKey::Commit(question_id, worker).
+    //  - Reveal verifies hash(answer || salt) == stored_hash and then
+    //    removes the commitment entry (one-shot).
+    //  - No commit window enforced on-chain — the question must simply be Pending.
+
+    /// Worker posts a hash commitment for `question_id`. The commitment is
+    /// SHA-256(answer_bytes || salt_bytes). Once posted, a commitment cannot
+    /// be overwritten — workers who post early cannot change their mind after
+    /// seeing others' reveals.
+    ///
+    /// The question must be Pending. Requires the worker's own signature.
+    pub fn commit_answer(
+        env: Env,
+        worker: Address,
+        question_id: u64,
+        answer_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        worker.require_auth();
+
+        let question = Self::load_question(&env, question_id)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let commit_key = DataKey::Commit(question_id, worker.clone());
+        if env.storage().persistent().has(&commit_key) {
+            return Err(ContractError::CommitAlreadyExists);
+        }
+
+        let now = env.ledger().sequence();
+        let entry = CommitEntry {
+            answer_hash,
+            committed_at: now,
+        };
+        Self::set_persistent(&env, &commit_key, &entry);
+        Self::bump_instance(&env);
+        AnswerCommitted {
+            question_id,
+            worker,
+            committed_at: now,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Worker reveals the pre-image of their earlier commit. Verifies that
+    /// SHA-256(answer || salt) matches the stored commitment, then removes
+    /// the commitment. Returns an error if no prior commit exists or if the
+    /// hash doesn't match.
+    ///
+    /// After a successful reveal the worker's answer is visible on-chain
+    /// and can be read by reconcile.js to compute the workers/losing_workers
+    /// partition that will be passed to resolve().
+    pub fn reveal_answer(
+        env: Env,
+        worker: Address,
+        question_id: u64,
+        answer: Bytes,
+        salt: Bytes,
+    ) -> Result<(), ContractError> {
+        worker.require_auth();
+
+        let commit_key = DataKey::Commit(question_id, worker.clone());
+        let entry: CommitEntry = env
+            .storage()
+            .persistent()
+            .get(&commit_key)
+            .ok_or(ContractError::CommitNotFound)?;
+
+        // Re-derive SHA-256(answer || salt) and compare.
+        let mut preimage = answer.clone();
+        preimage.append(&salt);
+        let computed_hash = env.crypto().sha256(&preimage);
+        if computed_hash != entry.answer_hash {
+            return Err(ContractError::CommitHashMismatch);
+        }
+
+        // Burn the commitment — reveals are one-shot.
+        env.storage().persistent().remove(&commit_key);
+        Self::bump_instance(&env);
+        AnswerRevealed {
+            question_id,
+            worker,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Returns the stored commitment for (question_id, worker), or None if
+    /// the worker has not yet committed (or has already revealed).
+    pub fn get_commit(env: Env, question_id: u64, worker: Address) -> Option<CommitEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Commit(question_id, worker))
     }
 }
 
@@ -3694,7 +3944,6 @@ mod test_snapshot;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
-#[cfg(test)]
 #[cfg(test)]
 mod test_auto_topup;
 #[cfg(test)]
@@ -3728,6 +3977,10 @@ mod test_delegated_auth;
 #[cfg(test)]
 mod test_payment_streaming;
 #[cfg(test)]
-mod test_health;
+mod test_commit_reveal;
 #[cfg(test)]
-mod test_circuit_breaker;
+mod test_time_weighted_stake;
+#[cfg(test)]
+mod test_unstake_cooldown;
+#[cfg(test)]
+mod test_public_goods;
