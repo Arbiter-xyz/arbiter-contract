@@ -44,7 +44,7 @@ fn preview_resolve_matches_the_actual_resolve_outcome_for_the_same_inputs() {
     let losers = Vec::from_array(&f.env, [w3.clone()]);
 
     let preview = c.preview_resolve(&1, &workers, &losers);
-    c.resolve(&1, &workers, &losers);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     assert_eq!(c.get_owed(&w1), preview.share_per_worker);
     assert_eq!(c.get_owed(&w2), preview.share_per_worker);
@@ -63,7 +63,7 @@ fn preview_resolve_on_a_non_pending_question_returns_the_same_error_resolve_woul
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let res = c.try_preview_resolve(&1, &workers, &no_losers);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));

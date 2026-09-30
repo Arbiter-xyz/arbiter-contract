@@ -415,7 +415,7 @@ fn worked_example_v2_to_v3_with_pending_questions() {
     // --- v2: build up state. ---
     c.stake(&loser, &1_000_000);
     c.submit(&fx.payer, &10, &AMOUNT); // resolved before the upgrade, owed carried over
-    c.resolve(&10, &Vec::from_array(env, [w1.clone(), w2.clone()]), &Vec::new(env));
+    c.resolve(&10, &Vec::from_array(env, [w1.clone(), w2.clone()]), &Vec::new(env), &BytesN::from_array(&env, &[0u8; 32]));
     c.submit(&fx.payer, &1, &AMOUNT); // resolved under v2
     c.deposit(&payer_b, &(AMOUNT * 2));
     c.charge(&payer_b, &2, &AMOUNT); // admin-refunded under v2
@@ -460,7 +460,7 @@ fn worked_example_v2_to_v3_with_pending_questions() {
     assert_eq!(c.get_balance(&payer_b), AMOUNT);
 
     // --- v3: settle everything still pending. ---
-    c.resolve(&1, &Vec::from_array(env, [w1.clone(), w3.clone()]), &Vec::from_array(env, [loser.clone()]));
+    c.resolve(&1, &Vec::from_array(env, [w1.clone(), w3.clone()]), &Vec::from_array(env, [loser.clone()]), &BytesN::from_array(&env, &[0u8; 32]));
     c.refund(&2);
     c.resolve(&4, &Vec::from_array(env, [w2.clone()]), &Vec::new(env));
     c.refund_timeout(&5);
@@ -505,6 +505,6 @@ fn upgrading_to_a_hash_that_was_never_uploaded_leaves_v2_running() {
     assert!(c.try_execute_upgrade().is_err());
     assert_eq!(c.version(), 2);
     assert!(c.get_pending_upgrade().is_some());
-    c.resolve(&1, &Vec::from_array(&fx.env, [Address::generate(&fx.env)]), &Vec::new(&fx.env));
+    c.resolve(&1, &Vec::from_array(&fx.env, [Address::generate(&fx.env)]), &Vec::new(&fx.env), &BytesN::from_array(&fx.env, &[0u8; 32]));
     assert_eq!(c.get_question(&1).status, Status::Resolved);
 }
