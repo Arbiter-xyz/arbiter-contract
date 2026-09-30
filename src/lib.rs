@@ -86,6 +86,11 @@ pub const MAX_QUORUM_SIZE: u32 = u32::MAX;
 /// per credited worker, not O(n) over all workers ever staked.
 pub const LEADERBOARD_CAP: u32 = 20;
 
+/// Issue #11: default number of credited resolutions (get_resolved_count())
+/// after which a worker counts as established for resolve_by_consensus()'s
+/// lone-dissent slash. Admin-overridable via set_established_answer_count().
+pub const DEFAULT_ESTABLISHED_ANSWER_COUNT: u32 = 20;
+
 /// Ledgers between propose_upgrade() and the earliest execute_upgrade().
 /// Strictly longer than MAX_TIMEOUT_LEDGERS, so every question pending when
 /// an upgrade is proposed reaches its refund_timeout() deadline while the
@@ -149,21 +154,8 @@ pub struct Question {
     /// questions submitted AFTER the change. migrate_pending() carries both
     /// created_at and timeout_ledgers across unchanged for the same reason.
     pub timeout_ledgers: u32,
-    /// Opaque commitment to the off-chain answer schema. Existing questions
-    /// have no commitment and are exposed as `None`.
-    pub schema_hash: Option<BytesN<32>>,
-}
-
-// Keep the persisted question encoding stable. New question metadata lives in
-// separate keys so existing deployed questions remain readable.
-#[contracttype]
-#[derive(Clone, Debug)]
-struct StoredQuestion {
-    pub payer: Address,
-    pub amount: i128,
-    pub status: Status,
-    pub created_at: u32,
-    pub timeout_ledgers: u32,
+    /// The asset this question was opened in.
+    pub token: Address,
 }
 
 #[contracttype]
@@ -373,24 +365,68 @@ pub enum AssetKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ContractError {
+    /// initialize() called on an instance whose Admin is already set.
     AlreadyInitialized = 1,
+    /// A function that reads Admin, Token, Platform or TimeoutLedgers from
+    /// instance storage (every admin-gated call, resolve(), submit()/charge(),
+    /// the get_admin()/get_token()/get_platform()/get_timeout_ledgers() views,
+    /// ...) was called before initialize().
     NotInitialized = 2,
+    /// An amount argument is zero or negative. Returned by submit*/charge*,
+    /// deposit*/withdraw_balance*, stake*/begin_unstake*, withdraw*,
+    /// import_question(), reopen_question(), set_top_up_threshold() and by
+    /// set_quorum_bounds() when its bounds are inconsistent.
     InvalidAmount = 3,
+    /// submit*/charge*/import_question() used a question_id that already has a
+    /// stored Question in this instance (in any status).
     QuestionAlreadyExists = 4,
+    /// No Question is stored under the given question_id. Returned by
+    /// get_question(), resolve(), refund(), refund_timeout(), migrate_pending()
+    /// and every other call that loads a question by id.
     QuestionNotFound = 5,
+    /// The question exists but its status is not Pending, so it can no longer
+    /// be resolved, refunded or migrated. Returned by resolve(), refund(),
+    /// refund_timeout(), migrate_pending() and preview_resolve().
     QuestionNotPending = 6,
+    /// resolve()/preview_resolve() called with an empty `workers` list — every
+    /// resolution must credit at least one worker.
     NoWorkers = 7,
+    /// refund_timeout() (or a sweep_timeouts() entry) called before the
+    /// question's own `created_at + timeout_ledgers` deadline.
     TooEarlyForTimeout = 8,
+    /// initialize()/set_timeout_ledgers() received a timeout of 0 or above
+    /// MAX_TIMEOUT_LEDGERS, or import_question() received a timeout of 0.
     InvalidTimeout = 9,
+    /// begin_unstake*() asked to unbond more than the worker's active stake
+    /// (settled + warming).
     InsufficientStake = 10,
+    /// withdraw*() called while the worker's owed balance is exactly 0 (or
+    /// below). Distinct from InsufficientOwed, which is a positive balance
+    /// that is smaller than the amount requested.
     NothingOwed = 11,
+    /// resolve()'s `workers`/`losing_workers` contain a duplicate address
+    /// within one list, or the same address in both lists.
     InvalidWorkerLists = 12,
+    /// charge*()/withdraw_balance*() asked for more than the payer's prepaid
+    /// Balance currently holds.
     InsufficientBalance = 13,
+    /// withdraw*() asked for more than the worker's positive owed balance
+    /// minus any amount lock_owed() has pledged as collateral.
     InsufficientOwed = 14,
+    /// complete_unstake*() called while the worker has nothing in the
+    /// unbonding bucket.
     NothingUnbonding = 15,
+    /// complete_unstake*() called before the unbonding bucket's
+    /// `unbonding_release_at` ledger.
     UnbondingNotElapsed = 16,
+    /// import_question() called by an address other than the MigrationSource
+    /// registered via set_migration_source(), or before one was registered.
     MigrationNotAuthorized = 17,
+    /// import_question() received a question denominated in a token that is
+    /// neither this instance's default token nor an allowed asset.
     TokenMismatch = 18,
+    /// migrate_pending() targeted this same contract, or
+    /// set_migration_source() named this same contract as the source.
     InvalidMigrationTarget = 19,
     /// `workers.len() + losing_workers.len()` exceeds the hard, compile-time
     /// MAX_QUORUM_SIZE cap. This variant was already referenced by resolve()
@@ -467,11 +503,22 @@ pub enum ContractError {
     /// get_historical_stake() found no snapshot for that worker at that
     /// exact ledger.
     StakeSnapshotNotFound = 32,
+    /// A *_asset() call or get_asset_decimals() named a token that is not on
+    /// the admin-managed allowlist (see set_asset_allowed()).
     AssetNotAllowed = 33,
+    /// cancel_admin_rotation()/execute_admin_rotation() called with no
+    /// admin rotation proposed.
     NoAdminRotationPending = 34,
+    /// execute_admin_rotation() called before the pending rotation's
+    /// `executable_at` ledger.
     AdminRotationNotReady = 35,
+    /// set_asset_allowed() tried to disallow the instance's default token.
     CannotDisableDefaultAsset = 36,
+    /// A checked i128/u32 addition overflowed (stake, deposit, owed credit,
+    /// category count, migration totals, resolve()'s platform take).
     ArithmeticOverflow = 37,
+    /// set_asset_allowed() tried to allow a new non-default token when
+    /// MAX_ALLOWED_ASSETS are already allowed.
     AssetLimitReached = 38,
     // 300s: new-feature error codes for #87/#88/#89/#90. Starting at 300
     // deliberately avoids colliding with other in-flight PRs touching this
@@ -561,17 +608,6 @@ pub struct WorkerSlashed {
     pub amount: i128,
 }
 
-/// `worker_credited` topics: question_id, worker; data: amount.
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerCredited {
-    #[topic]
-    pub question_id: u64,
-    #[topic]
-    pub worker: Address,
-    pub amount: i128,
-}
-
 /// `question_refunded` topics: question_id; data: payer, amount, via_timeout.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -635,6 +671,41 @@ pub struct AdminRotated {
 pub struct TimeoutLedgersChanged {
     pub old_timeout_ledgers: u32,
     pub new_timeout_ledgers: u32,
+}
+
+/// #109 `paused_changed` data: paused. Emitted by set_paused() so an
+/// indexer (and payers) see the circuit breaker trip or reset on-chain.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PausedChanged {
+    pub paused: bool,
+}
+
+/// #110: one-call snapshot of how healthy this deployment is right now.
+/// Everything here is either a running counter maintained alongside the
+/// existing state transitions or a value already in instance storage, so
+/// get_health() never scans storage.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractHealth {
+    /// Questions currently Pending.
+    pub open_question_count: u32,
+    /// Cumulative questions that have ever entered Pending.
+    pub total_opened: u32,
+    /// Cumulative questions settled as Resolved.
+    pub total_resolved: u32,
+    /// Cumulative questions settled as Refunded (admin + timeout).
+    pub total_refunded: u32,
+    /// The contract's own balance of the default token: escrowed questions
+    /// + prepaid balances + stakes + owed-but-unwithdrawn earnings. This is
+    /// TVL in the default asset only; other allowlisted assets are readable
+    /// via their own token contract's balance().
+    pub token_balance: i128,
+    pub admin: Address,
+    pub token: Address,
+    pub platform: Address,
+    /// #109 circuit-breaker state.
+    pub paused: bool,
 }
 
 /// Issue #84: the would-be outcome of calling resolve() with the given
@@ -931,6 +1002,29 @@ pub struct AnswerEntry {
     pub value: i128,
 }
 
+/// #11: one worker's answer, as passed to resolve_by_consensus(). `answer`
+/// is a commitment (e.g. sha256 of the normalized answer) — the contract
+/// only ever compares these for equality.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsensusAnswer {
+    pub worker: Address,
+    pub answer: BytesN<32>,
+}
+
+/// Emitted by resolve_by_consensus() when one worker alone disagreed with an
+/// otherwise unanimous quorum (#11). `established` says whether they were
+/// past the threshold and therefore slashed (the slash itself is reported
+/// by the usual WorkerSlashed event).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnanimousDissent {
+    #[topic]
+    pub question_id: u64,
+    pub worker: Address,
+    pub established: bool,
+}
+
 /// Emitted when resolve_median() computes its median (#98).
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1070,6 +1164,47 @@ pub struct ChallengeBondSettled {
 }
 }
 
+/// #125: a worker's pending hash commitment for a question. Stored under
+/// DataKey::Commit(question_id, worker) by commit_answer() and removed by
+/// reveal_answer() once it has been verified.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitEntry {
+    /// SHA-256 of (answer_bytes || salt_bytes), as supplied by the worker.
+    pub answer_hash: BytesN<32>,
+    /// Ledger sequence when the commitment was posted.
+    pub committed_at: u32,
+}
+
+/// #125: emitted when a worker posts a commitment.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerCommitted {
+    #[topic]
+    pub question_id: u64,
+    #[topic]
+    pub worker: Address,
+    pub committed_at: u32,
+}
+
+/// #125: emitted when a worker's reveal is accepted.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerRevealed {
+    #[topic]
+    pub question_id: u64,
+    #[topic]
+    pub worker: Address,
+}
+
+/// #128: emitted when the admin configures the public-goods routing.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicGoodsConfigSet {
+    pub address: Address,
+    pub bps: u32,
+}
+
 #[contract]
 pub struct OracleEscrow;
 
@@ -1122,6 +1257,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
 
         if amount <= 0 {
@@ -1145,6 +1281,7 @@ impl OracleEscrow {
         amount: i128,
         schema_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1173,6 +1310,7 @@ impl OracleEscrow {
         amount: i128,
         category: Symbol,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1203,6 +1341,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1213,7 +1352,7 @@ impl OracleEscrow {
             &env.current_contract_address(),
             &amount,
         );
-        Self::open_question(&env, payer, question_id, amount, token, None, None)
+        Self::open_question(&env, payer, question_id, amount, token)
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -1221,6 +1360,7 @@ impl OracleEscrow {
     /// underlying custody as submit()'s escrow; the money just isn't
     /// earmarked for a specific question yet.
     pub fn deposit(env: Env, payer: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1258,6 +1398,7 @@ impl OracleEscrow {
         token: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1353,6 +1494,8 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// Read-only: the payer's default-asset prepaid Balance available to
+    /// charge(), or 0 if they never deposited.
     pub fn get_balance(env: Env, payer: Address) -> i128 {
         env.storage()
             .persistent()
@@ -1459,47 +1602,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let token = Self::token(&env)?;
-        Self::charge_for_token(&env, payer, question_id, amount, token, None, None)
-    }
-
-    pub fn charge_with_schema_hash(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        amount: i128,
-        schema_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let token = Self::token(&env)?;
-        Self::charge_for_token(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token,
-            Some(schema_hash),
-            None,
-        )
-    }
-
-    pub fn charge_with_category(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        amount: i128,
-        category: Symbol,
-    ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let token = Self::token(&env)?;
-        Self::charge_for_token(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token,
-            None,
-            Some(category),
-        )
+        Self::charge_for_token(&env, payer, question_id, amount, token)
     }
 
     pub fn charge_asset(
@@ -1511,7 +1614,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         Self::require_allowed_token(&env, &token)?;
-        Self::charge_for_token(&env, payer, question_id, amount, token, None, None)
+        Self::charge_for_token(&env, payer, question_id, amount, token)
     }
 
     fn charge_for_token(
@@ -1520,9 +1623,8 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
-        schema_hash: Option<BytesN<32>>,
-        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
@@ -1534,7 +1636,7 @@ impl OracleEscrow {
         }
         Self::set_persistent(&env, &key, &(existing - amount));
 
-        Self::open_question(env, payer, question_id, amount, token, schema_hash, category)
+        Self::open_question(env, payer, question_id, amount, token)
     }
 
     /// Shared by submit() (fresh transfer) and charge() (drawn from an
@@ -1548,8 +1650,6 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
-        schema_hash: Option<BytesN<32>>,
-        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
         let timeout_ledgers: u32 = env
             .storage()
@@ -1567,18 +1667,9 @@ impl OracleEscrow {
                 status: Status::Pending,
                 created_at: env.ledger().sequence(),
                 timeout_ledgers,
-                schema_hash,
+                token: token.clone(),
             },
         )?;
-        if let Some(category) = category {
-            let key = DataKey::CategoryCount(category);
-            let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-            let updated = count
-                .checked_add(1)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            env.storage().persistent().set(&key, &updated);
-            Self::extend_persistent(env, &key);
-        }
         Ok(())
     }
 
@@ -1596,27 +1687,15 @@ impl OracleEscrow {
             return Err(ContractError::QuestionAlreadyExists);
         }
 
-        let stored = StoredQuestion {
-            payer: question.payer.clone(),
-            amount: question.amount,
-            status: question.status,
-            created_at: question.created_at,
-            timeout_ledgers: question.timeout_ledgers,
-        };
-        env.storage().persistent().set(&key, &stored);
-        let schema_key = DataKey::QuestionSchemaHash(question_id);
-        if let Some(schema_hash) = question.schema_hash.clone() {
-            env.storage().persistent().set(&schema_key, &schema_hash);
-            Self::extend_persistent(env, &schema_key);
-        } else {
-            env.storage().persistent().remove(&schema_key);
-        }
+        env.storage().persistent().set(&key, &question);
         Self::extend_question_ttl(env, &key, &question);
         env.storage()
             .persistent()
             .set(&AssetKey::QuestionToken(question_id), &token);
         Self::extend_asset_ttl(env, &AssetKey::QuestionToken(question_id));
         Self::index_add(env, question_id);
+        Self::bump_counter(env, &DataKey::OpenQuestionCount);
+        Self::bump_counter(env, &DataKey::TotalOpenedCount);
         Self::bump_instance(env);
 
         QuestionOpened {
@@ -1629,38 +1708,6 @@ impl OracleEscrow {
         }
         .publish(env);
         Ok(())
-    }
-
-    fn load_question(env: &Env, question_id: u64) -> Result<Question, ContractError> {
-        let stored: StoredQuestion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)?;
-        Ok(Question {
-            payer: stored.payer,
-            amount: stored.amount,
-            status: stored.status,
-            created_at: stored.created_at,
-            timeout_ledgers: stored.timeout_ledgers,
-            schema_hash: env
-                .storage()
-                .persistent()
-                .get(&DataKey::QuestionSchemaHash(question_id)),
-        })
-    }
-
-    fn store_question(env: &Env, question_id: u64, question: &Question) {
-        let stored = StoredQuestion {
-            payer: question.payer.clone(),
-            amount: question.amount,
-            status: question.status,
-            created_at: question.created_at,
-            timeout_ledgers: question.timeout_ledgers,
-        };
-        let key = DataKey::Question(question_id);
-        env.storage().persistent().set(&key, &stored);
-        Self::extend_question_ttl(env, &key, question);
     }
 
     /// Admin-only. Pays a 20% platform fee (+ integer-division dust)
@@ -1678,7 +1725,145 @@ impl OracleEscrow {
         losing_workers: Vec<Address>,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        Self::settle_resolution(&env, question_id, workers, losing_workers)
+    }
 
+    /// Issue #11: admin-only resolution from raw consensus data, which
+    /// slashes an ESTABLISHED worker who alone dissented from an otherwise
+    /// unanimous quorum. Each entry commits to one worker's (normalized,
+    /// hashed) answer; the contract itself decides who agreed:
+    ///
+    /// - every answer identical: all workers are credited, nobody slashed;
+    /// - all but exactly one identical, with at least two in agreement: the
+    ///   agreeing workers are credited. The lone dissenter is slashed through
+    ///   the same slash() path resolve() uses — but only if they are
+    ///   established (get_resolved_count() >= get_established_answer_count()).
+    ///   An unestablished dissenter is neither credited nor slashed;
+    /// - anything else (a split or ambiguous quorum) returns
+    ///   NoUnanimousConsensus and changes nothing — those questions need the
+    ///   Claude-reviewed reconciliation and must go through resolve().
+    ///
+    /// Deliberately checks nothing subjective: the only trigger is "everyone
+    /// else agreed, this established worker alone didn't".
+    pub fn resolve_by_consensus(
+        env: Env,
+        question_id: u64,
+        answers: Vec<ConsensusAnswer>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        let n = answers.len();
+        if n == 0 {
+            return Err(ContractError::EmptyAnswerSet);
+        }
+        // Before the O(n^2) duplicate scan, same as resolve().
+        if n > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        for i in 0..n {
+            let a = answers.get(i).unwrap().worker;
+            for j in (i + 1)..n {
+                if answers.get(j).unwrap().worker == a {
+                    return Err(ContractError::DuplicateAnswerAddress);
+                }
+            }
+        }
+
+        let dissenter_idx = Self::unanimous_dissenter(&answers)?;
+
+        let mut workers = Vec::new(&env);
+        let mut losing_workers = Vec::new(&env);
+        for i in 0..n {
+            let entry = answers.get(i).unwrap();
+            if Some(i) != dissenter_idx {
+                workers.push_back(entry.worker);
+                continue;
+            }
+            let established = Self::get_resolved_count(env.clone(), entry.worker.clone())
+                >= Self::get_established_answer_count(env.clone());
+            UnanimousDissent {
+                question_id,
+                worker: entry.worker.clone(),
+                established,
+            }
+            .publish(&env);
+            if established {
+                losing_workers.push_back(entry.worker);
+            }
+        }
+
+        Self::settle_resolution(&env, question_id, workers, losing_workers)
+    }
+
+    /// Ok(None) when every answer agrees, Ok(Some(i)) when answers[i] alone
+    /// disagrees with a unanimous rest of at least two, and
+    /// Err(NoUnanimousConsensus) for any other shape.
+    fn unanimous_dissenter(answers: &Vec<ConsensusAnswer>) -> Result<Option<u32>, ContractError> {
+        let n = answers.len();
+        let first = answers.get(0).unwrap().answer;
+        let mut mismatches = 0u32;
+        let mut mismatch_idx = 0u32;
+        for i in 1..n {
+            if answers.get(i).unwrap().answer != first {
+                mismatches += 1;
+                mismatch_idx = i;
+            }
+        }
+        if mismatches == 0 {
+            return Ok(None);
+        }
+        // A lone dissenter needs a unanimous rest of at least two, so a
+        // 1-vs-1 disagreement is a split, never a dissent.
+        if n < 3 {
+            return Err(ContractError::NoUnanimousConsensus);
+        }
+        if mismatches == 1 {
+            return Ok(Some(mismatch_idx));
+        }
+        if mismatches == n - 1 {
+            // answers[0] is the odd one out only if everyone else agrees.
+            let second = answers.get(1).unwrap().answer;
+            for i in 2..n {
+                if answers.get(i).unwrap().answer != second {
+                    return Err(ContractError::NoUnanimousConsensus);
+                }
+            }
+            return Ok(Some(0));
+        }
+        Err(ContractError::NoUnanimousConsensus)
+    }
+
+    /// Issue #11: admin-only. Sets how many credited resolutions
+    /// (get_resolved_count()) a worker needs before resolve_by_consensus()
+    /// treats them as established and slashes a lone dissent. Mirrors the
+    /// backend reputation gate's answer-count threshold.
+    pub fn set_established_answer_count(env: Env, count: u32) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::EstablishedAnswerCount, &count);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// Read-only: the configured established-worker threshold, or
+    /// DEFAULT_ESTABLISHED_ANSWER_COUNT if the admin never set one.
+    pub fn get_established_answer_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EstablishedAnswerCount)
+            .unwrap_or(DEFAULT_ESTABLISHED_ANSWER_COUNT)
+    }
+
+    /// Shared settlement body of resolve() and resolve_by_consensus(). The
+    /// caller has already checked admin auth.
+    fn settle_resolution(
+        env: &Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        let env = env.clone();
         if workers.is_empty() {
             return Err(ContractError::NoWorkers);
         }
@@ -1695,7 +1880,11 @@ impl OracleEscrow {
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
-        let mut question = Self::load_question(&env, question_id)?;
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
@@ -1737,12 +1926,6 @@ impl OracleEscrow {
         }
         for worker in workers.iter() {
             Self::credit_owed(&env, &question_token, &worker, share)?;
-            WorkerCredited {
-                question_id,
-                worker: worker.clone(),
-                amount: share,
-            }
-            .publish(&env);
             // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
             // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not
             // O(all workers ever staked).
@@ -1750,11 +1933,56 @@ impl OracleEscrow {
         }
 
         if platform_take > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &platform,
-                &platform_take,
-            );
+            // #128: if a public-goods address + bps have been configured,
+            // split platform_take into two transfers:
+            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
+            //   platform_remainder = platform_take - public_goods_share
+            // Any dust from the integer division stays with the platform
+            // (same dust-rounding discipline resolve() already uses for the
+            // worker pool split). If unconfigured (0 bps or absent address)
+            // the behaviour is identical to the current single transfer.
+            let public_goods_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsBps)
+                .unwrap_or(0);
+            let maybe_pg_addr: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsAddress);
+            if public_goods_bps > 0 {
+                if let Some(pg_addr) = maybe_pg_addr {
+                    let public_goods_share =
+                        Self::mul_bps(platform_take, public_goods_bps as i128);
+                    let platform_remainder = platform_take - public_goods_share;
+                    if public_goods_share > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &pg_addr,
+                            &public_goods_share,
+                        );
+                    }
+                    if platform_remainder > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &platform,
+                            &platform_remainder,
+                        );
+                    }
+                } else {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &platform,
+                        &platform_take,
+                    );
+                }
+            } else {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &platform,
+                    &platform_take,
+                );
+            }
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
@@ -1922,6 +2150,15 @@ impl OracleEscrow {
         Ok(amount)
     }
 
+    /// #127: Alias for complete_unstake(). Same semantics — worker calls this
+    /// after begin_unstake() once the cooldown has elapsed to withdraw their
+    /// unbonding amount. During the cooldown the unbonding bucket is still
+    /// slashable (slash() already includes info.unbonding, see its impl).
+    /// This alias exists so client code can use either name interchangeably.
+    pub fn claim_unstake(env: Env, worker: Address) -> Result<i128, ContractError> {
+        Self::complete_unstake(env, worker)
+    }
+
     pub fn begin_unstake_asset(
         env: Env,
         worker: Address,
@@ -1994,8 +2231,9 @@ impl OracleEscrow {
         Ok(amount)
     }
 
-    /// Active stake (settled + warming): what the worker has bonded and not
-    /// asked to withdraw. Excludes the unbonding bucket.
+    /// Read-only: the worker's active default-asset stake (settled +
+    /// warming) — what they have bonded and not asked to withdraw. Excludes
+    /// the unbonding bucket; 0 if they never staked.
     pub fn get_stake(env: Env, worker: Address) -> i128 {
         let info = Self::stake_info(&env, &worker);
         info.settled + info.warming
@@ -2006,6 +2244,33 @@ impl OracleEscrow {
     /// credibility weighting should read.
     pub fn get_matured_stake(env: Env, worker: Address) -> i128 {
         Self::stake_info(&env, &worker).settled
+    }
+
+    /// #126: Time-weighted effective stake. Returns a linearly-ramped view
+    /// of the worker's warming stake combined with their already-matured
+    /// settled stake. Warming stake ramps from 0 to its full value over
+    /// STAKE_WARMUP_LEDGERS, so a worker who just topped up cannot
+    /// immediately appear to have more credibility than a long-bonded peer.
+    ///
+    /// effective = settled + warming * elapsed / STAKE_WARMUP_LEDGERS
+    ///
+    /// Once elapsed >= STAKE_WARMUP_LEDGERS the warming amount has fully
+    /// matured and get_effective_stake() == get_stake() == get_matured_stake()
+    /// (because stake_info() already rolls it into settled at that point).
+    pub fn get_effective_stake(env: Env, worker: Address) -> i128 {
+        let info = Self::stake_info(&env, &worker);
+        // stake_info() already moves warming → settled once the full warmup
+        // has elapsed, so after maturation this is simply settled + 0.
+        if info.warming == 0 {
+            return info.settled;
+        }
+        let now = env.ledger().sequence();
+        let elapsed = now.saturating_sub(info.warming_since) as i128;
+        let warmup = STAKE_WARMUP_LEDGERS as i128;
+        // Clamp elapsed to [0, warmup] for safety; linear interpolation.
+        let elapsed_clamped = elapsed.min(warmup).max(0);
+        let warming_effective = info.warming * elapsed_clamped / warmup;
+        info.settled + warming_effective
     }
 
     pub fn get_stake_info(env: Env, worker: Address) -> StakeInfo {
@@ -2132,6 +2397,8 @@ impl OracleEscrow {
         Ok(amount)
     }
 
+    /// Read-only: the worker's accrued-but-unwithdrawn default-asset earnings
+    /// from resolve(), or 0 if nothing is owed.
     pub fn get_owed(env: Env, worker: Address) -> i128 {
         env.storage()
             .persistent()
@@ -2205,15 +2472,15 @@ impl OracleEscrow {
     /// requirement — see docs/ttl-archival.md.
     pub fn touch_question(env: Env, question_id: u64) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
-        let question = Self::load_question(&env, question_id)?;
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         Self::extend_question_ttl(&env, &key, &question);
         let token_key = AssetKey::QuestionToken(question_id);
         if env.storage().persistent().has(&token_key) {
             Self::extend_asset_ttl(&env, &token_key);
-        }
-        let schema_key = DataKey::QuestionSchemaHash(question_id);
-        if env.storage().persistent().has(&schema_key) {
-            Self::extend_persistent(&env, &schema_key);
         }
 
         if question.status == Status::Pending {
@@ -2406,15 +2673,84 @@ impl OracleEscrow {
         CONTRACT_VERSION
     }
 
+    /// Read-only: the stored Question for `question_id` (any status), or
+    /// QuestionNotFound if no such id was ever opened in this instance.
     pub fn get_question(env: Env, question_id: u64) -> Result<Question, ContractError> {
         Self::load_question(&env, question_id)
+    }
+
+    /// Read-only batch form of get_question() for indexers and dashboards:
+    /// one call instead of N. Output is in input order, with `None` at the
+    /// position of any id that doesn't exist rather than failing the whole
+    /// call. No maximum length is enforced here; simulation resource limits
+    /// bound it in practice.
+    pub fn get_questions(env: Env, question_ids: Vec<u64>) -> Vec<Option<Question>> {
+        let mut out = Vec::new(&env);
+        for question_id in question_ids.iter() {
+            out.push_back(Self::load_question(&env, question_id).ok());
+        }
+        out
     }
 
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::CategoryCount(category))
-            .unwrap_or(0)
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)
+    }
+
+    /// #109 circuit breaker. Admin-only. `true` makes every funding entry
+    /// point (submit*/deposit*/charge*/reopen_question) fail with
+    /// ContractPaused; `false` lifts it. resolve()/refund()/refund_timeout()
+    /// and all withdrawals keep working either way, so already-escrowed
+    /// funds can always leave. The decision of *when* to pause is made
+    /// off-chain (e.g. a backend job watching get_health()'s refund
+    /// counters) — see docs/circuit-breaker.md for why the contract does not
+    /// compute a refund rate itself. Only the admin can pause or unpause, so
+    /// a third party cannot trip the breaker to deny service.
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &paused);
+        Self::bump_instance(&env);
+        PausedChanged { paused }.publish(&env);
+        Ok(())
+    }
+
+    /// #109: whether the circuit breaker is currently set.
+    pub fn is_paused(env: Env) -> bool {
+        Self::paused(&env)
+    }
+
+    /// #110: one-call deployment health view — open question count,
+    /// cumulative opened/resolved/refunded totals, the contract's own
+    /// default-token balance (TVL), the configured admin/token/platform, and
+    /// the pause flag. All reads are instance storage plus one token
+    /// balance() call; nothing is scanned.
+    pub fn get_health(env: Env) -> Result<ContractHealth, ContractError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        let token_addr = Self::token(&env)?;
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)?;
+        let token_balance =
+            token::Client::new(&env, &token_addr).balance(&env.current_contract_address());
+        Ok(ContractHealth {
+            open_question_count: Self::counter(&env, &DataKey::OpenQuestionCount),
+            total_opened: Self::counter(&env, &DataKey::TotalOpenedCount),
+            total_resolved: Self::counter(&env, &DataKey::TotalResolvedCount),
+            total_refunded: Self::counter(&env, &DataKey::TotalRefundedCount),
+            token_balance,
+            admin,
+            token: token_addr,
+            platform,
+            paused: Self::paused(&env),
+        })
     }
 
     /// Read-only convenience so clients can display "auto-refund available
@@ -2430,6 +2766,26 @@ impl OracleEscrow {
     /// check two instances escrow the same asset without reading storage.
     pub fn get_token(env: Env) -> Result<Address, ContractError> {
         Self::token(&env)
+    }
+
+    /// Read-only convenience so observers can confirm which address
+    /// currently holds resolve()/refund() authority without decoding raw
+    /// instance storage.
+    pub fn get_admin(env: Env) -> Result<Address, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)
+    }
+
+    /// Read-only convenience so observers can confirm which address receives
+    /// the platform fee and slashed stake without decoding raw instance
+    /// storage.
+    pub fn get_platform(env: Env) -> Result<Address, ContractError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)
     }
 
     pub fn get_question_token(env: Env, question_id: u64) -> Result<Address, ContractError> {
@@ -2534,7 +2890,11 @@ impl OracleEscrow {
 
         for question_id in question_ids.iter() {
             let key = DataKey::Question(question_id);
-            let mut question = Self::load_question(&env, question_id)?;
+            let mut question: Question = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(ContractError::QuestionNotFound)?;
             if question.status != Status::Pending {
                 return Err(ContractError::QuestionNotPending);
             }
@@ -2641,7 +3001,7 @@ impl OracleEscrow {
                 status: Status::Pending,
                 created_at,
                 timeout_ledgers,
-                schema_hash: None,
+                token: token.clone(),
             },
         )
     }
@@ -2789,6 +3149,38 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// #109: fails funding entry points while the circuit breaker is set.
+    /// Reads instance storage only, which every call has already loaded.
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if Self::paused(env) {
+            return Err(ContractError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn counter(env: &Env, key: &DataKey) -> u32 {
+        env.storage().instance().get(key).unwrap_or(0)
+    }
+
+    /// #110 health counters saturate rather than trap: they are
+    /// observability only and must never be able to fail a settlement.
+    fn bump_counter(env: &Env, key: &DataKey) {
+        let next = Self::counter(env, key).saturating_add(1);
+        env.storage().instance().set(key, &next);
+    }
+
+    fn drop_counter(env: &Env, key: &DataKey) {
+        let next = Self::counter(env, key).saturating_sub(1);
+        env.storage().instance().set(key, &next);
+    }
+
     fn schedule_admin_rotation(env: &Env, new_admin: Address) {
         let executable_at = env
             .ledger()
@@ -2884,7 +3276,11 @@ impl OracleEscrow {
         via_timeout: bool,
     ) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
-        let mut question = Self::load_question(env, question_id)?;
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
@@ -2917,8 +3313,16 @@ impl OracleEscrow {
         status: Status,
     ) {
         question.status = status;
-        Self::store_question(env, question_id, question);
+        Self::set_persistent(env, key, question);
         Self::index_remove(env, question_id);
+        // #110: every exit from Pending (resolve, refund, refund_timeout,
+        // migrate) funnels through here, so the open count can't drift.
+        Self::drop_counter(env, &DataKey::OpenQuestionCount);
+        match status {
+            Status::Resolved => Self::bump_counter(env, &DataKey::TotalResolvedCount),
+            Status::Refunded => Self::bump_counter(env, &DataKey::TotalRefundedCount),
+            _ => {}
+        }
         Self::bump_instance(env);
         QuestionSettled {
             question_id,
@@ -3036,13 +3440,18 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         payer.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
 
         let key = DataKey::Question(question_id);
-        let existing = Self::load_question(&env, question_id)?;
+        let existing: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if existing.status != Status::Refunded {
             return Err(ContractError::QuestionNotRefunded);
         }
@@ -3050,7 +3459,7 @@ impl OracleEscrow {
             return Err(ContractError::QuestionNotRefunded);
         }
 
-        let token_addr = Self::token(&env)?;
+        let token_addr = existing.token.clone();
         token::Client::new(&env, &token_addr).transfer(
             &payer,
             &env.current_contract_address(),
@@ -3063,11 +3472,13 @@ impl OracleEscrow {
             amount,
             status: Status::Pending,
             created_at: now,
-            timeout_ledgers: Self::timeout_ledgers(&env),
-            schema_hash: existing.schema_hash,
+            timeout_ledgers: existing.timeout_ledgers,
+            token: token_addr.clone(),
         };
         Self::store_question(&env, question_id, &reopened);
 
+        Self::bump_counter(&env, &DataKey::OpenQuestionCount);
+        Self::bump_counter(&env, &DataKey::TotalOpenedCount);
         Self::bump_instance(&env);
         QuestionReopened {
             question_id,
@@ -3168,7 +3579,11 @@ impl OracleEscrow {
         Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()) as u32)?;
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
-        let question = Self::load_question(&env, question_id)?;
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
@@ -3233,15 +3648,16 @@ impl OracleEscrow {
     /// The per-question logic refund_timeout() has always run: only
     /// eligible once Pending and past its deadline, verbatim.
     fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
-        let question = Self::load_question(env, question_id)?;
+        let key = DataKey::Question(question_id);
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
-        if env.ledger().sequence()
-            < question
-                .created_at
-                .saturating_add(question.timeout_ledgers)
-        {
+        if env.ledger().sequence() < question.deadline {
             return Err(ContractError::TimeoutNotReached);
         }
         Self::do_refund(env, question_id, true)?;
@@ -3341,6 +3757,65 @@ impl OracleEscrow {
             .set(&DataKey::LendingAuthority, &authority);
         Self::bump_instance(&env);
         Ok(())
+    }
+
+    // ---- #128: public-goods fee-routing hook --------------------------
+    //
+    // Admin-settable: a share (in bps) of the platform's resolve() revenue
+    // is routed to a configurable address before the remainder goes to the
+    // Platform address. Default 0 bps / no address means no routing — the
+    // existing single-transfer behaviour is preserved exactly.
+    //
+    // The hook target is a plain Address. Whether it happens to be a Drips
+    // split contract or anything else is invisible to OracleEscrow — the
+    // same as #104's observation that token_client.transfer() doesn't care
+    // what kind of account it's paying into.
+    //
+    // Design decisions (per the issue):
+    //  - Admin-settable at any time (flexible, not binding).
+    //  - Applies to the full platform_take (fee + dust + slashed amounts).
+    //  - No Drips protocol integration — just an address.
+
+    /// Admin-only. Sets (or updates) the public-goods routing: `bps` of
+    /// every future resolve()'s platform_take will be transferred to
+    /// `address` before the remainder goes to the Platform address.
+    /// Pass `bps = 0` to disable routing (same as never having called this).
+    /// `bps` must be <= 10_000 (100%).
+    pub fn set_public_goods_config(
+        env: Env,
+        address: Address,
+        bps: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if bps as i128 > BPS_DENOM {
+            return Err(ContractError::InvalidPublicGoodsBps);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PublicGoodsAddress, &address);
+        env.storage()
+            .instance()
+            .set(&DataKey::PublicGoodsBps, &bps);
+        Self::bump_instance(&env);
+        PublicGoodsConfigSet { address, bps }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns the current public-goods routing config as (address, bps).
+    /// Returns None if no config has been set (i.e. bps defaults to 0).
+    pub fn get_public_goods_config(env: Env) -> Option<(Address, u32)> {
+        let bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PublicGoodsBps)
+            .unwrap_or(0);
+        if bps == 0 {
+            return None;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::PublicGoodsAddress)
+            .map(|addr: Address| (addr, bps))
     }
 
     /// Binds `pubkey` (a SEC-1-encoded secp256r1 public key, 65 bytes) to
@@ -3492,34 +3967,6 @@ impl OracleEscrow {
     /// validation (list overlap, size cap) — this trusts the same admin
     /// that already authorized resolve() and is meant to be called
     /// immediately alongside it.
-    pub fn record_reputation(
-        env: Env,
-        question_id: u64,
-        workers: Vec<Address>,
-        losing_workers: Vec<Address>,
-    ) -> Result<(), ContractError> {
-        Self::bump_instance(&env);
-        Ok(())
-    }
-
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
-        }
-
-        // saturating: an overflow panic here would make the question
-        // permanently un-refundable by anyone but the admin.
-        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
-        if env.ledger().sequence() < deadline {
-            return Err(ContractError::TooEarlyForTimeout);
-        }
-
-        Self::do_refund(env, question_id)
-    }
-
     /// Permissionless batch version of refund_timeout(): attempts the same
     /// per-question deadline check and refund for every id in
     /// `question_ids`, continuing past individual failures (a question
@@ -4504,6 +4951,12 @@ mod test_account_abstraction;
 #[cfg(test)]
 mod test_economics;
 #[cfg(test)]
+mod test_incentive_math;
+#[cfg(test)]
+mod test_load;
+#[cfg(test)]
+mod test_wasm;
+#[cfg(test)]
 mod test_kyc;
 #[cfg(test)]
 mod test_passkey;
@@ -4513,7 +4966,6 @@ mod test_snapshot;
 mod test_migration;
 #[cfg(test)]
 mod test_ttl;
-#[cfg(test)]
 #[cfg(test)]
 mod test_auto_topup;
 #[cfg(test)]
