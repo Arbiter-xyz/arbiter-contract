@@ -4,6 +4,9 @@ members = [
     "contracts/oracle-escrow",
     "contracts/fee-vesting",
 ]
+# cargo-fuzz manages the fuzz crate in fuzz/ as an excluded non-workspace
+# member to avoid conflicting with the release profile and WASM build.
+exclude = ["fuzz"]
 
 [workspace.dependencies]
 soroban-sdk = "23"

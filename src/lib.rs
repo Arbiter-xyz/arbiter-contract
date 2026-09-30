@@ -129,6 +129,13 @@ pub enum Status {
     /// the question to Resolved. Distinct from Pending: refund()/
     /// refund_timeout() no longer apply once a resolution is in flight.
     ResolvedPending,
+    /// #49 second-tier dispute quorum: entered by escalate() as an
+    /// intermediate step between Pending and Resolved/Refunded. The first
+    /// quorum's verdict is recorded in DataKey::EscalatedQuestion; a second
+    /// quorum must still confirm (or override) before the question settles.
+    /// refund() / refund_timeout() no longer apply once a question is
+    /// Disputed — the admin must call escalate_resolve() to finalize.
+    Disputed,
 }
 
 #[contracttype]
@@ -315,8 +322,31 @@ pub enum DataKey {
     /// Number of questions opened with this caller-defined category. Callers
     /// should use a bounded vocabulary to avoid unbounded key growth.
     CategoryCount(Symbol),
-    /// Issue #11: admin-set override of DEFAULT_ESTABLISHED_ANSWER_COUNT.
-    EstablishedAnswerCount,
+    /// #48 atomic balance migration: a dense Vec<Address> of every address
+    /// that has ever had a non-zero Stake, Owed, or Balance entry written by
+    /// this contract, maintained with an O(1) set via a parallel position map
+    /// ParticipantPos(Address). Provides the enumeration primitive that
+    /// migrate_balances() needs — see that function's doc comment for why
+    /// this approach was chosen over off-chain indexing.
+    /// The value stored is a u32 count (the total number of tracked addresses).
+    ParticipantList,
+    /// #48: forward index — Address stored at position `u32` in the
+    /// participant list. Separate from PendingAt to avoid any index collision.
+    ParticipantAt(u32),
+    /// #48: reverse map so ParticipantList membership can be checked in O(1).
+    /// Value is the u32 position of this address in the list.
+    ParticipantPos(Address),
+    /// #49 second-tier quorum: the first-quorum verdict recorded by
+    /// escalate() for `question_id`. Holds the winning and losing worker
+    /// lists so the second quorum can confirm or override them.
+    EscalatedQuestion(u64),
+    /// #50 bonded challenger: the bond posted by a challenger for
+    /// `question_id` via post_challenge_bond(). Held in escrow here until
+    /// finalize_resolve() either returns it (challenge was valid — the
+    /// resolution was disputed and overturned or sent to second tier) or
+    /// forfeits it to the platform (challenge was spurious — the window
+    /// elapsed with no dispute flag, or the challenge was overruled).
+    ChallengerBond(u64),
 }
 
 #[contracttype]
@@ -512,10 +542,21 @@ pub enum ContractError {
     StreamNotFound = 304,
     /// #90: claim_stream() called with nothing newly vested to claim.
     NothingToClaim = 305,
-    /// #11: resolve_by_consensus() received answers that are neither
-    /// unanimous nor unanimous-but-one (with at least two agreeing). Such a
-    /// split quorum must be reconciled and settled through resolve().
-    NoUnanimousConsensus = 400,
+    /// #48: migrate_balances() called with target == this contract.
+    InvalidBalanceMigrationTarget = 306,
+    /// #49: escalate() called on a question that is not Pending.
+    QuestionNotPendingForEscalation = 307,
+    /// #49: escalate_resolve() called on a question that is not Disputed.
+    QuestionNotDisputed = 308,
+    /// #50: post_challenge_bond() called on a question that has no
+    /// in-flight PendingResolution (the question was never put through
+    /// resolve_challengeable(), or the window already elapsed).
+    NoChallengeableResolution = 309,
+    /// #50: post_challenge_bond() called with a non-positive bond amount.
+    InvalidBondAmount = 310,
+    /// #50: post_challenge_bond() called on a question_id that already has
+    /// a bond posted.
+    BondAlreadyPosted = 311,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -913,6 +954,28 @@ pub struct PendingResolution {
     pub disputed: bool,
 }
 
+/// #49: the first-quorum verdict recorded by escalate(), stored under
+/// DataKey::EscalatedQuestion(question_id). The second quorum (via
+/// escalate_resolve()) can confirm or supply its own worker lists, which
+/// override the first quorum's if they differ.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EscalatedQuestion {
+    /// Workers the first quorum agreed matched the correct answer.
+    pub first_workers: Vec<Address>,
+    /// Workers the first quorum agreed were wrong.
+    pub first_losing_workers: Vec<Address>,
+}
+
+/// #50: a challenger's posted bond against an in-flight PendingResolution.
+/// Stored under DataKey::ChallengerBond(question_id).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ChallengerBondEntry {
+    pub challenger: Address,
+    pub amount: i128,
+}
+
 /// Emitted when resolve_challengeable() opens a dispute window (#97).
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1039,6 +1102,65 @@ pub struct AdminRotationCancelled {
 pub struct AdminRotationExecuted {
     #[topic]
     pub new_admin: Address,
+}
+
+/// #48: emitted by migrate_balances() for each address whose Stake/Owed/Balance
+/// is moved to the target contract. Allows an off-chain orchestrator to confirm
+/// each address migrated and reconstruct a full audit trail.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BalanceMigrated {
+    #[topic]
+    pub address: Address,
+    pub stake: i128,
+    pub owed: i128,
+    pub balance: i128,
+    pub target: Address,
+}
+
+/// #49: emitted when escalate() moves a question to the Disputed state.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionEscalated {
+    #[topic]
+    pub question_id: u64,
+    pub first_workers: u32,
+    pub first_losing_workers: u32,
+}
+
+/// #49: emitted when escalate_resolve() finalizes an escalated (Disputed)
+/// question, either confirming or overturning the first quorum.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EscalationResolved {
+    #[topic]
+    pub question_id: u64,
+    pub overturned: bool,
+}
+
+/// #50: emitted when a challenger posts a bond against an in-flight
+/// PendingResolution via post_challenge_bond().
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChallengeBondPosted {
+    #[topic]
+    pub question_id: u64,
+    pub challenger: Address,
+    pub amount: i128,
+}
+
+/// #50: emitted when a challenger bond is returned (successful challenge) or
+/// forfeited to the platform (spurious challenge) by finalize_resolve().
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChallengeBondSettled {
+    #[topic]
+    pub question_id: u64,
+    pub challenger: Address,
+    pub amount: i128,
+    /// true = bond returned to challenger (challenge was valid/resolution was
+    /// disputed), false = bond forfeited to platform (spurious challenge).
+    pub returned: bool,
 }
 }
 
@@ -1257,6 +1379,7 @@ impl OracleEscrow {
             .checked_add(amount)
             .ok_or(ContractError::ArithmeticOverflow)?;
         Self::set_persistent(&env, &key, &updated);
+        Self::track_participant(&env, &payer);
         Self::bump_instance(&env);
         PrepaidBalanceChanged {
             payer,
@@ -1898,6 +2021,7 @@ impl OracleEscrow {
         info.warming_since = env.ledger().sequence();
         let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
+        Self::track_participant(&env, &worker);
         Self::bump_instance(&env);
         StakeChanged {
             worker,
@@ -2989,6 +3113,12 @@ impl OracleEscrow {
             .checked_add(amount)
             .ok_or(ContractError::ArithmeticOverflow)?;
         Self::set_persistent(env, &key, &updated);
+        // Track in participant index for #48 migration (default-token path only).
+        if let Ok(default_token) = Self::token(env) {
+            if *token == default_token {
+                Self::track_participant(env, worker);
+            }
+        }
         Ok(())
     }
 
@@ -4066,111 +4196,751 @@ impl OracleEscrow {
             .ok_or(ContractError::StakeSnapshotNotFound)
     }
 
-    // ---- #125: on-chain commit-reveal answer submission ---------------
+    // -----------------------------------------------------------------------
+    // #48 Atomic balance migration tool
+    // -----------------------------------------------------------------------
     //
-    // Design decisions (per the issue):
-    //  - On-chain: workers commit SHA-256(answer || salt) to the contract
-    //    during a Pending question's open window, then reveal answer + salt.
-    //  - resolve() itself is NOT changed — it still receives the
-    //    workers/losing_workers partition from the backend (which reads the
-    //    on-chain reveals). This satisfies the issue's scoped option: "resolve()
-    //    itself might stay unchanged (still admin-supplied workers/losing_workers,
-    //    computed by reconcile.js from the revealed answers)".
-    //  - A worker may not overwrite a commitment once posted (CommitAlreadyExists).
-    //  - Commitments are stored under DataKey::Commit(question_id, worker).
-    //  - Reveal verifies hash(answer || salt) == stored_hash and then
-    //    removes the commitment entry (one-shot).
-    //  - No commit window enforced on-chain — the question must simply be Pending.
+    // Design decision (answering the open question in issue #48):
+    //
+    // Full enumeration of Stake/Owed/Balance holders IS achievable on-chain,
+    // but ONLY if the contract itself maintains a participant index. Soroban's
+    // storage model is a key/value map, not a relational table — there is no
+    // "scan all keys with prefix DataKey::Stake" primitive. The alternatives
+    // are: (a) off-chain index rebuilt from events, which is fragile and
+    // requires a running indexer; (b) an on-chain list maintained with O(1)
+    // add/remove (swap-remove, same pattern as PendingAt/PendingPos), which is
+    // what this implementation chooses. The cost is one extra persistent write
+    // per new participant, paid by the participant on their first stake/deposit.
+    // "Atomic" within Soroban means: all addresses in the batch are processed
+    // in the same transaction, so from the target contract's perspective funds
+    // either all arrive or none arrive. It does NOT mean all addresses across
+    // all batches in a multi-batch migration — large deployments will need
+    // multiple transactions, each individually atomic.
 
-    /// Worker posts a hash commitment for `question_id`. The commitment is
-    /// SHA-256(answer_bytes || salt_bytes). Once posted, a commitment cannot
-    /// be overwritten — workers who post early cannot change their mind after
-    /// seeing others' reveals.
+    /// Inserts `address` into the on-chain participant index (ParticipantList +
+    /// ParticipantAt + ParticipantPos) if it is not already present. Called by
+    /// every code path that first creates a non-zero Stake/Owed/Balance for a
+    /// new address. O(1) amortized — membership check is a single persistent
+    /// read via ParticipantPos.
+    fn track_participant(env: &Env, address: &Address) {
+        let pos_key = DataKey::ParticipantPos(address.clone());
+        if env.storage().persistent().has(&pos_key) {
+            return; // already tracked
+        }
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ParticipantList)
+            .unwrap_or(0u32);
+        // Record position of this new address.
+        Self::set_persistent(env, &DataKey::ParticipantPos(address.clone()), &count);
+        // Append the address into the dense slot at position `count`.
+        Self::set_persistent(env, &DataKey::ParticipantAt(count), address);
+        // Increment count.
+        Self::set_persistent(env, &DataKey::ParticipantList, &(count + 1));
+    }
+
+    /// Returns the current participant count (number of unique addresses
+    /// tracked in the index). Read-only; does not extend any TTL.
+    pub fn get_participant_count(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ParticipantList)
+            .unwrap_or(0u32)
+    }
+
+    /// Returns the address at slot `index` in the participant list, or None
+    /// if `index` is out of range. Index is 0-based. Together with
+    /// get_participant_count() this gives the off-chain orchestrator a page
+    /// cursor to enumerate all addresses for migrate_balances() without
+    /// needing event replay.
+    pub fn get_participant_at(env: Env, index: u32) -> Option<Address> {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ParticipantList)
+            .unwrap_or(0);
+        if index >= count {
+            return None;
+        }
+        env.storage()
+            .persistent()
+            .get(&DataKey::ParticipantAt(index))
+    }
+
+    /// Admin-only: moves a batch of addresses' default-asset Stake, Owed, and
+    /// Balance to `target` in one transaction. For each address:
+    /// 1. reads its Stake/Owed/Balance from this contract;
+    /// 2. pre-authorizes a token transfer to `target` for the sum;
+    /// 3. calls target.import_balances() to record and receive the funds;
+    /// 4. zeroes out the entries here;
+    /// 5. emits a BalanceMigrated event.
     ///
-    /// The question must be Pending. Requires the worker's own signature.
-    pub fn commit_answer(
+    /// Any failure (unknown address, arithmetic overflow, target refusing the
+    /// import) reverts the ENTIRE batch — no partial moves. Returns the total
+    /// token amount transferred.
+    ///
+    /// Prerequisite on `target`: target.set_migration_source(this_contract)
+    /// must have been called before this, so target.import_balances() accepts
+    /// the call. This mirrors the migrate_pending() / import_question() mutual
+    /// authorization pattern.
+    pub fn migrate_balances(
         env: Env,
-        worker: Address,
-        question_id: u64,
-        answer_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        worker.require_auth();
+        addresses: Vec<Address>,
+        target: Address,
+    ) -> Result<i128, ContractError> {
+        Self::require_admin(&env)?;
+        let this = env.current_contract_address();
+        if target == this {
+            return Err(ContractError::InvalidBalanceMigrationTarget);
+        }
 
-        let question = Self::load_question(&env, question_id)?;
+        let token_addr = Self::token(&env)?;
+        let transfer_fn = Symbol::new(&env, "transfer");
+        let target_client = OracleEscrowClient::new(&env, &target);
+        let mut total: i128 = 0;
+
+        for address in addresses.iter() {
+            let stake_key = DataKey::Stake(address.clone());
+            let owed_key = DataKey::Owed(address.clone());
+            let balance_key = DataKey::Balance(address.clone());
+
+            let stake_info: StakeInfo = env
+                .storage()
+                .persistent()
+                .get(&stake_key)
+                .unwrap_or_default();
+            let stake_amount = stake_info.settled
+                + stake_info.warming
+                + stake_info.unbonding;
+
+            let owed_amount: i128 = env
+                .storage()
+                .persistent()
+                .get(&owed_key)
+                .unwrap_or(0);
+
+            let balance_amount: i128 = env
+                .storage()
+                .persistent()
+                .get(&balance_key)
+                .unwrap_or(0);
+
+            let sum = stake_amount
+                .checked_add(owed_amount)
+                .and_then(|s| s.checked_add(balance_amount))
+                .ok_or(ContractError::ArithmeticOverflow)?;
+
+            if sum > 0 {
+                // Pre-authorize exactly this amount so target.import_balances()
+                // can pull it from this contract's token balance.
+                env.authorize_as_current_contract(vec![
+                    &env,
+                    InvokerContractAuthEntry::Contract(SubContractInvocation {
+                        context: ContractContext {
+                            contract: token_addr.clone(),
+                            fn_name: transfer_fn.clone(),
+                            args: (this.clone(), target.clone(), sum).into_val(&env),
+                        },
+                        sub_invocations: Vec::new(&env),
+                    }),
+                ]);
+                target_client.import_balances(
+                    &this,
+                    &token_addr,
+                    &address,
+                    &stake_amount,
+                    &owed_amount,
+                    &balance_amount,
+                );
+                // Zero out local entries.
+                if stake_amount > 0 {
+                    env.storage().persistent().remove(&stake_key);
+                }
+                if owed_amount > 0 {
+                    env.storage().persistent().remove(&owed_key);
+                }
+                if balance_amount > 0 {
+                    env.storage().persistent().remove(&balance_key);
+                }
+                total = total
+                    .checked_add(sum)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+            }
+
+            BalanceMigrated {
+                address,
+                stake: stake_amount,
+                owed: owed_amount,
+                balance: balance_amount,
+                target: target.clone(),
+            }
+            .publish(&env);
+        }
+
+        Self::bump_instance(&env);
+        Ok(total)
+    }
+
+    /// Called BY a source contract's migrate_balances(), never directly by a
+    /// person. Mirrors import_question(): only the contract named as
+    /// MigrationSource may call it. For each address it credits the given
+    /// Stake (as settled stake, no warmup), Owed, and Balance amounts, then
+    /// pulls the corresponding token transfer from the source. Any failure
+    /// reverts the whole import.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_balances(
+        env: Env,
+        source: Address,
+        token: Address,
+        address: Address,
+        stake_amount: i128,
+        owed_amount: i128,
+        balance_amount: i128,
+    ) -> Result<(), ContractError> {
+        let allowed: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationSource)
+            .ok_or(ContractError::MigrationNotAuthorized)?;
+        if source != allowed {
+            return Err(ContractError::MigrationNotAuthorized);
+        }
+        let default_token = Self::token(&env)?;
+        if token != default_token {
+            return Err(ContractError::TokenMismatch);
+        }
+        if stake_amount < 0 || owed_amount < 0 || balance_amount < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let sum = stake_amount
+            .checked_add(owed_amount)
+            .and_then(|s| s.checked_add(balance_amount))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+
+        if sum > 0 {
+            // Pull the funds from the source.
+            token::Client::new(&env, &token).transfer(
+                &source,
+                &env.current_contract_address(),
+                &sum,
+            );
+        }
+
+        // Credit stake (as settled — no warmup reset on migrated stake).
+        if stake_amount > 0 {
+            let stake_key = DataKey::Stake(address.clone());
+            let mut info: StakeInfo = env
+                .storage()
+                .persistent()
+                .get(&stake_key)
+                .unwrap_or_default();
+            info.settled = info
+                .settled
+                .checked_add(stake_amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            Self::set_persistent(&env, &stake_key, &info);
+            Self::track_participant(&env, &address);
+        }
+        // Credit owed.
+        if owed_amount > 0 {
+            let owed_key = DataKey::Owed(address.clone());
+            let existing: i128 = env.storage().persistent().get(&owed_key).unwrap_or(0);
+            let updated = existing
+                .checked_add(owed_amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            Self::set_persistent(&env, &owed_key, &updated);
+            Self::track_participant(&env, &address);
+        }
+        // Credit balance.
+        if balance_amount > 0 {
+            let bal_key = DataKey::Balance(address.clone());
+            let existing: i128 = env.storage().persistent().get(&bal_key).unwrap_or(0);
+            let updated = existing
+                .checked_add(balance_amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            Self::set_persistent(&env, &bal_key, &updated);
+            Self::track_participant(&env, &address);
+        }
+
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // #49 Second-tier dispute quorum
+    // -----------------------------------------------------------------------
+    //
+    // Design decision: the escalate() entry point is admin-gated, mirroring
+    // resolve() and refund(). The issue leaves it open whether escalation is
+    // triggered by an on-chain threshold or a backend decision — this
+    // implementation follows the backend-decision path (same model as
+    // resolve()), keeping the contract surface small and deferring
+    // confidence-scoring to reconcile.js. escalate_resolve() also requires
+    // admin auth and accepts its own worker lists, giving the second quorum
+    // the ability to confirm or fully override the first one.
+
+    /// Admin-only: moves a Pending question to Status::Disputed for
+    /// second-tier review. Stores the first-quorum verdict (workers /
+    /// losing_workers) in DataKey::EscalatedQuestion(question_id) so the
+    /// second quorum can inspect and override it. Does NOT credit any
+    /// workers or transfer any funds — the question amount stays escrowed.
+    /// The question can no longer be refund()ed or refund_timeout()ed once
+    /// Disputed; it must go through escalate_resolve() to finalize.
+    pub fn escalate(
+        env: Env,
+        question_id: u64,
+        first_workers: Vec<Address>,
+        first_losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        if first_workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        Self::validate_worker_lists(&first_workers, &first_losing_workers)?;
+
+        let mut question = Self::load_question(&env, question_id)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPendingForEscalation);
+        }
+
+        let fw_count = first_workers.len();
+        let flw_count = first_losing_workers.len();
+
+        // Store the first-quorum verdict for the second quorum to inspect.
+        let escalated = EscalatedQuestion {
+            first_workers,
+            first_losing_workers,
+        };
+        Self::set_persistent(&env, &DataKey::EscalatedQuestion(question_id), &escalated);
+
+        // Move the question to Disputed — it is no longer Pending so
+        // refund()/refund_timeout() are blocked, but the escrow amount stays.
+        question.status = Status::Disputed;
+        Self::store_question(&env, question_id, &question);
+        // Do NOT remove from the pending index — we keep it there until
+        // escalate_resolve() finalizes, so list_pending() still surfaces it
+        // as an open obligation.
+        Self::bump_instance(&env);
+
+        QuestionEscalated {
+            question_id,
+            first_workers: fw_count,
+            first_losing_workers: flw_count,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only: finalizes a Disputed question by running a second quorum.
+    /// `workers` and `losing_workers` are the SECOND quorum's verdict — they
+    /// may match or differ from the first quorum's lists stored by escalate().
+    /// If they differ, this counts as overturning the first quorum (emitted in
+    /// EscalationResolved.overturned). Either way, payout logic is identical
+    /// to resolve(): fee taken, pool split, losing workers slashed, and the
+    /// question moves to Status::Resolved.
+    pub fn escalate_resolve(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let key = DataKey::Question(question_id);
+        let mut question = Self::load_question(&env, question_id)?;
+        if question.status != Status::Disputed {
+            return Err(ContractError::QuestionNotDisputed);
+        }
+
+        // Check whether second quorum overturns the first.
+        let escalated: Option<EscalatedQuestion> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscalatedQuestion(question_id));
+        let overturned = if let Some(ref eq) = escalated {
+            // Lists differ if lengths differ, or if any element differs.
+            let workers_match = eq.first_workers.len() == workers.len() && {
+                let mut same = true;
+                for i in 0..workers.len() {
+                    if eq.first_workers.get(i).unwrap() != workers.get(i).unwrap() {
+                        same = false;
+                        break;
+                    }
+                }
+                same
+            };
+            let losers_match = eq.first_losing_workers.len() == losing_workers.len() && {
+                let mut same = true;
+                for i in 0..losing_workers.len() {
+                    if eq.first_losing_workers.get(i).unwrap() != losing_workers.get(i).unwrap() {
+                        same = false;
+                        break;
+                    }
+                }
+                same
+            };
+            !workers_match || !losers_match
+        } else {
+            false
+        };
+
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)?;
+        let question_token = Self::question_token(&env, question_id)?;
+        let token_client = token::Client::new(&env, &question_token);
+
+        let amount = question.amount;
+        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+        let mut platform_take = fee + dust;
+        for loser in losing_workers.iter() {
+            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
+            platform_take = platform_take
+                .checked_add(slashed)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            if slashed > 0 {
+                WorkerSlashed { question_id, worker: loser, amount: slashed }.publish(&env);
+            }
+        }
+        for worker in workers.iter() {
+            Self::credit_owed(&env, &question_token, &worker, share)?;
+            WorkerCredited { question_id, worker: worker.clone(), amount: share }.publish(&env);
+            Self::record_resolved_credit(&env, &worker);
+        }
+        if platform_take > 0 {
+            token_client.transfer(&env.current_contract_address(), &platform, &platform_take);
+        }
+
+        // Clean up escalation storage.
+        if escalated.is_some() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::EscalatedQuestion(question_id));
+        }
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        QuestionResolved {
+            question_id,
+            worker_count: workers.len(),
+            fee,
+            total_slashed: platform_take - fee - dust,
+        }
+        .publish(&env);
+        EscalationResolved { question_id, overturned }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns the stored first-quorum verdict for a Disputed question, or
+    /// None if the question has never been escalated (or escalate_resolve()
+    /// has already cleaned it up).
+    pub fn get_escalated_question(env: Env, question_id: u64) -> Option<EscalatedQuestion> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EscalatedQuestion(question_id))
+    }
+
+    // -----------------------------------------------------------------------
+    // #50 / #97  Bonded challenger + dispute-window finality
+    // -----------------------------------------------------------------------
+    //
+    // resolve_challengeable() splits the old single-call resolve() into a
+    // two-step sequence:
+    //   1. resolve_challengeable() records the intended outcome (workers,
+    //      losing_workers) in DataKey::PendingResolution and sets the status
+    //      to Status::ResolvedPending, without transferring or crediting
+    //      anything. This opens a `dispute_window_ledgers`-long window.
+    //   2. finalize_resolve() — permissionless, callable by anyone after the
+    //      window — executes today's fee/credit/slash logic, unless the
+    //      window was poisoned by dispute_resolve() (admin-gated flag).
+    //
+    // post_challenge_bond() (#50): anyone can post a bond against a
+    //   ResolvedPending question within the dispute window. The bond is held
+    //   in this contract's token balance. finalize_resolve() settles it:
+    //   - if the resolution was disputed (dispute_resolve() was called),
+    //     the bond is returned to the challenger;
+    //   - if the resolution was NOT disputed, the bond is forfeited to the
+    //     platform.
+
+    /// Admin-only: records a pending resolution for `question_id` without
+    /// crediting any worker or transferring any funds. Sets the question's
+    /// status to ResolvedPending and stores `workers`, `losing_workers`, and
+    /// the `dispute_window_ledgers`-long challenge window in
+    /// DataKey::PendingResolution(question_id).
+    ///
+    /// The question must be Pending. refund()/refund_timeout() are no longer
+    /// valid once the question is ResolvedPending.
+    pub fn resolve_challengeable(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+        dispute_window_ledgers: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let mut question = Self::load_question(&env, question_id)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
 
-        let commit_key = DataKey::Commit(question_id, worker.clone());
-        if env.storage().persistent().has(&commit_key) {
-            return Err(ContractError::CommitAlreadyExists);
-        }
+        let dispute_deadline = env
+            .ledger()
+            .sequence()
+            .saturating_add(dispute_window_ledgers);
 
-        let now = env.ledger().sequence();
-        let entry = CommitEntry {
-            answer_hash,
-            committed_at: now,
+        let pending_res = PendingResolution {
+            workers,
+            losing_workers,
+            dispute_deadline,
+            disputed: false,
         };
-        Self::set_persistent(&env, &commit_key, &entry);
+        Self::set_persistent(&env, &DataKey::PendingResolution(question_id), &pending_res);
+
+        // Update status to ResolvedPending without settling (funds stay escrowed).
+        question.status = Status::ResolvedPending;
+        Self::store_question(&env, question_id, &question);
         Self::bump_instance(&env);
-        AnswerCommitted {
-            question_id,
-            worker,
-            committed_at: now,
-        }
-        .publish(&env);
+
+        ResolutionChallengeable { question_id, dispute_deadline }.publish(&env);
         Ok(())
     }
 
-    /// Worker reveals the pre-image of their earlier commit. Verifies that
-    /// SHA-256(answer || salt) matches the stored commitment, then removes
-    /// the commitment. Returns an error if no prior commit exists or if the
-    /// hash doesn't match.
+    /// Permissionless: anyone with a bond can stake a claim that the pending
+    /// resolution is wrong. The bond (`amount` in the default token) is held
+    /// by this contract. The caller must be the one named in subsequent
+    /// finalize_resolve() checks. Only one bond per question_id is tracked.
     ///
-    /// After a successful reveal the worker's answer is visible on-chain
-    /// and can be read by reconcile.js to compute the workers/losing_workers
-    /// partition that will be passed to resolve().
-    pub fn reveal_answer(
+    /// The question must be in ResolvedPending status and must have an
+    /// unexpired dispute window (current ledger < dispute_deadline).
+    pub fn post_challenge_bond(
         env: Env,
-        worker: Address,
+        challenger: Address,
         question_id: u64,
-        answer: Bytes,
-        salt: Bytes,
+        amount: i128,
     ) -> Result<(), ContractError> {
-        worker.require_auth();
+        challenger.require_auth();
 
-        let commit_key = DataKey::Commit(question_id, worker.clone());
-        let entry: CommitEntry = env
+        if amount <= 0 {
+            return Err(ContractError::InvalidBondAmount);
+        }
+
+        let question = Self::load_question(&env, question_id)?;
+        if question.status != Status::ResolvedPending {
+            return Err(ContractError::NoChallengeableResolution);
+        }
+
+        let pending_res: PendingResolution = env
             .storage()
             .persistent()
-            .get(&commit_key)
-            .ok_or(ContractError::CommitNotFound)?;
+            .get(&DataKey::PendingResolution(question_id))
+            .ok_or(ContractError::NoPendingResolution)?;
 
-        // Re-derive SHA-256(answer || salt) and compare.
-        let mut preimage = answer.clone();
-        preimage.append(&salt);
-        let computed_hash = env.crypto().sha256(&preimage);
-        if computed_hash != entry.answer_hash {
-            return Err(ContractError::CommitHashMismatch);
+        // Bond must be posted before the dispute window closes.
+        if env.ledger().sequence() >= pending_res.dispute_deadline {
+            return Err(ContractError::NoChallengeableResolution);
         }
 
-        // Burn the commitment — reveals are one-shot.
-        env.storage().persistent().remove(&commit_key);
+        // Only one bond per question at a time.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::ChallengerBond(question_id))
+        {
+            return Err(ContractError::BondAlreadyPosted);
+        }
+
+        let token_addr = Self::token(&env)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &challenger,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let bond_entry = ChallengerBondEntry { challenger: challenger.clone(), amount };
+        Self::set_persistent(&env, &DataKey::ChallengerBond(question_id), &bond_entry);
         Self::bump_instance(&env);
-        AnswerRevealed {
+
+        ChallengeBondPosted { question_id, challenger, amount }.publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only: flags the in-flight PendingResolution for `question_id`
+    /// as disputed. finalize_resolve() will refuse to execute while this flag
+    /// is set — the admin must resolve the dispute out of band and then call
+    /// admin_override_resolution() (or refund the question directly) to unblock.
+    ///
+    /// Permissionless variant: see post_challenge_bond() — anyone can post a
+    /// bond to signal disagreement; the admin inspects and calls this if the
+    /// challenge has merit.
+    pub fn dispute_resolve(env: Env, question_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        let mut pending_res: PendingResolution = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingResolution(question_id))
+            .ok_or(ContractError::NoPendingResolution)?;
+
+        pending_res.disputed = true;
+        Self::set_persistent(&env, &DataKey::PendingResolution(question_id), &pending_res);
+        Self::bump_instance(&env);
+
+        ResolutionDisputed { question_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Permissionless: executes the pending resolution for `question_id` after
+    /// the dispute window has elapsed, provided dispute_resolve() has NOT been
+    /// called. Performs the same fee/credit/slash logic as resolve() using the
+    /// worker lists stored by resolve_challengeable().
+    ///
+    /// If a ChallengerBond was posted:
+    /// - resolution was disputed → bond returned to challenger;
+    /// - resolution was NOT disputed → bond forfeited to the platform.
+    ///
+    /// Returns Err(DisputeWindowNotElapsed) if called too early, or
+    /// Err(QuestionDisputed) if dispute_resolve() has already flagged it.
+    pub fn finalize_resolve(env: Env, question_id: u64) -> Result<(), ContractError> {
+        let pending_res: PendingResolution = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingResolution(question_id))
+            .ok_or(ContractError::NoPendingResolution)?;
+
+        if env.ledger().sequence() <= pending_res.dispute_deadline {
+            return Err(ContractError::DisputeWindowNotElapsed);
+        }
+
+        if pending_res.disputed {
+            return Err(ContractError::QuestionDisputed);
+        }
+
+        let key = DataKey::Question(question_id);
+        let mut question = Self::load_question(&env, question_id)?;
+        // question must be ResolvedPending — this is the only valid state
+        // that a resolve_challengeable() call can leave it in.
+        if question.status != Status::ResolvedPending {
+            return Err(ContractError::NoPendingResolution);
+        }
+
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)?;
+        let question_token = Self::question_token(&env, question_id)?;
+        let token_client = token::Client::new(&env, &question_token);
+
+        let amount = question.amount;
+        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
+        let pool = amount - fee;
+        let workers = &pending_res.workers;
+        let losing_workers = &pending_res.losing_workers;
+        let n = workers.len() as i128;
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+        let mut platform_take = fee + dust;
+        for loser in losing_workers.iter() {
+            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
+            platform_take = platform_take
+                .checked_add(slashed)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            if slashed > 0 {
+                WorkerSlashed { question_id, worker: loser, amount: slashed }.publish(&env);
+            }
+        }
+        for worker in workers.iter() {
+            Self::credit_owed(&env, &question_token, &worker, share)?;
+            WorkerCredited { question_id, worker: worker.clone(), amount: share }.publish(&env);
+            Self::record_resolved_credit(&env, &worker);
+        }
+
+        // Settle any challenger bond: not disputed → forfeit to platform.
+        let bond_key = DataKey::ChallengerBond(question_id);
+        let maybe_bond: Option<ChallengerBondEntry> = env
+            .storage()
+            .persistent()
+            .get(&bond_key);
+        if let Some(bond) = maybe_bond {
+            // Bond forfeited: add to platform_take so it transfers in one call.
+            platform_take = platform_take
+                .checked_add(bond.amount)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            env.storage().persistent().remove(&bond_key);
+            ChallengeBondSettled {
+                question_id,
+                challenger: bond.challenger,
+                amount: bond.amount,
+                returned: false,
+            }
+            .publish(&env);
+        }
+
+        if platform_take > 0 {
+            token_client.transfer(&env.current_contract_address(), &platform, &platform_take);
+        }
+
+        // Clean up.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingResolution(question_id));
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        QuestionResolved {
             question_id,
-            worker,
+            worker_count: workers.len(),
+            fee,
+            total_slashed: platform_take - fee - dust,
         }
         .publish(&env);
         Ok(())
     }
 
-    /// Returns the stored commitment for (question_id, worker), or None if
-    /// the worker has not yet committed (or has already revealed).
-    pub fn get_commit(env: Env, question_id: u64, worker: Address) -> Option<CommitEntry> {
+    /// Returns the stored PendingResolution for `question_id`, or None if
+    /// none exists (question was never put through resolve_challengeable(),
+    /// or finalize_resolve() already cleaned it up).
+    pub fn get_pending_resolution(env: Env, question_id: u64) -> Option<PendingResolution> {
         env.storage()
             .persistent()
-            .get(&DataKey::Commit(question_id, worker))
+            .get(&DataKey::PendingResolution(question_id))
+    }
+
+    /// Returns the stored ChallengerBondEntry for `question_id`, or None.
+    pub fn get_challenger_bond(env: Env, question_id: u64) -> Option<ChallengerBondEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ChallengerBond(question_id))
+    }
     }
 }
 
@@ -4229,6 +4999,8 @@ mod test_delegated_auth;
 #[cfg(test)]
 mod test_payment_streaming;
 #[cfg(test)]
-mod test_unanimous_dissent;
+mod test_migrate_balances;
 #[cfg(test)]
-mod test_views;
+mod test_second_tier_quorum;
+#[cfg(test)]
+mod test_bonded_challenger;
