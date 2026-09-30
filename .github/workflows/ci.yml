@@ -61,8 +61,13 @@ jobs:
           python3 sim/slashing_model.py --check
           python3 sim/slashing_model.py > /tmp/tables.md
           diff <(tail -n +8 docs/economics/model-tables.md) /tmp/tables.md
+      - name: Incentive simulation self-checks
+        # sim/incentive is a standalone crate (issue #117). Its contract
+        # equivalence proof runs in the main `cargo test` above
+        # (src/test_incentive_math.rs); this runs the model's own tests.
+        run: cargo test --manifest-path sim/incentive/Cargo.toml
       - name: Migration tool syntax
-        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs
+        run: node --check tools/migrate/migrate.mjs && node --check tools/migrate/e2e-testnet.mjs && node --check tools/load/load.mjs && node --check tools/shadow/shadow.mjs
       - name: Install Stellar CLI
         # Prebuilt .deb instead of cargo install: building from source pulls
         # in hardware-wallet support (dbus, then libudev/hidapi) and takes

@@ -1,0 +1,17 @@
+[package]
+name = "incentive-sim"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Agent-based incentive-alignment simulation for oracle-escrow (issue #117)"
+
+# Standalone on purpose: not a member of the contract workspace, no
+# dependencies, so `cargo run --release` here never touches the contract
+# build. src/math.rs is shared with the contract's test suite by #[path].
+[workspace]
+
+[dependencies]
+
+[profile.release]
+overflow-checks = true
