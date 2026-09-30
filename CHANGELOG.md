@@ -20,16 +20,16 @@ actually matches this tag's source, rather than trusting the tag name alone.
 
 ## [Unreleased]
 
-Compatibility class **A (additive)**. See [docs/versioning.md](docs/versioning.md).
-
-- Added `set_paused(paused)` (admin-only) and `is_paused()`. While paused,
-  `submit*`, `deposit*`, `charge*` and `reopen_question` fail with the new
-  `ContractError::ContractPaused = 400`. Settlement (`resolve`/`refund`/
-  `refund_timeout`) and all withdrawals are unaffected. Emits
-  `paused_changed`. See [docs/circuit-breaker.md](docs/circuit-breaker.md).
-- Added `get_health()` returning `ContractHealth`: open question count,
-  cumulative opened/resolved/refunded totals, default-token TVL, the
-  admin/token/platform addresses, and the pause flag.
+- Added `resolve_by_consensus(question_id, answers)`: settles from per-worker
+  answer commitments and slashes (via the existing slash path) an
+  established worker who alone dissented from an otherwise unanimous quorum.
+  Split quorums return the new `NoUnanimousConsensus` (400) error and must
+  still go through `resolve()`. Threshold is configurable with
+  `set_established_answer_count` / `get_established_answer_count`
+  (default 20 credited resolutions). New `unanimous_dissent` event.
+- Added `get_admin()` and `get_platform()` views (alongside `get_token()`).
+- Added `get_questions(question_ids)` batch view returning
+  `Vec<Option<Question>>` in input order.
 
 ## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
 
