@@ -9,7 +9,7 @@ fn reopened_question_starts_a_fresh_timeout_window() {
     let f = setup();
     let c = client(&f);
 
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
     f.env.ledger().with_mut(|li| {
         li.sequence_number += TIMEOUT_LEDGERS as u32 + 1;
     });
@@ -30,7 +30,7 @@ fn reopen_of_an_already_resolved_question_fails() {
     let c = client(&f);
     let worker = soroban_sdk::Address::generate(&f.env);
 
-    c.submit(&f.payer, &2, &AMOUNT);
+    c.submit(&f.payer, &f.token_address, &2, &AMOUNT);
     c.resolve(
         &2,
         &soroban_sdk::vec![&f.env, worker],

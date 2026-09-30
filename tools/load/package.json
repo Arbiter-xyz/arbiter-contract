@@ -1,0 +1,13 @@
+{
+  "name": "oracle-escrow-load",
+  "private": true,
+  "description": "Load harness for oracle-escrow (issue #119). See docs/LOAD_TESTING.md.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "load": "node load.mjs"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.0.0"
+  }
+}
