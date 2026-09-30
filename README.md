@@ -301,3 +301,6 @@ build.
 
 <!-- handsoff-issue-41 -->
 - #41: Stake-weighted voting in resolve()
+
+<!-- handsoff-issue-43 -->
+- #43: Slashing insurance for workers
