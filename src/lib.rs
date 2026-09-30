@@ -5059,3 +5059,5 @@ mod test_migrate_balances;
 mod test_second_tier_quorum;
 #[cfg(test)]
 mod test_bonded_challenger;
+#[cfg(test)]
+mod test_rpc_chaos;
