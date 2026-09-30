@@ -142,21 +142,8 @@ pub struct Question {
     /// questions submitted AFTER the change. migrate_pending() carries both
     /// created_at and timeout_ledgers across unchanged for the same reason.
     pub timeout_ledgers: u32,
-    /// Opaque commitment to the off-chain answer schema. Existing questions
-    /// have no commitment and are exposed as `None`.
-    pub schema_hash: Option<BytesN<32>>,
-}
-
-// Keep the persisted question encoding stable. New question metadata lives in
-// separate keys so existing deployed questions remain readable.
-#[contracttype]
-#[derive(Clone, Debug)]
-struct StoredQuestion {
-    pub payer: Address,
-    pub amount: i128,
-    pub status: Status,
-    pub created_at: u32,
-    pub timeout_ledgers: u32,
+    /// The asset this question was opened in.
+    pub token: Address,
 }
 
 #[contracttype]
@@ -317,12 +304,6 @@ pub enum DataKey {
     /// docs/stake-snapshot.md for why this is an explicit, caller-paid
     /// checkpoint rather than continuous on-chain history.
     StakeSnapshot(Address, u32),
-    /// Optional commitment for a question; absent on questions created before
-    /// schema commitments were introduced.
-    QuestionSchemaHash(u64),
-    /// Number of questions opened with this caller-defined category. Callers
-    /// should use a bounded vocabulary to avoid unbounded key growth.
-    CategoryCount(Symbol),
 }
 
 #[contracttype]
@@ -507,17 +488,6 @@ pub struct QuestionResolved {
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerSlashed {
-    #[topic]
-    pub question_id: u64,
-    #[topic]
-    pub worker: Address,
-    pub amount: i128,
-}
-
-/// `worker_credited` topics: question_id, worker; data: amount.
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerCredited {
     #[topic]
     pub question_id: u64,
     #[topic]
@@ -1007,63 +977,7 @@ impl OracleEscrow {
             &amount,
         );
 
-        Self::open_question(&env, payer, question_id, amount, token_addr, None, None)
-    }
-
-    pub fn submit_with_schema_hash(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        amount: i128,
-        schema_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        payer.require_auth();
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-        let token_addr = Self::token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &payer,
-            &env.current_contract_address(),
-            &amount,
-        );
-        Self::open_question(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token_addr,
-            Some(schema_hash),
-            None,
-        )
-    }
-
-    pub fn submit_with_category(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        amount: i128,
-        category: Symbol,
-    ) -> Result<(), ContractError> {
-        payer.require_auth();
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-        let token_addr = Self::token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &payer,
-            &env.current_contract_address(),
-            &amount,
-        );
-        Self::open_question(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token_addr,
-            None,
-            Some(category),
-        )
+        Self::open_question(&env, payer, question_id, amount, token_addr)
     }
 
     /// Payer locks an admin-allowlisted SEP-41 asset for one question.
@@ -1085,7 +999,7 @@ impl OracleEscrow {
             &env.current_contract_address(),
             &amount,
         );
-        Self::open_question(&env, payer, question_id, amount, token, None, None)
+        Self::open_question(&env, payer, question_id, amount, token)
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -1330,47 +1244,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let token = Self::token(&env)?;
-        Self::charge_for_token(&env, payer, question_id, amount, token, None, None)
-    }
-
-    pub fn charge_with_schema_hash(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        amount: i128,
-        schema_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let token = Self::token(&env)?;
-        Self::charge_for_token(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token,
-            Some(schema_hash),
-            None,
-        )
-    }
-
-    pub fn charge_with_category(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        amount: i128,
-        category: Symbol,
-    ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let token = Self::token(&env)?;
-        Self::charge_for_token(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token,
-            None,
-            Some(category),
-        )
+        Self::charge_for_token(&env, payer, question_id, amount, token)
     }
 
     pub fn charge_asset(
@@ -1382,7 +1256,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         Self::require_allowed_token(&env, &token)?;
-        Self::charge_for_token(&env, payer, question_id, amount, token, None, None)
+        Self::charge_for_token(&env, payer, question_id, amount, token)
     }
 
     fn charge_for_token(
@@ -1391,8 +1265,6 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
-        schema_hash: Option<BytesN<32>>,
-        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -1405,7 +1277,7 @@ impl OracleEscrow {
         }
         Self::set_persistent(&env, &key, &(existing - amount));
 
-        Self::open_question(env, payer, question_id, amount, token, schema_hash, category)
+        Self::open_question(env, payer, question_id, amount, token)
     }
 
     /// Shared by submit() (fresh transfer) and charge() (drawn from an
@@ -1419,8 +1291,6 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
-        schema_hash: Option<BytesN<32>>,
-        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
         let timeout_ledgers: u32 = env
             .storage()
@@ -1438,18 +1308,9 @@ impl OracleEscrow {
                 status: Status::Pending,
                 created_at: env.ledger().sequence(),
                 timeout_ledgers,
-                schema_hash,
+                token: token.clone(),
             },
         )?;
-        if let Some(category) = category {
-            let key = DataKey::CategoryCount(category);
-            let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-            let updated = count
-                .checked_add(1)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            env.storage().persistent().set(&key, &updated);
-            Self::extend_persistent(env, &key);
-        }
         Ok(())
     }
 
@@ -1467,21 +1328,7 @@ impl OracleEscrow {
             return Err(ContractError::QuestionAlreadyExists);
         }
 
-        let stored = StoredQuestion {
-            payer: question.payer.clone(),
-            amount: question.amount,
-            status: question.status,
-            created_at: question.created_at,
-            timeout_ledgers: question.timeout_ledgers,
-        };
-        env.storage().persistent().set(&key, &stored);
-        let schema_key = DataKey::QuestionSchemaHash(question_id);
-        if let Some(schema_hash) = question.schema_hash.clone() {
-            env.storage().persistent().set(&schema_key, &schema_hash);
-            Self::extend_persistent(env, &schema_key);
-        } else {
-            env.storage().persistent().remove(&schema_key);
-        }
+        env.storage().persistent().set(&key, &question);
         Self::extend_question_ttl(env, &key, &question);
         env.storage()
             .persistent()
@@ -1500,38 +1347,6 @@ impl OracleEscrow {
         }
         .publish(env);
         Ok(())
-    }
-
-    fn load_question(env: &Env, question_id: u64) -> Result<Question, ContractError> {
-        let stored: StoredQuestion = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)?;
-        Ok(Question {
-            payer: stored.payer,
-            amount: stored.amount,
-            status: stored.status,
-            created_at: stored.created_at,
-            timeout_ledgers: stored.timeout_ledgers,
-            schema_hash: env
-                .storage()
-                .persistent()
-                .get(&DataKey::QuestionSchemaHash(question_id)),
-        })
-    }
-
-    fn store_question(env: &Env, question_id: u64, question: &Question) {
-        let stored = StoredQuestion {
-            payer: question.payer.clone(),
-            amount: question.amount,
-            status: question.status,
-            created_at: question.created_at,
-            timeout_ledgers: question.timeout_ledgers,
-        };
-        let key = DataKey::Question(question_id);
-        env.storage().persistent().set(&key, &stored);
-        Self::extend_question_ttl(env, &key, question);
     }
 
     /// Admin-only. Pays a 20% platform fee (+ integer-division dust)
@@ -1566,7 +1381,11 @@ impl OracleEscrow {
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
-        let mut question = Self::load_question(&env, question_id)?;
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
@@ -1608,12 +1427,6 @@ impl OracleEscrow {
         }
         for worker in workers.iter() {
             Self::credit_owed(&env, &question_token, &worker, share)?;
-            WorkerCredited {
-                question_id,
-                worker: worker.clone(),
-                amount: share,
-            }
-            .publish(&env);
             // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
             // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not
             // O(all workers ever staked).
@@ -2075,15 +1888,15 @@ impl OracleEscrow {
     /// requirement — see docs/ttl-archival.md.
     pub fn touch_question(env: Env, question_id: u64) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
-        let question = Self::load_question(&env, question_id)?;
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         Self::extend_question_ttl(&env, &key, &question);
         let token_key = AssetKey::QuestionToken(question_id);
         if env.storage().persistent().has(&token_key) {
             Self::extend_asset_ttl(&env, &token_key);
-        }
-        let schema_key = DataKey::QuestionSchemaHash(question_id);
-        if env.storage().persistent().has(&schema_key) {
-            Self::extend_persistent(&env, &schema_key);
         }
 
         if question.status == Status::Pending {
@@ -2277,14 +2090,10 @@ impl OracleEscrow {
     }
 
     pub fn get_question(env: Env, question_id: u64) -> Result<Question, ContractError> {
-        Self::load_question(&env, question_id)
-    }
-
-    pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::CategoryCount(category))
-            .unwrap_or(0)
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)
     }
 
     /// Read-only convenience so clients can display "auto-refund available
@@ -2404,7 +2213,11 @@ impl OracleEscrow {
 
         for question_id in question_ids.iter() {
             let key = DataKey::Question(question_id);
-            let mut question = Self::load_question(&env, question_id)?;
+            let mut question: Question = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .ok_or(ContractError::QuestionNotFound)?;
             if question.status != Status::Pending {
                 return Err(ContractError::QuestionNotPending);
             }
@@ -2511,7 +2324,7 @@ impl OracleEscrow {
                 status: Status::Pending,
                 created_at,
                 timeout_ledgers,
-                schema_hash: None,
+                token: token.clone(),
             },
         )
     }
@@ -2748,7 +2561,11 @@ impl OracleEscrow {
         via_timeout: bool,
     ) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
-        let mut question = Self::load_question(env, question_id)?;
+        let mut question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
@@ -2781,7 +2598,7 @@ impl OracleEscrow {
         status: Status,
     ) {
         question.status = status;
-        Self::store_question(env, question_id, question);
+        Self::set_persistent(env, key, question);
         Self::index_remove(env, question_id);
         Self::bump_instance(env);
         QuestionSettled {
@@ -2906,7 +2723,11 @@ impl OracleEscrow {
         }
 
         let key = DataKey::Question(question_id);
-        let existing = Self::load_question(&env, question_id)?;
+        let existing: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if existing.status != Status::Refunded {
             return Err(ContractError::QuestionNotRefunded);
         }
@@ -2914,7 +2735,7 @@ impl OracleEscrow {
             return Err(ContractError::QuestionNotRefunded);
         }
 
-        let token_addr = Self::token(&env)?;
+        let token_addr = existing.token.clone();
         token::Client::new(&env, &token_addr).transfer(
             &payer,
             &env.current_contract_address(),
@@ -2927,11 +2748,16 @@ impl OracleEscrow {
             amount,
             status: Status::Pending,
             created_at: now,
-            timeout_ledgers: Self::timeout_ledgers(&env),
-            schema_hash: existing.schema_hash,
+            timeout_ledgers: existing.timeout_ledgers,
+            token: token_addr.clone(),
         };
-        Self::store_question(&env, question_id, &reopened);
-
+        env.storage().persistent().set(&key, &reopened);
+        Self::extend_question_ttl(&env, &key, &reopened);
+        env.storage()
+            .persistent()
+            .set(&AssetKey::QuestionToken(question_id), &token_addr);
+        Self::extend_asset_ttl(&env, &AssetKey::QuestionToken(question_id));
+        Self::index_add(&env, question_id);
         Self::bump_instance(&env);
         QuestionReopened {
             question_id,
@@ -3032,7 +2858,11 @@ impl OracleEscrow {
         Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()) as u32)?;
         Self::validate_worker_lists(&workers, &losing_workers)?;
 
-        let question = Self::load_question(&env, question_id)?;
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
@@ -3097,15 +2927,16 @@ impl OracleEscrow {
     /// The per-question logic refund_timeout() has always run: only
     /// eligible once Pending and past its deadline, verbatim.
     fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
-        let question = Self::load_question(env, question_id)?;
+        let key = DataKey::Question(question_id);
+        let question: Question = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
-        if env.ledger().sequence()
-            < question
-                .created_at
-                .saturating_add(question.timeout_ledgers)
-        {
+        if env.ledger().sequence() < question.deadline {
             return Err(ContractError::TimeoutNotReached);
         }
         Self::do_refund(env, question_id, true)?;
