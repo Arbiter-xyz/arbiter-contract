@@ -16,7 +16,7 @@ fn resolve_updates_a_workers_on_chain_reputation_counters() {
     let winner = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [winner.clone()]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     c.record_reputation(&1, &workers, &no_losers);
 
     let rep = c.get_reputation(&winner);
@@ -37,7 +37,7 @@ fn losing_a_quorum_increments_the_lost_counter_independent_of_slashing() {
     // loser has no stake at all, so resolve()'s slash() is a no-op for them
     // (see slash()'s doc comment) — reputation tracking is independent of
     // whether there was anything to slash.
-    c.resolve(&1, &workers, &losing_workers);
+    c.resolve(&1, &workers, &losing_workers, &BytesN::from_array(&f.env, &[0u8; 32]));
     c.record_reputation(&1, &workers, &losing_workers);
 
     let rep = c.get_reputation(&loser);
@@ -57,7 +57,7 @@ fn reputation_token_cannot_be_transferred_between_addresses() {
     let worker = Address::generate(&f.env);
     let other = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [worker.clone()]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     c.record_reputation(&1, &workers, &Vec::new(&f.env));
 
     assert_eq!(c.get_reputation(&worker).matched, 1);
@@ -72,7 +72,7 @@ fn record_reputation_cannot_be_called_twice_for_the_same_question() {
     c.submit(&f.payer, &1, &AMOUNT);
     let worker = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [worker.clone()]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     c.record_reputation(&1, &workers, &Vec::new(&f.env));
     let res = c.try_record_reputation(&1, &workers, &Vec::new(&f.env));

@@ -605,6 +605,23 @@ pub struct QuestionResolved {
     pub total_slashed: i128,
 }
 
+/// Issue #59: on-chain answer notarization.
+///
+/// `question_notarized` topics: question_id; data: answer_hash.
+/// Emitted by `resolve()` at the moment a question moves to `Resolved`.
+/// The caller (trusted admin) supplies `answer_hash` — a SHA-256 (or
+/// equivalent) digest of the canonical question + consensus-answer text.
+/// Anyone who holds the original question/answer text can recompute the
+/// hash and independently confirm it matches what was settled on-chain.
+/// No full text is stored on-chain (see issue #56 for that discussion).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionNotarized {
+    #[topic]
+    pub question_id: u64,
+    pub answer_hash: BytesN<32>,
+}
+
 /// `worker_slashed` topics: question_id, worker; data: amount.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1728,14 +1745,19 @@ impl OracleEscrow {
     /// SLASH_CAP_BPS_OF_AMOUNT of this question's amount, to the platform; a
     /// worker with no stake is simply skipped, so staking remains opt-in and
     /// slashing can never fail this call.
+    /// Issue #59: `answer_hash` is a caller-supplied SHA-256 (or equivalent)
+    /// digest of the canonical question + consensus-answer text. The contract
+    /// emits it as a `QuestionNotarized` event so any observer can
+    /// independently verify the settled answer without querying the backend.
     pub fn resolve(
         env: Env,
         question_id: u64,
         workers: Vec<Address>,
         losing_workers: Vec<Address>,
+        answer_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        Self::settle_resolution(&env, question_id, workers, losing_workers)
+        Self::settle_resolution(&env, question_id, workers, losing_workers, Some(answer_hash))
     }
 
     /// Issue #11: admin-only resolution from raw consensus data, which
@@ -1802,7 +1824,7 @@ impl OracleEscrow {
             }
         }
 
-        Self::settle_resolution(&env, question_id, workers, losing_workers)
+        Self::settle_resolution(&env, question_id, workers, losing_workers, None)
     }
 
     /// Ok(None) when every answer agrees, Ok(Some(i)) when answers[i] alone
@@ -1872,6 +1894,7 @@ impl OracleEscrow {
         question_id: u64,
         workers: Vec<Address>,
         losing_workers: Vec<Address>,
+        answer_hash: Option<BytesN<32>>,
     ) -> Result<(), ContractError> {
         let env = env.clone();
         if workers.is_empty() {
@@ -2033,6 +2056,14 @@ impl OracleEscrow {
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        // Issue #59: emit the notarization event when the caller supplied a hash.
+        if let Some(hash) = answer_hash {
+            QuestionNotarized {
+                question_id,
+                answer_hash: hash,
+            }
+            .publish(&env);
+        }
         QuestionResolved {
             question_id,
             worker_count: workers.len(),
@@ -5059,3 +5090,9 @@ mod test_migrate_balances;
 mod test_second_tier_quorum;
 #[cfg(test)]
 mod test_bonded_challenger;
+#[cfg(test)]
+mod test_property_based;
+#[cfg(test)]
+mod test_formal_verification;
+#[cfg(test)]
+mod test_its_integration;

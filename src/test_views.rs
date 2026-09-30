@@ -93,7 +93,7 @@ fn get_questions_handles_a_mix_of_pending_resolved_and_refunded_ids() {
     c.submit(&f.payer, &3, &AMOUNT);
 
     let w = Address::generate(&f.env);
-    c.resolve(&2, &Vec::from_array(&f.env, [w]), &Vec::new(&f.env));
+    c.resolve(&2, &Vec::from_array(&f.env, [w]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     f.env
         .ledger()
         .set_sequence_number(f.env.ledger().sequence() + TIMEOUT_LEDGERS);
