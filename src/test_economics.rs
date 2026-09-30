@@ -584,10 +584,11 @@ fn a2_monte_carlo_targeted_griefing_damage_drops_by_the_stake_to_question_ratio(
         usdc(legacy.cartel_pnl),
         usdc(current.cartel_pnl),
     );
-    // Same seeds, same quorums, same decisions: only the contract differs,
-    // so the cartel's own P&L is identical (slashes go to the platform, not
-    // to the cartel)...
-    assert_eq!(legacy.cartel_pnl, current.cartel_pnl);
+    // Same seeds, same quorums, same decisions: only the contract differs.
+    // With redistribution (issue #19), when the cartel wins a quorum they
+    // receive a share of the slashes taken from the honest losers — so the
+    // current cartel P&L is at least as good as the legacy one.
+    assert!(current.cartel_pnl >= legacy.cartel_pnl);
     // ...but the damage it can inflict on the staked victim collapses.
     assert!(legacy.victim_slashed > 0);
     assert!(

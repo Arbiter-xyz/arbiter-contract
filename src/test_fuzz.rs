@@ -47,6 +47,7 @@ const WORKER_FUNDS: i128 = 50_000_000;
 const INITIAL_TIMEOUT: u32 = 20;
 const FEE_BPS: i128 = 2000;
 const SLASH_BPS: i128 = 500;
+const SLASH_REDISTRIBUTE_BPS: i128 = 5_000;
 
 #[derive(Clone, Debug)]
 enum Op {
@@ -316,12 +317,19 @@ impl Model {
                             }
                         }
                     }
+                    // Issue #19: split each slashed amount between platform
+                    // and workers (SLASH_REDISTRIBUTE_BPS = 50%).
+                    let worker_portion = (slashed / 10_000) * SLASH_REDISTRIBUTE_BPS
+                        + (slashed % 10_000) * SLASH_REDISTRIBUTE_BPS / 10_000;
+                    let platform_portion = slashed - worker_portion;
+                    let redist_share = worker_portion / n;
+                    let redist_dust = worker_portion - redist_share * n;
                     for &w in workers {
-                        self.owed[w] += share;
+                        self.owed[w] += share + redist_share;
                     }
-                    self.move_tokens(T_CONTRACT, T_PLATFORM, fee + dust + slashed);
+                    self.move_tokens(T_CONTRACT, T_PLATFORM, fee + dust + platform_portion + redist_dust);
                     self.paid_to_platform += fee + dust;
-                    self.credited_to_workers += share * n;
+                    self.credited_to_workers += (share + redist_share) * n;
                     self.questions.get_mut(&qid).unwrap().status = Status::Resolved;
                     Ok(())
                 }

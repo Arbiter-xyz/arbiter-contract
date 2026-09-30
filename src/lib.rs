@@ -20,6 +20,14 @@ const SLASH_BPS: i128 = 500;
 /// could burn 5 USDC of that competitor's bond per win — see
 /// docs/economics/slashing-threat-model.md (attack A2) for the derivation.
 const SLASH_CAP_BPS_OF_AMOUNT: i128 = 10_000;
+/// Fraction of each slashed amount redistributed to the matching workers
+/// instead of going entirely to the platform. Set to 5000 (50%): half the
+/// slash rewards the workers who correctly out-voted the loser, sharpening
+/// the staking incentive. The remainder (BPS_DENOM - SLASH_REDISTRIBUTE_BPS)
+/// still flows to the platform. The split uses the same integer-division-
+/// with-remainder-to-platform pattern as the fee/pool/dust split in
+/// resolve(), so total funds are always conserved to the last stroop.
+const SLASH_REDISTRIBUTE_BPS: i128 = 5_000;
 const BPS_DENOM: i128 = 10_000;
 
 /// Ledgers per day at a 5s close time — the unit every duration below is
@@ -723,14 +731,16 @@ pub struct ResolvePreview {
     /// Integer-division remainder from splitting `pool` evenly across
     /// `workers`, which resolve() folds into the platform's take.
     pub dust: i128,
-    /// What EACH matching worker in `workers` would be credited.
+    /// What EACH matching worker in `workers` would be credited:
+    /// their base pool share plus their equal cut of the redistributed
+    /// slash (SLASH_REDISTRIBUTE_BPS fraction of total_slashed / n).
     pub share_per_worker: i128,
     /// Sum of what would be slashed from all `losing_workers` combined
     /// (each capped individually the same way `slash()` caps it; a
     /// worker with no stake contributes 0, same as the real resolve()).
     pub total_slashed: i128,
     /// What the platform address would end up with: fee + dust +
-    /// total_slashed.
+    /// platform half of total_slashed + any redistribution remainder dust.
     pub platform_take: i128,
 }
 
@@ -1910,12 +1920,37 @@ impl OracleEscrow {
 
         let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
         let mut platform_take = fee + dust;
+        // Accumulated per-worker bonus from slash redistribution (issue #19).
+        // For each loser SLASH_REDISTRIBUTE_BPS of their slashed amount goes
+        // to the matching workers instead of the platform. The portion is
+        // split evenly across n workers with integer division; any remainder
+        // (redist_dust) follows the same dust-to-platform convention as the
+        // fee/pool split above, guaranteeing funds are conserved to the last
+        // stroop.
+        let mut total_slashed: i128 = 0;
+        let mut slash_redist_per_worker: i128 = 0;
         for loser in losing_workers.iter() {
             let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
-            platform_take = platform_take
-                .checked_add(slashed)
-                .ok_or(ContractError::ArithmeticOverflow)?;
             if slashed > 0 {
+                // Split: worker_portion redistributed to winners,
+                // platform_portion retained by the platform.
+                let worker_portion = Self::mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
+                let platform_portion = slashed - worker_portion;
+                // Per-winner share of worker_portion; remainder to platform.
+                let redist_share = worker_portion / n;
+                let redist_dust = worker_portion - redist_share * n;
+                slash_redist_per_worker = slash_redist_per_worker
+                    .checked_add(redist_share)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(platform_portion)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(redist_dust)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                total_slashed = total_slashed
+                    .checked_add(slashed)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
                 WorkerSlashed {
                     question_id,
                     worker: loser,
@@ -1924,8 +1959,20 @@ impl OracleEscrow {
                 .publish(&env);
             }
         }
+        // Each matching worker earns their base share plus their cut of the
+        // redistributed slash. Both go through credit_owed() so the worker
+        // collects everything in one withdraw() call.
+        let worker_credit = share
+            .checked_add(slash_redist_per_worker)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         for worker in workers.iter() {
-            Self::credit_owed(&env, &question_token, &worker, share)?;
+            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
+            WorkerCredited {
+                question_id,
+                worker: worker.clone(),
+                amount: worker_credit,
+            }
+            .publish(&env);
             // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
             // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not
             // O(all workers ever staked).
@@ -1990,7 +2037,7 @@ impl OracleEscrow {
             question_id,
             worker_count: workers.len(),
             fee,
-            total_slashed: platform_take - fee - dust,
+            total_slashed,
         }
         .publish(&env);
         Ok(())
@@ -3601,12 +3648,20 @@ impl OracleEscrow {
             total_slashed += Self::preview_slash(&env, &loser, slash_cap);
         }
 
+        // Mirror the redistribution split from resolve(): SLASH_REDISTRIBUTE_BPS
+        // fraction of total_slashed goes to workers (split across n), the rest
+        // to the platform.
+        let worker_portion = Self::mul_bps(total_slashed, SLASH_REDISTRIBUTE_BPS);
+        let platform_portion = total_slashed - worker_portion;
+        let redist_share = worker_portion / n;
+        let redist_dust = worker_portion - redist_share * n;
+
         Ok(ResolvePreview {
             fee,
             dust,
-            share_per_worker,
+            share_per_worker: share_per_worker + redist_share,
             total_slashed,
-            platform_take: fee + dust + total_slashed,
+            platform_take: fee + dust + platform_portion + redist_dust,
         })
     }
 
