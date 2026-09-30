@@ -287,8 +287,14 @@ build.
 <!-- handsoff-issue-21 -->
 - #21: touch() rewrites u
 
-<!-- handsoff-issue-36 -->
-- #36: On-chain bonding-curve pricing
+<!-- handsoff-issue-44 -->
+- #44: Multisig/timelock admin
 
-<!-- handsoff-issue-38 -->
-- #38: Recurring/subscription questions
+<!-- handsoff-issue-45 -->
+- #45: DAO-controlled parameters
+
+<!-- handsoff-issue-53 -->
+- #53: On-chain worker category tags
+
+<!-- handsoff-issue-54 -->
+- #54: Category-specific stake minimums
