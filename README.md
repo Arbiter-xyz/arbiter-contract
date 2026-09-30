@@ -144,6 +144,18 @@ assert_eq!(client.status(&question_id), Status::Refunded);
 Building a Rust backend to actually consume this crate — that's a separate,
 much larger effort.
 
+## Economics, operations and pre-deployment testing
+
+- [docs/economics/incentive-alignment.md](docs/economics/incentive-alignment.md) —
+  agent-based simulation of fee/slash/quorum tuning (`sim/incentive/`), with
+  settlement math proven identical to `lib.rs` by `src/test_incentive_math.rs` (#117)
+- [docs/runbooks/refund-timeout-postmortem.md](docs/runbooks/refund-timeout-postmortem.md) —
+  what to do when `refund_timeout()` activity spikes (#118)
+- [docs/LOAD_TESTING.md](docs/LOAD_TESTING.md) — contract, network and backend
+  load harness (`src/test_load.rs`, `tools/load/`) (#119)
+- [docs/SHADOW_TESTING.md](docs/SHADOW_TESTING.md) — mirror production traffic
+  onto a candidate deployment and diff state (`tools/shadow/`) (#120)
+
 ## Cross-chain settlement bridge (design note)
 
 This is a **design note only**. No contract code changes land until the
