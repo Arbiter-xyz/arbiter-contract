@@ -20,7 +20,16 @@ actually matches this tag's source, rather than trusting the tag name alone.
 
 ## [Unreleased]
 
-No unreleased interface changes.
+Compatibility class **A (additive)**. See [docs/versioning.md](docs/versioning.md).
+
+- Added `set_paused(paused)` (admin-only) and `is_paused()`. While paused,
+  `submit*`, `deposit*`, `charge*` and `reopen_question` fail with the new
+  `ContractError::ContractPaused = 400`. Settlement (`resolve`/`refund`/
+  `refund_timeout`) and all withdrawals are unaffected. Emits
+  `paused_changed`. See [docs/circuit-breaker.md](docs/circuit-breaker.md).
+- Added `get_health()` returning `ContractHealth`: open question count,
+  cumulative opened/resolved/refunded totals, default-token TVL, the
+  admin/token/platform addresses, and the pause flag.
 
 ## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
 

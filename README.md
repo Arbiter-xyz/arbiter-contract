@@ -174,6 +174,34 @@ tradeoff: aggressive optimization can make a failed transaction's trap
 less readable, so debugging a revert may require a separate unoptimized
 build.
 
+## Reproducible build
+
+Use the pinned build instead of a bare `stellar contract build` whenever
+the resulting hash matters (release, deployment, or verifying a deployed
+contract):
+
+```sh
+docker build -t arbiter-contract-build .
+docker run --rm -v "$PWD:/src" arbiter-contract-build   # prints the WASM sha256
+# or, on a host with rustup + stellar-cli 27.1.0:
+./scripts/reproducible-build.sh
+```
+
+rustc (`rust-toolchain.toml`), crate versions (`Cargo.lock`, `--locked`),
+stellar-cli, build paths, and timestamps are all pinned. The
+`reproducible-build` workflow builds each commit on the runner and in the
+container and fails if the two hashes differ. Details and recorded hashes are
+in [docs/reproducible-builds.md](docs/reproducible-builds.md).
+
+## Circuit breaker and health view
+
+`get_health()` returns open/opened/resolved/refunded counts, default-token
+TVL, the configured admin/token/platform, and the pause flag in one call.
+`set_paused(true)` (admin-only) stops new funds from coming in; settlement and
+withdrawals keep working. See [docs/circuit-breaker.md](docs/circuit-breaker.md).
+Storage and error-code compatibility rules for changes to `lib.rs` are in
+[docs/versioning.md](docs/versioning.md).
+
 ## WASM hash verification
 
 CI proves the contract *compiles* to a valid, deployable WASM, but that alone
