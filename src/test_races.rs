@@ -129,11 +129,13 @@ impl World {
                 &QID,
                 &Vec::from_array(&self.env, self.workers_a.clone()),
                 &Vec::from_array(&self.env, [self.loser.clone()]),
+                &BytesN::from_array(&self.env, &[0u8; 32]),
             )),
             Racer::ResolveB => flatten(c.try_resolve(
                 &QID,
                 &Vec::from_array(&self.env, self.workers_b.clone()),
                 &Vec::new(&self.env),
+                &BytesN::from_array(&self.env, &[0u8; 32]),
             )),
             Racer::AdminRefund => flatten(c.try_refund(&QID)),
             Racer::TimeoutRefund | Racer::TimeoutRefundByPayer => flatten(c.try_refund_timeout(&QID)),
@@ -453,7 +455,7 @@ fn admin_rotation_proposal_leaves_current_authority_active_during_delay() {
                 sub_invokes: &[],
             },
         }])
-        .try_resolve(&QID, &workers, &losers);
+        .try_resolve(&QID, &workers, &losers, &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(res, Ok(()));
     assert_eq!(w.snapshot().status, Status::Resolved);
 }

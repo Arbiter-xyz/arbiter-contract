@@ -49,7 +49,7 @@ fn escalate_rejects_non_pending_question() {
     let worker = Address::generate(&f.env);
     let wv = Vec::from_array(&f.env, [worker.clone()]);
     let lv: Vec<Address> = Vec::new(&f.env);
-    c.resolve(&1, &wv, &lv);
+    c.resolve(&1, &wv, &lv, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     // Trying to escalate a Resolved question must fail.
     let res = c.try_escalate(&1, &wv, &lv);

@@ -79,7 +79,7 @@ fn instant_refund_on_already_resolved_question_fails() {
 
     let workers = Vec::from_array(&f.env, [worker]);
     let losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &losers);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let res = c.try_instant_refund(&underwriter, &1);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
