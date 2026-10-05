@@ -116,3 +116,115 @@ which is a much larger change than the forwarder pattern above.
   match what `refund()`/`refund_timeout()` will pay?
 
 No contract code changes land until these are settled.
+
+# Stealth-address worker identity (issue #58)
+
+## Verdict
+
+Documentation only. No storage schema, `resolve()`, or `credit_owed()`
+changes land until the consolidation tension below has an actual
+resolution. This note states the tension, picks a resolution, and answers
+the three open questions from the issue.
+
+## The tension with the existing `Owed`/`Stake` accrual model
+
+Every worker-facing balance in `src/lib.rs` is deliberately persistent and
+linkable per `Address`:
+
+- `get_owed()` accumulates across `resolve()` calls, so a worker can answer
+  many questions and `withdraw()` once (see
+  `withdraw_accumulates_across_multiple_resolved_questions_before_a_single_payout`).
+- `get_stake()` is a single running total, not a per-question figure.
+
+A stealth address is, by definition, a fresh `Address` per question. It
+cannot be the same `Address` that accumulated `Owed`/`Stake` from a prior
+question. So passing a per-question stealth address into `resolve()`'s
+`workers` list forces one of two bad outcomes:
+
+1. **Abandon the accrual model per stealth identity** — each stealth
+   address holds its own `Owed`, and the worker is back to N discrete
+   payouts, exactly what round 2's "streaming settlement" was built to
+   avoid.
+2. **Require the worker to later prove control of many stealth addresses
+   to consolidate** — which is the consolidation problem this note must
+   solve without deanonymizing the worker in the act of consolidating.
+
+## Resolution: consolidate via a worker-controlled accumulator, not by
+linking stealth addresses on-chain
+
+The resolution is to keep `Owed`/`Stake` keyed by the **persistent worker
+address** and never let a stealth address hold a balance at all. A stealth
+address is used only as the *authorization* for a `resolve()` answer; the
+credit is routed to the worker's persistent accumulator in the same call.
+
+Concretely, the design (not implemented here) is:
+
+- The worker publishes a **scan key** and a **spend/accumulator address**
+  (the persistent `Address` that already holds `Owed`/`Stake`).
+- For each question the worker derives a one-time stealth `Address` from
+  the scan key. That stealth address is what appears in `resolve()`'s
+  `workers` list and what satisfies `worker.require_auth()` — Soroban
+  treats it like any other `Address`.
+- `credit_owed()` credits the **accumulator address**, not the stealth
+  address. The stealth address is a proof-of-participation token, not a
+  balance holder. This preserves the existing accrual model exactly:
+  `get_owed()` still accumulates across `resolve()` calls on one
+  persistent `Address`, and `withdraw()` is still a single payout.
+- The link between a stealth address and the accumulator is proven
+  **off-chain** (the worker signs a statement binding the stealth address
+  to the accumulator) and is never written to contract storage, so the
+  on-chain record does not link the two.
+
+This is the "actual resolution" the acceptance criteria require: the
+accrual model is not abandoned, and consolidation does not require the
+worker to reveal a set of stealth addresses in a withdrawal transaction.
+
+## Open question 1: withdrawing scattered earnings without linking addresses
+
+Under the resolution above, earnings are **not scattered** — they accrue
+on the single accumulator address. The worker calls `withdraw()` once on
+the accumulator, exactly as today. No withdrawal transaction ever names a
+stealth address, so there is nothing to link in the withdrawal tx. The
+unlinkability lives in the *answer* path (each `resolve()` sees a fresh
+stealth address), not the *payout* path (one persistent accumulator).
+
+If a future design instead lets stealth addresses hold balances, the
+consolidation step would have to be a privacy-preserving proof (e.g. a
+zero-knowledge set-membership proof that the accumulator controls N
+stealth addresses) rather than a transaction that names them. That is a
+much larger change and is explicitly not the chosen path here.
+
+## Open question 2: does staking make sense per stealth address?
+
+No. `Stake` is a standing, reusable bond — a single running total per
+worker, and #54's category-specific stake minimums assume stake is an
+identifiable per-worker figure. A per-question stealth address cannot hold
+a standing bond without either fragmenting the bond across identities or
+re-linking them. So staking stays on the **persistent accumulator
+address**; stealth addresses apply only to unstaked/casual participation,
+or to staked workers who still answer under a stealth address while their
+bond remains on the accumulator. This is the point of real tension with
+#54 and is called out here rather than papered over.
+
+## Open question 3: privacy from whom?
+
+This design targets **privacy from public chain observers** (and, as a
+consequence, from other workers): an observer cannot link the fresh
+address in each `resolve()` to the worker's persistent accumulator. It
+does **not** provide privacy from the platform, because the platform sees
+the off-chain binding proof between the stealth address and the
+accumulator in order to route credit. If the goal were privacy from the
+platform, the binding proof would have to be verified on-chain (a
+zero-knowledge proof), which is a different and larger design. Stating
+this explicitly is required by the acceptance criteria.
+
+## What still blocks implementation
+
+- The off-chain binding proof format (what the worker signs to bind a
+  stealth address to the accumulator) must be specified before any
+  `resolve()`/`credit_owed()` change.
+- Whether the platform can be trusted to route credit to the accumulator
+  without seeing the binding, or whether an on-chain proof is required,
+  depends on the answer to open question 3 above.
+
+No contract code changes land until these are settled.
