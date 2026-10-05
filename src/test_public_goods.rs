@@ -47,7 +47,7 @@ fn resolve_routes_public_goods_share_alongside_platform_fee() {
     let platform_before = tc.balance(&f.platform);
     let pg_before = tc.balance(&pg_addr);
 
-    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let platform_after = tc.balance(&f.platform);
     let pg_after = tc.balance(&pg_addr);
@@ -101,7 +101,7 @@ fn resolve_dust_lands_entirely_on_platform() {
     let pg_before = tc.balance(&pg_addr);
 
     c.submit(&f.payer, &99, &tiny_amount);
-    c.resolve(&99, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env));
+    c.resolve(&99, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let platform_after = tc.balance(&f.platform);
     let pg_after = tc.balance(&pg_addr);
@@ -143,7 +143,7 @@ fn default_behavior_with_zero_bps_matches_single_transfer() {
 
     let platform_before = tc.balance(&f.platform);
 
-    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let platform_after = tc.balance(&f.platform);
 
