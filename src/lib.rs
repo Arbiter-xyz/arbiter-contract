@@ -355,6 +355,14 @@ pub enum DataKey {
     /// forfeits it to the platform (challenge was spurious — the window
     /// elapsed with no dispute flag, or the challenge was overruled).
     ChallengerBond(u64),
+    /// #105 delegated resolver: an optional Address that is allowed to call
+    /// resolve() in place of the admin. Absent (storage key not present)
+    /// means no resolver has been set and only the admin may call resolve().
+    /// Stored in instance storage alongside Admin so a single bump_instance()
+    /// extends both. Set (and cleared) exclusively via set_resolver(), which
+    /// is admin-gated. Does NOT grant access to refund(), charge(),
+    /// set_admin(), set_timeout_ledgers(), or any other admin-only function.
+    Resolver,
 }
 
 #[contracttype]
@@ -603,6 +611,23 @@ pub struct QuestionResolved {
     pub worker_count: u32,
     pub fee: i128,
     pub total_slashed: i128,
+}
+
+/// Issue #59: on-chain answer notarization.
+///
+/// `question_notarized` topics: question_id; data: answer_hash.
+/// Emitted by `resolve()` at the moment a question moves to `Resolved`.
+/// The caller (trusted admin) supplies `answer_hash` — a SHA-256 (or
+/// equivalent) digest of the canonical question + consensus-answer text.
+/// Anyone who holds the original question/answer text can recompute the
+/// hash and independently confirm it matches what was settled on-chain.
+/// No full text is stored on-chain (see issue #56 for that discussion).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestionNotarized {
+    #[topic]
+    pub question_id: u64,
+    pub answer_hash: BytesN<32>,
 }
 
 /// `worker_slashed` topics: question_id, worker; data: amount.
@@ -1728,13 +1753,18 @@ impl OracleEscrow {
     /// SLASH_CAP_BPS_OF_AMOUNT of this question's amount, to the platform; a
     /// worker with no stake is simply skipped, so staking remains opt-in and
     /// slashing can never fail this call.
+    /// Issue #59: `answer_hash` is a caller-supplied SHA-256 (or equivalent)
+    /// digest of the canonical question + consensus-answer text. The contract
+    /// emits it as a `QuestionNotarized` event so any observer can
+    /// independently verify the settled answer without querying the backend.
     pub fn resolve(
         env: Env,
         question_id: u64,
         workers: Vec<Address>,
         losing_workers: Vec<Address>,
+        answer_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
+        Self::require_resolver_or_admin(&env)?;
         Self::settle_resolution(&env, question_id, workers, losing_workers)
     }
 
@@ -1802,7 +1832,7 @@ impl OracleEscrow {
             }
         }
 
-        Self::settle_resolution(&env, question_id, workers, losing_workers)
+        Self::settle_resolution(&env, question_id, workers, losing_workers, None)
     }
 
     /// Ok(None) when every answer agrees, Ok(Some(i)) when answers[i] alone
@@ -1872,6 +1902,7 @@ impl OracleEscrow {
         question_id: u64,
         workers: Vec<Address>,
         losing_workers: Vec<Address>,
+        answer_hash: Option<BytesN<32>>,
     ) -> Result<(), ContractError> {
         let env = env.clone();
         if workers.is_empty() {
@@ -2033,6 +2064,14 @@ impl OracleEscrow {
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        // Issue #59: emit the notarization event when the caller supplied a hash.
+        if let Some(hash) = answer_hash {
+            QuestionNotarized {
+                question_id,
+                answer_hash: hash,
+            }
+            .publish(&env);
+        }
         QuestionResolved {
             question_id,
             worker_count: workers.len(),
@@ -2629,6 +2668,38 @@ impl OracleEscrow {
         env.storage().instance().get(&AssetKey::PendingAdminRotation)
     }
 
+    /// #105: Admin-only. Delegates the ability to call resolve() to
+    /// `resolver`. Pass `None` to clear the delegation and fall back to
+    /// admin-only access.
+    ///
+    /// The resolver address can call resolve() (and only resolve()) — it
+    /// cannot call refund(), charge(), set_admin(), set_timeout_ledgers(),
+    /// or any other admin-gated function. This lets the backend run routine
+    /// settlement on a narrower, lower-value key than the one controlling
+    /// fund recovery and admin succession.
+    ///
+    /// Calling with `Some(resolver)` is idempotent: a second call replaces
+    /// the previous delegate. Calling with `None` revokes the delegation;
+    /// after revocation only the admin may call resolve() again.
+    pub fn set_resolver(
+        env: Env,
+        resolver: Option<Address>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        match &resolver {
+            Some(addr) => env.storage().instance().set(&DataKey::Resolver, addr),
+            None => env.storage().instance().remove(&DataKey::Resolver),
+        }
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// #105: Returns the currently configured resolver address, or `None`
+    /// if no resolver has been set (admin-only access to resolve()).
+    pub fn get_resolver(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Resolver)
+    }
+
     /// Admin-only. Updates the GLOBAL default timeout_ledgers used for
     /// questions submitted from now on. Already-pending questions are
     /// unaffected — each one's deadline is fixed forever from the value
@@ -3193,6 +3264,36 @@ impl OracleEscrow {
             .get(&DataKey::Admin)
             .ok_or(ContractError::NotInitialized)?;
         admin.require_auth();
+        Ok(())
+    }
+
+    /// #105: Accepts a call from either the configured resolver OR the admin.
+    ///
+    /// Check order:
+    /// 1. If a resolver is set (`DataKey::Resolver` present), require that
+    ///    address's auth.  The admin is NOT required — the resolver alone is
+    ///    sufficient.
+    /// 2. If no resolver is set, fall back to requiring the admin's auth,
+    ///    exactly as `require_admin()` does.
+    ///
+    /// The resolver has no authority over any other admin-gated function;
+    /// this helper is only called from `resolve()`.
+    fn require_resolver_or_admin(env: &Env) -> Result<(), ContractError> {
+        // NotInitialized guard: Admin must exist for the contract to be live.
+        let _admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        if let Some(resolver) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Resolver)
+        {
+            resolver.require_auth();
+        } else {
+            _admin.require_auth();
+        }
         Ok(())
     }
 
@@ -5059,3 +5160,5 @@ mod test_migrate_balances;
 mod test_second_tier_quorum;
 #[cfg(test)]
 mod test_bonded_challenger;
+#[cfg(test)]
+mod test_delegated_resolver;

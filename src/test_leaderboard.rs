@@ -17,7 +17,7 @@ fn resolve_updates_the_on_chain_leaderboard_for_a_credited_worker() {
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1.clone()]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     assert_eq!(c.get_resolved_count(&w1), 1);
     let board = c.get_leaderboard();
@@ -36,7 +36,7 @@ fn leaderboard_stays_capped_at_the_configured_size() {
         let w = Address::generate(&f.env);
         let workers = Vec::from_array(&f.env, [w]);
         let no_losers = Vec::new(&f.env);
-        c.resolve(&id, &workers, &no_losers);
+        c.resolve(&id, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     }
 
     let board = c.get_leaderboard();
@@ -54,11 +54,11 @@ fn get_leaderboard_returns_entries_sorted_by_resolved_count_descending() {
 
     // w1 gets credited twice, w2 once.
     c.submit(&f.payer, &1, &AMOUNT);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &no_losers);
+    c.resolve(&1, &Vec::from_array(&f.env, [w1.clone()]), &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     c.submit(&f.payer, &2, &AMOUNT);
-    c.resolve(&2, &Vec::from_array(&f.env, [w1.clone()]), &no_losers);
+    c.resolve(&2, &Vec::from_array(&f.env, [w1.clone()]), &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     c.submit(&f.payer, &3, &AMOUNT);
-    c.resolve(&3, &Vec::from_array(&f.env, [w2.clone()]), &no_losers);
+    c.resolve(&3, &Vec::from_array(&f.env, [w2.clone()]), &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let board = c.get_leaderboard();
     assert_eq!(board.get(0).unwrap(), (w1, 2));

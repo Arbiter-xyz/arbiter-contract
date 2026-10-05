@@ -105,7 +105,7 @@ fn participant_index_tracks_worker_credited_via_resolve() {
     let worker = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [worker.clone()]);
     let losers: Vec<Address> = Vec::new(&f.env);
-    c.resolve(&1, &workers, &losers);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let count = c.get_participant_count();
     assert!(count >= 1, "expected worker to be tracked after resolve");
@@ -140,7 +140,7 @@ fn migrate_balances_moves_stake_owed_and_balance_atomically() {
     src_c.submit(&payer, &1, &AMOUNT);
     let wv = Vec::from_array(&env, [worker.clone()]);
     let lv: Vec<Address> = Vec::new(&env);
-    src_c.resolve(&1, &wv, &lv);
+    src_c.resolve(&1, &wv, &lv, &BytesN::from_array(&env, &[0u8; 32]));
 
     // Payer2: prepaid balance.
     let payer2 = Address::generate(&env);

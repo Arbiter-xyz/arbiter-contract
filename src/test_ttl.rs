@@ -396,6 +396,7 @@ fn archived_question_can_still_be_resolved_by_the_backend() {
         &1,
         &Vec::from_array(&w.env, [winner.clone()]),
         &Vec::new(&w.env),
+        &BytesN::from_array(&w.env, &[0u8; 32]),
     );
     assert!(w.env.cost_estimate().resources().disk_read_entries > 0);
     assert_eq!(c.get_owed(&winner), 2_000_000);

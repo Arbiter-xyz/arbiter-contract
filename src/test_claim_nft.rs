@@ -33,7 +33,7 @@ fn resolve_then_mint_claim_records_the_question_id() {
 
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1.clone()]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     c.mint_claim(&1);
     let claim = c.get_claim(&1).unwrap();
@@ -51,7 +51,7 @@ fn claim_record_is_non_transferable() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     c.mint_claim(&1);
 
     let claim = c.get_claim(&1).unwrap();
@@ -66,7 +66,7 @@ fn mint_claim_cannot_be_called_twice() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     c.mint_claim(&1);
     let res = c.try_mint_claim(&1);
