@@ -301,3 +301,9 @@ build.
 
 <!-- handsoff-issue-54 -->
 - #54: Category-specific stake minimums
+
+<!-- handsoff-issue-41 -->
+- #41: Stake-weighted voting in resolve()
+
+<!-- handsoff-issue-43 -->
+- #43: Slashing insurance for workers

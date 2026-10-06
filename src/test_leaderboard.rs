@@ -2,6 +2,7 @@
 
 //! Issue #83: bounded on-chain leaderboard, maintained inside resolve()'s
 //! per-worker credit loop.
+//! Issue #42: on-chain decaying reputation score, updated in the same loop.
 
 use super::*;
 use crate::test::{client, setup, AMOUNT};
@@ -62,4 +63,41 @@ fn get_leaderboard_returns_entries_sorted_by_resolved_count_descending() {
     let board = c.get_leaderboard();
     assert_eq!(board.get(0).unwrap(), (w1, 2));
     assert_eq!(board.get(1).unwrap(), (w2, 1));
+}
+
+#[test]
+fn resolve_updates_reputation_for_winners_and_losers() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    let loser = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [winner.clone()]);
+    let losers = Vec::from_array(&f.env, [loser.clone()]);
+    c.resolve(&1, &workers, &losers);
+
+    assert_eq!(c.get_reputation(&winner), REPUTATION_WIN_DELTA);
+    assert_eq!(c.get_reputation(&loser), -REPUTATION_LOSS_DELTA);
+}
+
+#[test]
+fn on_chain_reputation_decays_over_elapsed_ledgers() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let w = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [w.clone()]);
+    let no_losers = Vec::new(&f.env);
+    c.resolve(&1, &workers, &no_losers);
+
+    assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA);
+
+    // Advance the ledger sequence so the lazily-computed decay kicks in.
+    f.env.ledger().set_sequence_number(
+        f.env.ledger().sequence() + REPUTATION_DECAY_INTERVAL_LEDGERS,
+    );
+
+    assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA - REPUTATION_DECAY_PER_INTERVAL);
 }

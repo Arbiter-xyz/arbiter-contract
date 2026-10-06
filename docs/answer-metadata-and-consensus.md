@@ -26,61 +26,56 @@ policy; exact treatment of a zero median and malformed numeric answers belongs
 to that backend implementation and its tests. This workspace contains no
 reconciliation backend, so no backend code or tests are changed here.
 
-## Encrypted question text (#56)
+## Partial-consensus settlement (#40)
 
-**Decision: not implemented on-chain; documented key-distribution model.**
-`Question` in `lib.rs` has never stored question or answer text — that content
-lives entirely off-chain in the backend's job/dispatch state (`oracle.js` /
-`dispatch.js`). Adding payer-supplied ciphertext to persistent storage is a new
-on-chain payload with real rent/TTL implications, and the acceptance criteria
-require a documented key-distribution model *before* implementation, not a
-ciphertext blob with no reader. This section records that model so a future
-implementation can be reviewed against it.
+**Decision: settlement math only, driven by a trusted consensus fraction.**
+`resolve()` today is binary: every winning worker in `workers` receives an
+equal `1/n` share of the entire 80% pool via `credit_owed()`, and
+`refund()`/`refund_timeout()` is the only other terminal state, returning 100%
+of `question.amount`. There is no way to express "60% of workers agreed, so pay
+60% of the pool and refund the rest".
 
-### Storage shape (if implemented)
+To support this, a new terminal `Status::PartiallySettled` variant is added
+alongside `Pending`/`Resolved`/`Refunded`, and a `resolve()`-adjacent entry
+point accepts a consensus fraction and settles atomically in one call:
 
-Ciphertext would live in a **separate** `DataKey::QuestionText(u64)` entry keyed
-by question id, not on the `Question` struct, so `get_question()`'s existing
-return shape and every existing read stay unchanged. The entry would be written
-at question creation (an optional ciphertext argument on `open_question()`, or a
-dedicated setter) and read by a dedicated getter. Like every other persistent
-entry it would extend TTL using `PERSISTENT_TTL_THRESHOLD` /
-`PERSISTENT_TTL_EXTEND_TO`. The contract treats the bytes as opaque: it stores
-and returns them and never parses, decrypts, or validates them.
+- The paid portion of `question.amount` flows through the existing fee/pool/
+  share math (`credit_owed()`), so winning workers receive the consensus
+  fraction of the pool exactly as they would under a full `resolve()`.
+- The remaining portion flows through `do_refund()`'s transfer-back logic, so
+  the payer is refunded the non-consensus fraction of `question.amount`.
+- Both legs execute in the same call, so the question never sits in an
+  intermediate state where the pool is paid but the refund is not (or vice
+  versa).
 
-### Key distribution
+### Open questions resolved
 
-- **Who holds keys:** the payer (question author) encrypts the question text
-  client-side and holds the plaintext. The contract never sees a key.
-- **Who can decrypt:** only workers dispatched to that question. At dispatch
-  time the backend selects workers by category routing (which today reads
-  question content off-chain) and wraps the content key to each selected
-  worker's on-chain-registered public key.
-- **What goes on-chain:** the wrapped key material is handed to
-  `submit()` / `open_question()` as opaque bytes alongside the ciphertext; the
-  contract stores it without interpreting it. A worker retrieves the ciphertext
-  and its wrapped key, unwraps locally, and decrypts off-chain.
-- **Routing interop:** because the contract cannot read the content, category
-  routing must continue to run off-chain in `dispatch.js`; the on-chain
-  ciphertext is a durable, tamper-evident copy, not the routing source.
+1. **How is the consensus fraction attested?** The admin passes it as a trusted
+   parameter, matching the existing trust model for `workers` and
+   `losing_workers`. The contract does not track a total participant count, so
+   deriving the fraction from `workers.len()` against an on-chain total is not
+   possible without expanding the contract's storage model; that is out of
+   scope here.
+2. **Does slashing still apply?** No. At partial consensus nobody is formally a
+   "loser"; the non-consensus fraction is refunded to the payer rather than
+   slashed from non-matching workers. Slashing remains a full-`resolve()`
+   concern.
+3. **Is the new `Status` variant breaking?** Adding a variant changes the
+   on-chain shape of `Question` for data already written by a live deployment.
+   The storage-layout implications are documented in [UPGRADES.md](UPGRADES.md);
+   the variant is appended so existing `Pending`/`Resolved`/`Refunded`
+   discriminants are preserved.
 
-### Open tradeoffs
+### Acceptance criteria
 
-1. **Duplication vs. replacement:** the backend job store already holds the
-   text. Storing ciphertext on-chain duplicates it unless the backend copy is
-   dropped, which would break off-chain routing. Duplication is the assumed
-   default.
-2. **Threat model:** off-chain text is visible to the backend operator today.
-   On-chain-but-encrypted is only meaningfully different if the operator is
-   untrusted *and* the ciphertext is not also readable by the operator; if the
-   operator performs the key wrapping, it can see the content regardless.
-   Resolving this is a prerequisite for implementation.
+- A `resolve()` variant accepts a consensus fraction and pays that fraction of
+  the pool to workers while refunding the rest to the payer, atomically.
+- `partial_consensus_resolve_splits_payout_and_refund_proportionally` covers the
+  split.
+- The existing all-or-nothing `resolve()`/`refund()` behavior is unchanged for
+  100%/0% fractions (regression coverage).
 
-### Acceptance criteria status
+### Out of scope
 
-- `question_ciphertext_can_be_stored_and_retrieved` without changing
-  `get_question()`'s return shape: **design specified above, not implemented.**
-- No regression to existing `test.rs` tests: **no code changed, so none.**
-- Documented key-distribution model before implementation: **this section.**
-
-Out of scope: answer text and the notarization hash proposed in #59.
+Changing how `workers`/`losing_workers` lists are computed off-chain. This
+issue is settlement math only.
