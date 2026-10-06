@@ -155,6 +155,9 @@ much larger effort.
   load harness (`src/test_load.rs`, `tools/load/`) (#119)
 - [docs/SHADOW_TESTING.md](docs/SHADOW_TESTING.md) — mirror production traffic
   onto a candidate deployment and diff state (`tools/shadow/`) (#120)
+- [docs/RPC_CHAOS_TESTING.md](docs/RPC_CHAOS_TESTING.md) — inject RPC faults under
+  the real question lifecycle and prove nothing is left stuck Pending
+  (`tools/chaos/`, `src/test_rpc_chaos.rs`) (#121)
 
 ## Cross-chain settlement bridge (design note)
 

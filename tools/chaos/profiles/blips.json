@@ -1,0 +1,12 @@
+{
+  "_comment": "Random transient faults on every call site, at rates where retry.js's second attempt should absorb most of them. The realistic baseline profile.",
+  "default": {
+    "p": { "delay": 0.15, "hang": 0.05, "httpError": 0.05, "rpcError": 0.05 },
+    "delayMs": [200, 3000],
+    "hangMs": 30000
+  },
+  "methods": {
+    "sendTransaction": { "p": { "dropAfter": 0.1 } },
+    "getTransaction": { "p": { "hang": 0.1 } }
+  }
+}

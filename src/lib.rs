@@ -5161,4 +5161,4 @@ mod test_second_tier_quorum;
 #[cfg(test)]
 mod test_bonded_challenger;
 #[cfg(test)]
-mod test_delegated_resolver;
+mod test_rpc_chaos;
