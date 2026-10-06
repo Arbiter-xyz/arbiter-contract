@@ -246,7 +246,7 @@ fn resolve_splits_pool_and_pays_fee() {
     let w2 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1.clone(), w2.clone()]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     // fee = 2_500_000 * 2000 / 10000 = 500_000; pool = 2_000_000; share = 1_000_000 each, no dust.
     // Matching workers are CREDITED (get_owed), not transferred directly —
@@ -280,7 +280,7 @@ fn resolve_sends_dust_to_platform_when_pool_does_not_divide_evenly() {
     let w2 = Address::generate(&f.env);
     let w3 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1.clone(), w2.clone(), w3.clone()]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     // fee = 500_000, pool = 2_000_000, share = 666_666, dust = 2
     assert_eq!(c.get_owed(&w1), 666_666);
@@ -306,7 +306,7 @@ fn resolve_with_worker_count_exceeding_pool_leaves_each_worker_credited_zero() {
             Address::generate(&f.env),
         ],
     );
-    c.resolve(&1, &worker_list, &Vec::new(&f.env));
+    c.resolve(&1, &worker_list, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     for worker in worker_list.iter() {
         assert_eq!(c.get_owed(&worker), 0);
@@ -346,7 +346,7 @@ fn resolve_with_zero_workers_fails() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let workers = Vec::new(&f.env);
-    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env));
+    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::NoWorkers)));
 }
 
@@ -357,8 +357,8 @@ fn resolve_twice_fails() {
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
-    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
 }
 
@@ -393,7 +393,7 @@ fn refund_after_resolve_is_rejected() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let res = c.try_refund(&1);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
@@ -404,7 +404,7 @@ fn resolve_and_refund_on_unknown_id_fails() {
     let f = setup();
     let c = client(&f);
     let w1 = Address::generate(&f.env);
-    let res = c.try_resolve(&99, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    let res = c.try_resolve(&99, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuestionNotFound)));
 
     let res = c.try_refund(&99);
@@ -606,7 +606,7 @@ fn timeout_refund_after_resolve_is_rejected() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     f.env.ledger().with_mut(|li| {
         li.sequence_number += TIMEOUT_LEDGERS + 1;
@@ -1630,8 +1630,8 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
     let worker1 = Address::generate(&f.env);
     let worker2 = Address::generate(&f.env);
 
-    c.resolve(&1, &Vec::from_array(&f.env, [worker1.clone()]), &Vec::new(&f.env));
-    c.resolve(&2, &Vec::from_array(&f.env, [worker2.clone()]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [worker1.clone()]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+    c.resolve(&2, &Vec::from_array(&f.env, [worker2.clone()]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     assert_eq!(c.get_question(&1).status, Status::Resolved);
     assert_eq!(c.get_question(&2).status, Status::Resolved);

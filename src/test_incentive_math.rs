@@ -143,7 +143,7 @@ fn check_resolve(amount: i128, winners: u32, losers: &[LoserSpec]) {
     for a in &loser_addrs {
         l.push_back(a.clone());
     }
-    c.resolve(&1, &w, &l);
+    c.resolve(&1, &w, &l, &BytesN::from_array(&m.env, &[0u8; 32]));
 
     let mut sim_losers: StdVec<Stake> = losers
         .iter()

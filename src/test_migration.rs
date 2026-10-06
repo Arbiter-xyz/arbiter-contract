@@ -156,7 +156,7 @@ fn settled_questions_leave_the_index_and_the_rest_stay_listed() {
     p.env.mock_all_auths();
     let c = OracleEscrowClient::new(&p.env, &p.old);
     let w = Address::generate(&p.env);
-    c.resolve(&1, &Vec::from_array(&p.env, [w]), &Vec::new(&p.env)); // head
+    c.resolve(&1, &Vec::from_array(&p.env, [w]), &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32])); // head
     c.refund(&6); // tail
     c.refund(&3); // middle
     p.env.ledger().set_sequence_number(10_000 + TIMEOUT);
@@ -301,7 +301,7 @@ fn migrated_question_settles_normally_on_the_target_and_is_dead_on_the_source() 
 
     let old_c = OracleEscrowClient::new(&p.env, &p.old);
     assert_eq!(
-        old_c.try_resolve(&1, &workers, &Vec::new(&p.env)),
+        old_c.try_resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32])),
         Err(Ok(ContractError::QuestionNotPending))
     );
     assert_eq!(
@@ -314,7 +314,7 @@ fn migrated_question_settles_normally_on_the_target_and_is_dead_on_the_source() 
         Err(Ok(ContractError::QuestionNotPending))
     );
 
-    OracleEscrowClient::new(&p.env, &p.new).resolve(&1, &workers, &Vec::new(&p.env));
+    OracleEscrowClient::new(&p.env, &p.new).resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(
         OracleEscrowClient::new(&p.env, &p.new).get_owed(&w),
         AMOUNT * 8 / 10

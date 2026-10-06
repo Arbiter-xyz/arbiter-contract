@@ -509,7 +509,7 @@ impl Harness {
             Op::WithdrawBalance { payer, amount } => out(c.try_withdraw_balance(&self.payers[payer], &amount)),
             Op::Charge { payer, qid, amount } => out(c.try_charge(&self.payers[payer], &qid, &amount)),
             Op::Resolve { qid, ref workers, ref losers } => {
-                out(c.try_resolve(&qid, &self.addrs(workers), &self.addrs(losers)))
+                out(c.try_resolve(&qid, &self.addrs(workers), &self.addrs(losers), &BytesN::from_array(&env, &[0u8; 32])))
             }
             Op::Refund { qid } => out(c.try_refund(&qid)),
             Op::RefundTimeout { qid } => out(c.try_refund_timeout(&qid)),

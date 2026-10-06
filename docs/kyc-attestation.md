@@ -49,3 +49,68 @@ decision.
   valid-signature round trip isn't exercised because this crate has no
   ed25519-signing dev-dependency (the contract only verifies, it never
   signs).
+
+## ZK proof of worker qualification (issue #55)
+
+### Credential schema and issuer model (documented before storage is finalized)
+
+Per #55's acceptance criteria, the credential schema and issuer model are
+specified here before any storage schema is finalized. The credential
+circuit itself (what is proven, against which issuer/registry) is out of
+scope for this contract change and must be specified first.
+
+- **Statement proven:** "the prover holds a valid qualification credential
+  issued by a recognized issuer for the worker's declared category, and
+  has not already used this credential in this round." The proof reveals
+  neither the credential's contents nor the worker's identity beyond the
+  `Address` that submits it.
+- **Public inputs:** a `nullifier` (unique per credential, prevents
+  double-use) and the round/epoch the credential is valid for. The
+  worker's `Address` is *not* a public input — it is bound only by the
+  transaction that submits the proof.
+- **Private inputs:** the issuer's signature over the credential, the
+  credential's category/expiry, and the worker's secret.
+- **Issuer model:** a single trusted issuer public key configured by the
+  admin (mirroring `set_kyc_attestor`), not a registry of many issuers.
+  Building the credential-issuance system is explicitly out of scope; this
+  is the verifier integration only.
+
+### Verifier integration
+
+- `set_qualification_verifier(vk)` — admin-only, configures the Groth16
+  verification key (or, for the stubbed/mock path, the trusted verifier
+  public key).
+- `verify_qualification(proof)` — permissionless. Verifies a
+  (stubbed/mock) qualification proof and stores a boolean/nullifier keyed
+  by the submitting worker `Address`. A proof that fails verification
+  stores nothing and returns `false`.
+- `is_qualified(worker)` — read-only, `true` iff a valid qualification
+  proof has been recorded for `worker`.
+
+### Gating `resolve()`
+
+`resolve()`'s `workers` list is gated on `is_qualified()` alongside the
+`get_stake()` check: a worker lacking a valid qualification proof is
+excluded from `workers` (and therefore from `credit_owed()`), matching the
+`resolve_rejects_a_worker_without_a_valid_qualification_proof` test.
+
+### Open questions / tradeoffs (deferred)
+
+1. What the credential attests to and who issues it — schema above is the
+   proposed answer; the circuit is out of scope.
+2. Proving qualification without revealing identity does not conflict with
+   `resolve()` crediting a specific `Address`: the proof is bound to the
+   submitting `Address` by the transaction, so `credit_owed()` still knows
+   exactly whom to credit.
+3. Per-call Groth16 verification cost vs. the free `get_stake()` read is
+   left as a follow-up measurement; the stubbed/mock path keeps tests
+   cheap until the real circuit lands.
+
+### Simplifications / out of scope
+
+- No credential-issuance system — verifier integration only, per the
+  issue's stated scope.
+- No multi-issuer support or issuer rotation history.
+- The stubbed/mock proof path is what the test contract instance exercises;
+  the real Groth16 host-function path is a drop-in replacement once the
+  circuit is specified.
