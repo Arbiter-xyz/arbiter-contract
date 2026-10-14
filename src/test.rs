@@ -186,7 +186,7 @@ pub(crate) fn token_admin_client(f: &Fixture) -> token::StellarAssetClient<'_> {
 fn submit_locks_funds() {
     let f = setup();
     let c = client(&f);
-    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.submit(&f.payer, &1, &AMOUNT);
 
     assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT);
     let q = c.get_question(&1);
@@ -206,8 +206,8 @@ fn submit_locks_funds() {
 fn duplicate_submit_fails() {
     let f = setup();
     let c = client(&f);
-    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
-    let res = c.try_submit(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let res = c.try_submit(&f.payer, &1, &AMOUNT);
     assert_eq!(res, Err(Ok(ContractError::QuestionAlreadyExists)));
 }
 
@@ -215,9 +215,9 @@ fn duplicate_submit_fails() {
 fn submit_zero_or_negative_amount_fails() {
     let f = setup();
     let c = client(&f);
-    let res = c.try_submit(&f.payer, &f.token_address, &1, &0);
+    let res = c.try_submit(&f.payer, &1, &0);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
-    let res = c.try_submit(&f.payer, &f.token_address, &2, &-1);
+    let res = c.try_submit(&f.payer, &2, &-1);
     assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
 }
 
@@ -227,11 +227,11 @@ fn charge_zero_or_negative_amount_fails() {
     let c = client(&f);
     c.deposit(&f.payer, &AMOUNT);
     assert_eq!(
-        c.try_charge(&f.payer, &f.token_address, &1, &0),
+        c.try_charge(&f.payer, &1, &0),
         Err(Ok(ContractError::InvalidAmount))
     );
     assert_eq!(
-        c.try_charge(&f.payer, &f.token_address, &2, &-1),
+        c.try_charge(&f.payer, &2, &-1),
         Err(Ok(ContractError::InvalidAmount))
     );
 }
@@ -240,7 +240,7 @@ fn charge_zero_or_negative_amount_fails() {
 fn resolve_splits_pool_and_pays_fee() {
     let f = setup();
     let c = client(&f);
-    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.submit(&f.payer, &1, &AMOUNT);
 
     let w1 = Address::generate(&f.env);
     let w2 = Address::generate(&f.env);
@@ -450,7 +450,7 @@ fn question_settlement_never_substitutes_another_asset() {
     other_admin.mint(&f.payer, &(AMOUNT * 2));
     c.set_asset_allowed(&other, &true);
 
-    c.submit(&f.payer, &f.token_address, &101, &AMOUNT);
+    c.submit(&f.payer, &101, &AMOUNT);
     c.submit_asset(&f.payer, &other, &102, &AMOUNT);
     c.submit_asset(&f.payer, &other, &103, &AMOUNT);
     let other_escrow_before = token::Client::new(&f.env, &other).balance(&f.contract_id);
@@ -1522,7 +1522,7 @@ fn charge_draws_down_balance_and_opens_a_normal_question() {
     let c = client(&f);
     c.deposit(&f.payer, &(AMOUNT * 3));
 
-    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.charge(&f.payer, &1, &AMOUNT);
     let (topics, data) = last_contract_event(&f);
     assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_opened"));
     assert_eq!(topics.get(1).unwrap().into_val(&f.env), 1u64);
@@ -1546,7 +1546,7 @@ fn charge_more_than_balance_fails_and_opens_no_question() {
     let c = client(&f);
     c.deposit(&f.payer, &AMOUNT);
 
-    let res = c.try_charge(&f.payer, &f.token_address, &1, &(AMOUNT + 1));
+    let res = c.try_charge(&f.payer, &1, &(AMOUNT + 1));
     assert_eq!(res, Err(Ok(ContractError::InsufficientBalance)));
     assert_eq!(c.get_balance(&f.payer), AMOUNT);
     assert!(c.try_get_question(&1).is_err());
@@ -1557,7 +1557,7 @@ fn charged_question_settles_through_resolve_exactly_like_submit() {
     let f = setup();
     let c = client(&f);
     c.deposit(&f.payer, &AMOUNT);
-    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.charge(&f.payer, &1, &AMOUNT);
 
     let winner = Address::generate(&f.env);
     c.resolve(
@@ -1575,8 +1575,8 @@ fn charged_question_can_still_be_refunded_and_refund_timed_out() {
     let f = setup();
     let c = client(&f);
     c.deposit(&f.payer, &(AMOUNT * 2));
-    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
-    c.charge(&f.payer, &f.token_address, &2, &AMOUNT);
+    c.charge(&f.payer, &1, &AMOUNT);
+    c.charge(&f.payer, &2, &AMOUNT);
 
     c.refund(&1);
     assert_eq!(c.get_question(&1).status, Status::Refunded);
@@ -1593,9 +1593,9 @@ fn charge_same_question_id_twice_fails_like_duplicate_submit() {
     let f = setup();
     let c = client(&f);
     c.deposit(&f.payer, &(AMOUNT * 2));
-    c.charge(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.charge(&f.payer, &1, &AMOUNT);
 
-    let res = c.try_charge(&f.payer, &f.token_address, &1, &AMOUNT);
+    let res = c.try_charge(&f.payer, &1, &AMOUNT);
     assert_eq!(res, Err(Ok(ContractError::QuestionAlreadyExists)));
     // Balance was already debited by the first charge only, not double-spent
     // by the failed second attempt.
@@ -1616,8 +1616,8 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
     let amount_b = 5_000_000i128;
     token::StellarAssetClient::new(&f.env, &other_token).mint(&f.payer, &amount_b);
 
-    c.submit(&f.payer, &f.token_address, &1, &amount_a);
-    c.submit(&f.payer, &other_token, &2, &amount_b);
+    c.submit(&f.payer, &1, &amount_a);
+    c.submit_asset(&f.payer, &other_token, &2, &amount_b);
 
     let q1 = c.get_question(&1);
     assert_eq!(q1.token, f.token_address);
