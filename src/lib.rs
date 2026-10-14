@@ -1691,6 +1691,20 @@ impl OracleEscrow {
             .instance()
             .get(&DataKey::TimeoutLedgers)
             .ok_or(ContractError::NotInitialized)?;
+        let created_at = env.ledger().sequence();
+        let timeout_ledgers = if let Some(upgrade) = env
+            .storage()
+            .instance()
+            .get::<_, PendingUpgrade>(&DataKey::PendingUpgrade)
+        {
+            let latest_deadline = upgrade.executable_at.saturating_sub(1);
+            if latest_deadline <= created_at {
+                return Err(ContractError::UpgradeInProgress);
+            }
+            timeout_ledgers.min(latest_deadline - created_at)
+        } else {
+            timeout_ledgers
+        };
 
         Self::record_question(
             env,
@@ -1700,7 +1714,7 @@ impl OracleEscrow {
                 payer,
                 amount,
                 status: Status::Pending,
-                created_at: env.ledger().sequence(),
+                created_at,
                 timeout_ledgers,
                 token: token.clone(),
             },
