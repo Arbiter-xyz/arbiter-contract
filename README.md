@@ -13,7 +13,7 @@ WASM upload could front-run the legitimate
 `initialize(admin, token, platform, timeout_ledgers)` call and become `admin`
 themselves.
 
-`scripts/deploy-init.sh` mitigates this at the tooling layer by making deploy
+`scripts/deploy-init-wizard.sh` mitigates this at the tooling layer by making deploy
 and initialize effectively atomic from the operator's point of view:
 
 - It prompts for and validates all four `initialize()` arguments (`admin`,
@@ -25,7 +25,7 @@ and initialize effectively atomic from the operator's point of view:
   between the two submissions.
 
 ```sh
-./scripts/deploy-init.sh
+./scripts/deploy-init-wizard.sh
 ```
 
 > **This is a mitigation, not a fix.** Tooling can only narrow the window
