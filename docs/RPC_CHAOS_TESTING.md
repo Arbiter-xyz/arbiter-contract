@@ -178,26 +178,57 @@ is make the call itself. If production doesn't run a keeper, the network
 harness passes only because it plays the keeper. That's a deployment gap,
 not a contract gap, and `verify` without `--sweep` is how you detect it.
 
+#### 3.2.1 Operational Keeper Liveness & Fail-Closed Recovery (#251)
+
+When `arbiter-backend` exhausts its `retry.js` attempts on `resolve()`, it
+immediately attempts a fail-closed `refund()`. However, during a prolonged RPC
+outage (`storm` or `blackout-sends`), **both `resolve()` and the fail-closed
+`refund()` call can fail** after exhausting their bounded retries.
+
+In that double-failure state:
+
+1. **On-chain state remains `Pending`** until `created_at + timeout_ledgers`
+   elapses, because neither settlement transaction reached the ledger.
+2. **Permissionless recovery path:** Once the ledger sequence passes
+   `created_at + timeout_ledgers`, anyone (the backend sweeper, an independent
+   keeper cron, or the payer directly) can invoke `refund_timeout(question_id)`
+   or batch `sweep_timeouts(question_ids)` on the contract to return the
+   escrowed payment.
+3. **Production liveness requirement:** Production deployments **must** run an
+   automated periodic sweeper (`sweep_timeouts` / `refund_timeout`) on an
+   independent schedule (recommended every `<= timeout_ledgers / 4` ledgers)
+   and alert whenever `node tools/chaos/chaos.mjs verify --contract <ID>`
+   (run without `--sweep`) reports `overdue > 0` past `--grace-ledgers`.
+   See [runbooks/refund-timeout-postmortem.md](runbooks/refund-timeout-postmortem.md)
+   for incident response and manual sweep steps.
+
 ### 3.3 CI job or one-off?
 
 **Split it.**
 
-- **`src/test_rpc_chaos.rs` runs in CI now**, as part of `cargo test`. It
-  catches any contract change that could let a lost, duplicated or late
-  call leave a question stuck or pay twice.
-- **The network lifecycle run belongs in arbiter-backend's CI**, not this
-  repo's. It's what changes when `retry.js`, `stellarClient.js` or the SDK
-  version changes, which is the regression trigger the issue names. A
-  nightly job, or one that runs on changes to those files, would:
+- **Contract & retry harness unit tests (`src/test_rpc_chaos.rs` and `tools/chaos/retry.test.mjs`)**:
+  - `src/test_rpc_chaos.rs` exercises every combination of RPC outcomes on
+    `resolve()`, `refund()`, and `refund_timeout()` inside the Soroban test
+    environment (`cargo test --lib test_rpc_chaos`).
+  - `tools/chaos/retry.test.mjs` validates `loadRetry()` contract checks,
+    `referenceRetry`, `withTimeout`, `instrument`, and `checkRetrySpec`
+    (`node --test tools/chaos/retry.test.mjs`).
+  - *Note on current `.github/workflows/ci.yml` (#249):* Ensure both
+    `cargo test` and `node --test tools/chaos/retry.test.mjs` (alongside
+    `node --check tools/chaos/*.mjs`) are executed in CI or pre-release
+    verification so contract and adapter regressions are caught automatically.
+- **The full network lifecycle run belongs in arbiter-backend's CI** (or
+  scheduled integration runs), not per-commit unit CI in this repo. It's what
+  changes when `retry.js`, `stellarClient.js` or the SDK version changes,
+  which is the regression trigger the issue names. A nightly job, or one that
+  runs on changes to those files, should:
   1. start the sandbox with `TIMEOUT_LEDGERS=30`
   2. run `lifecycle` with `--retry-module` pointing at its own `retry.js`
      under `none`, `blips` (fixed seed), `round6-lag` and `blackout-sends`
   3. fail on a non-zero exit
 
-  That takes roughly 5–10 minutes. `storm` and testnet runs stay manual,
+  That takes roughly 5–10 minutes. `storm` and live testnet runs stay manual,
   one-off validations.
-- This repo's CI only syntax-checks the tools (`node --check`), the same
-  way it does for `tools/load` and `tools/shadow`.
 
 ## 4. Round 6 comparison
 

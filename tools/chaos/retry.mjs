@@ -53,18 +53,81 @@ export async function referenceRetry(fn, { attempts = 2, timeoutMs = 8000, baseD
   throw last;
 }
 
-/// Loads retry.js from arbiter-backend and adapts it to
-/// `(fn, opts) => Promise`. retry.js's exact export isn't pinned by this
-/// repo, so this accepts the obvious shapes. If none fits, adapt it here:
-/// this function is the only place that knows about retry.js's API.
-export async function loadRetry(modulePath) {
-  if (!modulePath) return { name: "reference", retry: referenceRetry };
+/// Validates that a candidate retry function conforms to the `(fn, opts) => Promise`
+/// contract expected by the chaos harness:
+///   1. Returns a Promise that resolves with `fn(0)`'s value on success.
+///   2. Respects `opts.attempts` when `fn` rejects.
+///   3. Respects `opts.nonRetryable` by aborting immediately on a non-retryable error.
+export async function validateRetryContract(retryFn, sourceName = "retry") {
+  if (typeof retryFn !== "function") {
+    throw new TypeError(`${sourceName}: expected retry export to be a function, got ${typeof retryFn}`);
+  }
+
+  // 1. Verify resolution and attempt index passing
+  const probeSymbol = Symbol("probe");
+  let receivedAttempt = null;
+  const result = await retryFn(
+    (attempt) => {
+      receivedAttempt = attempt;
+      return probeSymbol;
+    },
+    { attempts: 2, timeoutMs: 500, baseDelayMs: 1, nonRetryable: () => false }
+  );
+  if (result !== probeSymbol) {
+    throw new Error(`${sourceName}: retry(fn, opts) did not resolve with fn()'s return value`);
+  }
+  if (receivedAttempt !== undefined && typeof receivedAttempt !== "number") {
+    throw new Error(`${sourceName}: retry(fn, opts) passed non-numeric attempt index (${typeof receivedAttempt})`);
+  }
+
+  // 2. Verify opts.attempts bound is honoured
+  let tries = 0;
+  await retryFn(
+    () => {
+      tries++;
+      throw new Error("synthetic retryable failure");
+    },
+    { attempts: 2, timeoutMs: 500, baseDelayMs: 1, nonRetryable: () => false }
+  ).catch(() => {});
+  if (tries !== 2) {
+    throw new Error(`${sourceName}: retry(fn, { attempts: 2 }) executed ${tries} attempt(s) instead of 2; check opts signature`);
+  }
+
+  // 3. Verify opts.nonRetryable short-circuits immediately
+  let nonRetryableTries = 0;
+  await retryFn(
+    () => {
+      nonRetryableTries++;
+      const err = new Error("synthetic fatal contract error");
+      err.fatal = true;
+      throw err;
+    },
+    { attempts: 3, timeoutMs: 500, baseDelayMs: 1, nonRetryable: (e) => Boolean(e?.fatal) }
+  ).catch(() => {});
+  if (nonRetryableTries !== 1) {
+    throw new Error(
+      `${sourceName}: retry(fn, { nonRetryable }) executed ${nonRetryableTries} attempt(s) instead of 1 on fatal error`
+    );
+  }
+}
+
+/// Loads retry.js from arbiter-backend, adapts it to `(fn, opts) => Promise`,
+/// and validates its runtime contract before returning.
+export async function loadRetry(modulePath, { validate = true } = {}) {
+  if (!modulePath) {
+    if (validate) await validateRetryContract(referenceRetry, "reference");
+    return { name: "reference", retry: referenceRetry };
+  }
   const mod = await import(pathToFileURL(resolvePath(modulePath)).href);
   const f = mod.withRetry ?? mod.retry ?? mod.default?.withRetry ?? mod.default?.retry ?? mod.default;
   if (typeof f !== "function") {
     throw new Error(`${modulePath}: no withRetry/retry/default export; adapt loadRetry() in tools/chaos/retry.mjs`);
   }
-  return { name: modulePath, retry: (fn, opts) => f(fn, opts) };
+  const retry = (fn, opts) => f(fn, opts);
+  if (validate) {
+    await validateRetryContract(retry, modulePath);
+  }
+  return { name: modulePath, retry };
 }
 
 /// Wraps `fn` so every attempt is logged into `log` as
