@@ -30,6 +30,16 @@ actually matches this tag's source, rather than trusting the tag name alone.
 - Added `get_admin()` and `get_platform()` views (alongside `get_token()`).
 - Added `get_questions(question_ids)` batch view returning
   `Vec<Option<Question>>` in input order.
+- Added `submit_basket(payer, question_id, basket)` for a payout basket of
+  up to 8 distinct allowlisted assets, each `(token, amount)`. `resolve()`
+  and `resolve_by_consensus()` settle each leg in its own asset with the same
+  fee, dust, slash and credit rules as a single-asset question. `refund()`
+  and `refund_timeout()` return every leg. `get_question_basket(question_id)`
+  reads the legs back. A basket's `Question.amount` is 0.
+- Basket questions reject `escalate`, `resolve_challengeable`,
+  `migrate_pending`, `reopen_question` and `preview_resolve` with the new
+  `BasketNotSupported` (312) error. New `InvalidBasket` (313) error and
+  `basket_leg_settled` event.
 
 ## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
 

@@ -69,6 +69,9 @@ const MIN_UNBONDING_LEDGERS: u32 = 3 * DAY_LEDGERS;
 /// stays well inside every network's per-tx read limits.
 const MAX_PENDING_PAGE: u32 = 100;
 const MAX_ALLOWED_ASSETS: u32 = 32;
+/// #30: most legs one submit_basket() may carry. Each leg runs a full
+/// fee/pool/slash/credit pass in resolve(), so this bounds that cost.
+const MAX_BASKET_ASSETS: u32 = 8;
 
 /// Upper bound on any question's refund_timeout() window: 7 days of ledgers
 /// at a 5s close time. Unbounded, a huge value would overflow
@@ -150,6 +153,7 @@ pub enum Status {
 #[derive(Clone, Debug)]
 pub struct Question {
     pub payer: Address,
+    /// Native units of `token`. Zero for a basket question (#30).
     pub amount: i128,
     pub status: Status,
     pub created_at: u32,
@@ -162,7 +166,9 @@ pub struct Question {
     /// questions submitted AFTER the change. migrate_pending() carries both
     /// created_at and timeout_ledgers across unchanged for the same reason.
     pub timeout_ledgers: u32,
-    /// The asset this question was opened in.
+    /// The asset this question was opened in. For a basket question (#30)
+    /// this is the first leg's asset and is only a placeholder; the payout
+    /// is AssetKey::QuestionBasket, read via get_question_basket().
     pub token: Address,
 }
 
@@ -368,6 +374,9 @@ pub enum DataKey {
 #[contracttype]
 pub enum AssetKey {
     QuestionToken(u64),
+    /// #30: per-asset legs `(token, amount)` of a basket question. Present
+    /// only for questions opened with submit_basket().
+    QuestionBasket(u64),
     AllowedToken(Address),
     TokenDecimals(Address),
     OwedAsset(Address, Address),
@@ -573,6 +582,14 @@ pub enum ContractError {
     /// #50: post_challenge_bond() called on a question_id that already has
     /// a bond posted.
     BondAlreadyPosted = 311,
+    /// #30: escalate(), resolve_challengeable(), migrate_pending(),
+    /// reopen_question() or preview_resolve() called on a basket question.
+    /// Basket questions settle via resolve()/resolve_by_consensus() and
+    /// refund via refund()/refund_timeout() only.
+    BasketNotSupported = 312,
+    /// #30: submit_basket() given an empty basket, more than
+    /// MAX_BASKET_ASSETS legs, or the same asset twice.
+    InvalidBasket = 313,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -609,6 +626,24 @@ pub struct QuestionResolved {
     #[topic]
     pub question_id: u64,
     pub worker_count: u32,
+    pub fee: i128,
+    pub total_slashed: i128,
+}
+
+/// #30: `basket_leg_settled` topics: question_id, token; data: amount, fee,
+/// total_slashed. Emitted once per asset of a basket question as it settles.
+/// On resolve(), fee and total_slashed are that leg's own; on refund() both
+/// are 0. Single-asset questions never emit it. QuestionResolved reports fee
+/// and total_slashed as 0 for a basket, since those can't be summed across
+/// assets.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BasketLegSettled {
+    #[topic]
+    pub question_id: u64,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
     pub fee: i128,
     pub total_slashed: i128,
 }
@@ -1390,6 +1425,35 @@ impl OracleEscrow {
         Self::open_question(&env, payer, question_id, amount, token)
     }
 
+    /// #30: payer locks several allowlisted assets for one question, paid out
+    /// per asset by resolve() or returned per asset by refund(). Each leg is
+    /// settled in its own token with its own 20% fee, integer dust to the
+    /// platform, worker share and slash cap, so no conversion ever happens.
+    /// A one-leg basket behaves like submit_asset(). Question.amount stays 0;
+    /// read the legs back with get_question_basket().
+    pub fn submit_basket(
+        env: Env,
+        payer: Address,
+        question_id: u64,
+        basket: Vec<(Address, i128)>,
+    ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        payer.require_auth();
+        Self::validate_basket(&env, &basket)?;
+        for (token, amount) in basket.iter() {
+            token::Client::new(&env, &token).transfer(
+                &payer,
+                &env.current_contract_address(),
+                &amount,
+            );
+        }
+        let (first_token, _) = basket.get(0).ok_or(ContractError::InvalidBasket)?;
+        Self::open_question(&env, payer, question_id, 0, first_token)?;
+        let key = AssetKey::QuestionBasket(question_id);
+        Self::set_persistent(&env, &key, &basket);
+        Ok(())
+    }
+
     /// Payer locks `amount` into a standing prepaid balance — one signature,
     /// one network fee, no per-question interaction from here on. Same
     /// underlying custody as submit()'s escrow; the money just isn't
@@ -1895,6 +1959,146 @@ impl OracleEscrow {
             .unwrap_or(DEFAULT_ESTABLISHED_ANSWER_COUNT)
     }
 
+    /// #30: settles one asset leg of a question: the fee and pool split, the
+    /// losing-worker slashes, the worker credits and the platform take, all in
+    /// `token`. resolve() runs this once for a single-asset question and once
+    /// per leg for a basket, so every leg keeps the same rounding and dust
+    /// rules. Returns (fee, total_slashed) for this leg.
+    fn settle_asset(
+        env: &Env,
+        question_id: u64,
+        token: &Address,
+        amount: i128,
+        workers: &Vec<Address>,
+        losing_workers: &Vec<Address>,
+        platform: &Address,
+    ) -> Result<(i128, i128), ContractError> {
+        let env = env.clone();
+        let token_client = token::Client::new(&env, token);
+
+        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        // If workers.len() exceeds the after-fee pool, integer division
+        // makes every share zero and the platform absorbs the entire pool
+        // as dust. Callers (including backend pricing tiers) must keep the
+        // amount large enough for the chosen quorum to avoid this outcome.
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+        let mut platform_take = fee + dust;
+        // Accumulated per-worker bonus from slash redistribution (issue #19).
+        // For each loser SLASH_REDISTRIBUTE_BPS of their slashed amount goes
+        // to the matching workers instead of the platform. The portion is
+        // split evenly across n workers with integer division; any remainder
+        // (redist_dust) follows the same dust-to-platform convention as the
+        // fee/pool split above, guaranteeing funds are conserved to the last
+        // stroop.
+        let mut total_slashed: i128 = 0;
+        let mut slash_redist_per_worker: i128 = 0;
+        for loser in losing_workers.iter() {
+            let slashed = Self::slash(&env, token, &loser, slash_cap);
+            if slashed > 0 {
+                // Split: worker_portion redistributed to winners,
+                // platform_portion retained by the platform.
+                let worker_portion = Self::mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
+                let platform_portion = slashed - worker_portion;
+                // Per-winner share of worker_portion; remainder to platform.
+                let redist_share = worker_portion / n;
+                let redist_dust = worker_portion - redist_share * n;
+                slash_redist_per_worker = slash_redist_per_worker
+                    .checked_add(redist_share)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(platform_portion)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(redist_dust)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                total_slashed = total_slashed
+                    .checked_add(slashed)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                WorkerSlashed {
+                    question_id,
+                    worker: loser,
+                    amount: slashed,
+                }
+                .publish(&env);
+            }
+        }
+        // Each matching worker earns their base share plus their cut of the
+        // redistributed slash. Both go through credit_owed() so the worker
+        // collects everything in one withdraw() call.
+        let worker_credit = share
+            .checked_add(slash_redist_per_worker)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        for worker in workers.iter() {
+            Self::credit_owed(&env, token, &worker, worker_credit)?;
+            WorkerCredited {
+                question_id,
+                worker: worker.clone(),
+                amount: worker_credit,
+            }
+            .publish(&env);
+        }
+
+        if platform_take > 0 {
+            // #128: if a public-goods address + bps have been configured,
+            // split platform_take into two transfers:
+            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
+            //   platform_remainder = platform_take - public_goods_share
+            // Any dust from the integer division stays with the platform
+            // (same dust-rounding discipline resolve() already uses for the
+            // worker pool split). If unconfigured (0 bps or absent address)
+            // the behaviour is identical to the current single transfer.
+            let public_goods_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsBps)
+                .unwrap_or(0);
+            let maybe_pg_addr: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsAddress);
+            if public_goods_bps > 0 {
+                if let Some(pg_addr) = maybe_pg_addr {
+                    let public_goods_share =
+                        Self::mul_bps(platform_take, public_goods_bps as i128);
+                    let platform_remainder = platform_take - public_goods_share;
+                    if public_goods_share > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &pg_addr,
+                            &public_goods_share,
+                        );
+                    }
+                    if platform_remainder > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            platform,
+                            &platform_remainder,
+                        );
+                    }
+                } else {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        platform,
+                        &platform_take,
+                    );
+                }
+            } else {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    platform,
+                    &platform_take,
+                );
+            }
+        }
+
+        Ok((fee, total_slashed))
+    }
+
     /// Shared settlement body of resolve() and resolve_by_consensus(). The
     /// caller has already checked admin auth.
     fn settle_resolution(
@@ -1936,131 +2140,45 @@ impl OracleEscrow {
             .get(&DataKey::Platform)
             .ok_or(ContractError::NotInitialized)?;
         let question_token = Self::question_token(&env, question_id)?;
-        let token_client = token::Client::new(&env, &question_token);
-
-        let amount = question.amount;
-        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
-        let pool = amount - fee;
-        let n = workers.len() as i128;
-        // If workers.len() exceeds the after-fee pool, integer division
-        // makes every share zero and the platform absorbs the entire pool
-        // as dust. Callers (including backend pricing tiers) must keep the
-        // amount large enough for the chosen quorum to avoid this outcome.
-        let share = pool / n;
-        let dust = pool - share * n;
-
-        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let mut platform_take = fee + dust;
-        // Accumulated per-worker bonus from slash redistribution (issue #19).
-        // For each loser SLASH_REDISTRIBUTE_BPS of their slashed amount goes
-        // to the matching workers instead of the platform. The portion is
-        // split evenly across n workers with integer division; any remainder
-        // (redist_dust) follows the same dust-to-platform convention as the
-        // fee/pool split above, guaranteeing funds are conserved to the last
-        // stroop.
-        let mut total_slashed: i128 = 0;
-        let mut slash_redist_per_worker: i128 = 0;
-        for loser in losing_workers.iter() {
-            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
-            if slashed > 0 {
-                // Split: worker_portion redistributed to winners,
-                // platform_portion retained by the platform.
-                let worker_portion = Self::mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
-                let platform_portion = slashed - worker_portion;
-                // Per-winner share of worker_portion; remainder to platform.
-                let redist_share = worker_portion / n;
-                let redist_dust = worker_portion - redist_share * n;
-                slash_redist_per_worker = slash_redist_per_worker
-                    .checked_add(redist_share)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                platform_take = platform_take
-                    .checked_add(platform_portion)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                platform_take = platform_take
-                    .checked_add(redist_dust)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                total_slashed = total_slashed
-                    .checked_add(slashed)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                WorkerSlashed {
+        // #30: a basket settles each leg in that leg's own asset. A
+        // single-asset question is one leg in its question token.
+        let basket = Self::question_basket(&env, question_id);
+        let is_basket = basket.is_some();
+        let legs = match basket {
+            Some(legs) => legs,
+            None => vec![&env, (question_token, question.amount)],
+        };
+        let mut resolved_fee: i128 = 0;
+        let mut resolved_slashed: i128 = 0;
+        for (token, amount) in legs.iter() {
+            let (fee, total_slashed) = Self::settle_asset(
+                &env,
+                question_id,
+                &token,
+                amount,
+                &workers,
+                &losing_workers,
+                &platform,
+            )?;
+            if is_basket {
+                BasketLegSettled {
                     question_id,
-                    worker: loser,
-                    amount: slashed,
+                    token,
+                    amount,
+                    fee,
+                    total_slashed,
                 }
                 .publish(&env);
-            }
-        }
-        // Each matching worker earns their base share plus their cut of the
-        // redistributed slash. Both go through credit_owed() so the worker
-        // collects everything in one withdraw() call.
-        let worker_credit = share
-            .checked_add(slash_redist_per_worker)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        for worker in workers.iter() {
-            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
-            WorkerCredited {
-                question_id,
-                worker: worker.clone(),
-                amount: worker_credit,
-            }
-            .publish(&env);
-            // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
-            // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not
-            // O(all workers ever staked).
-            Self::record_resolved_credit(&env, &worker);
-        }
-
-        if platform_take > 0 {
-            // #128: if a public-goods address + bps have been configured,
-            // split platform_take into two transfers:
-            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
-            //   platform_remainder = platform_take - public_goods_share
-            // Any dust from the integer division stays with the platform
-            // (same dust-rounding discipline resolve() already uses for the
-            // worker pool split). If unconfigured (0 bps or absent address)
-            // the behaviour is identical to the current single transfer.
-            let public_goods_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::PublicGoodsBps)
-                .unwrap_or(0);
-            let maybe_pg_addr: Option<Address> = env
-                .storage()
-                .instance()
-                .get(&DataKey::PublicGoodsAddress);
-            if public_goods_bps > 0 {
-                if let Some(pg_addr) = maybe_pg_addr {
-                    let public_goods_share =
-                        Self::mul_bps(platform_take, public_goods_bps as i128);
-                    let platform_remainder = platform_take - public_goods_share;
-                    if public_goods_share > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &pg_addr,
-                            &public_goods_share,
-                        );
-                    }
-                    if platform_remainder > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &platform,
-                            &platform_remainder,
-                        );
-                    }
-                } else {
-                    token_client.transfer(
-                        &env.current_contract_address(),
-                        &platform,
-                        &platform_take,
-                    );
-                }
             } else {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &platform,
-                    &platform_take,
-                );
+                resolved_fee = fee;
+                resolved_slashed = total_slashed;
             }
+        }
+        // Issue #83: on-chain leaderboard bookkeeping. Cheap relative to
+        // credit_owed() itself — O(LEADERBOARD_CAP) per worker, not O(all
+        // workers ever staked). Once per worker, not once per leg.
+        for worker in workers.iter() {
+            Self::record_resolved_credit(&env, &worker);
         }
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
@@ -2075,8 +2193,8 @@ impl OracleEscrow {
         QuestionResolved {
             question_id,
             worker_count: workers.len(),
-            fee,
-            total_slashed,
+            fee: resolved_fee,
+            total_slashed: resolved_slashed,
         }
         .publish(&env);
         Ok(())
@@ -2568,6 +2686,10 @@ impl OracleEscrow {
         if env.storage().persistent().has(&token_key) {
             Self::extend_asset_ttl(&env, &token_key);
         }
+        let basket_key = AssetKey::QuestionBasket(question_id);
+        if env.storage().persistent().has(&basket_key) {
+            Self::extend_asset_ttl(&env, &basket_key);
+        }
 
         if question.status == Status::Pending {
             let pos_key = DataKey::PendingPos(question_id);
@@ -2910,6 +3032,12 @@ impl OracleEscrow {
         Self::question_token(&env, question_id)
     }
 
+    /// #30: the `(token, amount)` legs of a basket question, or None for a
+    /// single-asset question.
+    pub fn get_question_basket(env: Env, question_id: u64) -> Option<Vec<(Address, i128)>> {
+        Self::question_basket(&env, question_id)
+    }
+
     /// Number of questions currently Pending.
     pub fn pending_count(env: Env) -> u32 {
         env.storage()
@@ -3016,6 +3144,7 @@ impl OracleEscrow {
             if question.status != Status::Pending {
                 return Err(ContractError::QuestionNotPending);
             }
+            Self::reject_basket(&env, question_id)?;
             let token_addr = Self::question_token(&env, question_id)?;
 
             // The target pulls the funds (rather than us pushing them) so the
@@ -3367,6 +3496,42 @@ impl OracleEscrow {
         Self::token(env)
     }
 
+    fn question_basket(env: &Env, question_id: u64) -> Option<Vec<(Address, i128)>> {
+        env.storage()
+            .persistent()
+            .get(&AssetKey::QuestionBasket(question_id))
+    }
+
+    fn reject_basket(env: &Env, question_id: u64) -> Result<(), ContractError> {
+        if env
+            .storage()
+            .persistent()
+            .has(&AssetKey::QuestionBasket(question_id))
+        {
+            return Err(ContractError::BasketNotSupported);
+        }
+        Ok(())
+    }
+
+    fn validate_basket(env: &Env, basket: &Vec<(Address, i128)>) -> Result<(), ContractError> {
+        if basket.is_empty() || basket.len() > MAX_BASKET_ASSETS {
+            return Err(ContractError::InvalidBasket);
+        }
+        for i in 0..basket.len() {
+            let (token, amount) = basket.get(i).unwrap();
+            if amount <= 0 {
+                return Err(ContractError::InvalidAmount);
+            }
+            Self::require_allowed_token(env, &token)?;
+            for j in 0..i {
+                if basket.get(j).unwrap().0 == token {
+                    return Err(ContractError::InvalidBasket);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn require_allowed_token(env: &Env, token: &Address) -> Result<(), ContractError> {
         let default_token = Self::token(env)?;
         if token == &default_token
@@ -3433,12 +3598,30 @@ impl OracleEscrow {
             return Err(ContractError::QuestionNotPending);
         }
 
-        let token_client = token::Client::new(env, &Self::question_token(env, question_id)?);
-        token_client.transfer(
-            &env.current_contract_address(),
-            &question.payer,
-            &question.amount,
-        );
+        // #30: a basket refunds every leg in its own asset.
+        let basket = Self::question_basket(env, question_id);
+        let is_basket = basket.is_some();
+        let legs = match basket {
+            Some(legs) => legs,
+            None => vec![env, (Self::question_token(env, question_id)?, question.amount)],
+        };
+        for (token, amount) in legs.iter() {
+            token::Client::new(env, &token).transfer(
+                &env.current_contract_address(),
+                &question.payer,
+                &amount,
+            );
+            if is_basket {
+                BasketLegSettled {
+                    question_id,
+                    token,
+                    amount,
+                    fee: 0,
+                    total_slashed: 0,
+                }
+                .publish(env);
+            }
+        }
 
         Self::settle_question(env, question_id, &key, &mut question, Status::Refunded);
         QuestionRefunded {
@@ -3606,6 +3789,7 @@ impl OracleEscrow {
         if existing.payer != payer {
             return Err(ContractError::QuestionNotRefunded);
         }
+        Self::reject_basket(&env, question_id)?;
 
         let token_addr = existing.token.clone();
         token::Client::new(&env, &token_addr).transfer(
@@ -3735,6 +3919,7 @@ impl OracleEscrow {
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
+        Self::reject_basket(&env, question_id)?;
 
         let amount = question.amount;
         let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
@@ -4660,6 +4845,7 @@ impl OracleEscrow {
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPendingForEscalation);
         }
+        Self::reject_basket(&env, question_id)?;
 
         let fw_count = first_workers.len();
         let flw_count = first_losing_workers.len();
@@ -4866,6 +5052,7 @@ impl OracleEscrow {
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
+        Self::reject_basket(&env, question_id)?;
 
         let dispute_deadline = env
             .ledger()
