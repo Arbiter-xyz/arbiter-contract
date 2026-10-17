@@ -1895,6 +1895,70 @@ impl OracleEscrow {
             .unwrap_or(DEFAULT_ESTABLISHED_ANSWER_COUNT)
     }
 
+    /// Sends platform_take to the platform, routing the admin-configured
+    /// public-goods share (#128) to the public-goods address first. Shared by
+    /// every settlement path (resolve(), escalate_resolve(), finalize_resolve())
+    /// so they all split platform_take identically.
+    fn route_platform_take(
+        env: &Env,
+        token_client: &token::Client,
+        platform: &Address,
+        platform_take: i128,
+    ) {
+        if platform_take > 0 {
+            // #128: if a public-goods address + bps have been configured,
+            // split platform_take into two transfers:
+            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
+            //   platform_remainder = platform_take - public_goods_share
+            // Any dust from the integer division stays with the platform
+            // (same dust-rounding discipline resolve() already uses for the
+            // worker pool split). If unconfigured (0 bps or absent address)
+            // the behaviour is identical to the current single transfer.
+            let public_goods_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsBps)
+                .unwrap_or(0);
+            let maybe_pg_addr: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsAddress);
+            if public_goods_bps > 0 {
+                if let Some(pg_addr) = maybe_pg_addr {
+                    let public_goods_share =
+                        Self::mul_bps(platform_take, public_goods_bps as i128);
+                    let platform_remainder = platform_take - public_goods_share;
+                    if public_goods_share > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &pg_addr,
+                            &public_goods_share,
+                        );
+                    }
+                    if platform_remainder > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            platform,
+                            &platform_remainder,
+                        );
+                    }
+                } else {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        platform,
+                        &platform_take,
+                    );
+                }
+            } else {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    platform,
+                    &platform_take,
+                );
+            }
+        }
+    }
+
     /// Shared settlement body of resolve() and resolve_by_consensus(). The
     /// caller has already checked admin auth.
     fn settle_resolution(
@@ -2010,58 +2074,7 @@ impl OracleEscrow {
             Self::record_resolved_credit(&env, &worker);
         }
 
-        if platform_take > 0 {
-            // #128: if a public-goods address + bps have been configured,
-            // split platform_take into two transfers:
-            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
-            //   platform_remainder = platform_take - public_goods_share
-            // Any dust from the integer division stays with the platform
-            // (same dust-rounding discipline resolve() already uses for the
-            // worker pool split). If unconfigured (0 bps or absent address)
-            // the behaviour is identical to the current single transfer.
-            let public_goods_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::PublicGoodsBps)
-                .unwrap_or(0);
-            let maybe_pg_addr: Option<Address> = env
-                .storage()
-                .instance()
-                .get(&DataKey::PublicGoodsAddress);
-            if public_goods_bps > 0 {
-                if let Some(pg_addr) = maybe_pg_addr {
-                    let public_goods_share =
-                        Self::mul_bps(platform_take, public_goods_bps as i128);
-                    let platform_remainder = platform_take - public_goods_share;
-                    if public_goods_share > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &pg_addr,
-                            &public_goods_share,
-                        );
-                    }
-                    if platform_remainder > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &platform,
-                            &platform_remainder,
-                        );
-                    }
-                } else {
-                    token_client.transfer(
-                        &env.current_contract_address(),
-                        &platform,
-                        &platform_take,
-                    );
-                }
-            } else {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &platform,
-                    &platform_take,
-                );
-            }
-        }
+        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
         // Issue #59: emit the notarization event when the caller supplied a hash.
@@ -4782,9 +4795,7 @@ impl OracleEscrow {
             WorkerCredited { question_id, worker: worker.clone(), amount: share }.publish(&env);
             Self::record_resolved_credit(&env, &worker);
         }
-        if platform_take > 0 {
-            token_client.transfer(&env.current_contract_address(), &platform, &platform_take);
-        }
+        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         // Clean up escalation storage.
         if escalated.is_some() {
@@ -5062,9 +5073,7 @@ impl OracleEscrow {
             .publish(&env);
         }
 
-        if platform_take > 0 {
-            token_client.transfer(&env.current_contract_address(), &platform, &platform_take);
-        }
+        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         // Clean up.
         env.storage()
