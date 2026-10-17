@@ -15,7 +15,7 @@
 //! - Valid bond (resolution was disputed): bond returned to challenger.
 
 use super::*;
-use crate::test::{client, setup, AMOUNT};
+use crate::test::{client, contract_events, event_name, fund_worker, setup, AMOUNT};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token,
@@ -290,4 +290,84 @@ fn bond_not_forfeited_while_resolution_is_disputed() {
     let bond = c.get_challenger_bond(&1);
     assert!(bond.is_some(), "bond must still be held when resolution is disputed");
     assert_eq!(bond.unwrap().amount, bond_amount);
+}
+
+// ---------------------------------------------------------------------------
+// #192: QuestionResolved must distinguish worker-stake slashing from a
+// forfeited challenger bond.
+// ---------------------------------------------------------------------------
+
+/// Regression test for #192. When a spurious challenger bond is forfeited in the
+/// same `finalize_resolve()` call that slashes a losing worker, the emitted
+/// `question_resolved` event used to compute `total_slashed` as
+/// `platform_take - fee - dust` *after* the bond had been folded into
+/// `platform_take`, so indexers over-counted worker slashing by the bond
+/// amount. The event must now report the two amounts separately.
+#[test]
+fn question_resolved_separates_slash_from_forfeited_bond() {
+    let f = setup();
+    let c = client(&f);
+
+    let winner = Address::generate(&f.env);
+    let loser = Address::generate(&f.env);
+
+    // Give the loser a stake so there is a real, non-zero worker slash to
+    // distinguish from the bond forfeiture.
+    let loser_stake: i128 = 200_000;
+    fund_worker(&f, &loser, loser_stake);
+    c.stake(&loser, &loser_stake);
+
+    c.submit(&f.payer, &1, &AMOUNT);
+    c.resolve_challengeable(
+        &1,
+        &Vec::from_array(&f.env, [winner.clone()]),
+        &Vec::from_array(&f.env, [loser.clone()]),
+        &50,
+    );
+
+    let bond_amount: i128 = 80_000;
+    let challenger = Address::generate(&f.env);
+    token::StellarAssetClient::new(&f.env, &f.token_address).mint(&challenger, &bond_amount);
+    c.post_challenge_bond(&challenger, &1, &bond_amount);
+
+    // No dispute_resolve(): the challenge is spurious, so the bond is forfeited.
+    f.env.ledger().with_mut(|li| li.sequence_number += 51);
+    c.finalize_resolve(&1);
+
+    // Worker slash = 5% of the loser's 200_000 stake (far below the
+    // per-question cap), so the two amounts are clearly different.
+    let expected_slash = loser_stake * SLASH_BPS / BPS_DENOM;
+    assert_eq!(expected_slash, 10_000);
+
+    let events = contract_events(&f);
+    let resolved = events
+        .iter()
+        .find(|(topics, _)| event_name(&f, topics) == Symbol::new(&f.env, "question_resolved"))
+        .expect("question_resolved event must be emitted");
+    assert_eq!(resolved.0.get(1).unwrap().into_val(&f.env), 1u64);
+
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = resolved.1.clone().into_val(&f.env);
+    let total_slashed: i128 = data
+        .get(Symbol::new(&f.env, "total_slashed"))
+        .unwrap()
+        .into_val(&f.env);
+    let bond_forfeited: i128 = data
+        .get(Symbol::new(&f.env, "bond_forfeited"))
+        .unwrap()
+        .into_val(&f.env);
+
+    assert_eq!(
+        total_slashed, expected_slash,
+        "total_slashed must count worker-stake slashing only, not the forfeited bond"
+    );
+    assert_eq!(
+        bond_forfeited, bond_amount,
+        "bond_forfeited must report the forfeited challenger bond separately"
+    );
+
+    // The bond still lands on the platform — only the reporting changed.
+    assert!(
+        c.get_challenger_bond(&1).is_none(),
+        "forfeited bond must be cleared"
+    );
 }
