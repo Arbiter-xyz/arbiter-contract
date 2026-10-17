@@ -3744,9 +3744,10 @@ impl OracleEscrow {
         let dust = pool - share_per_worker * n;
 
         let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let question_token = Self::question_token(&env, question_id)?;
         let mut total_slashed: i128 = 0;
         for loser in losing_workers.iter() {
-            total_slashed += Self::preview_slash(&env, &loser, slash_cap);
+            total_slashed += Self::preview_slash(&env, &question_token, &loser, slash_cap);
         }
 
         // Mirror the redistribution split from resolve(): SLASH_REDISTRIBUTE_BPS
@@ -3769,12 +3770,14 @@ impl OracleEscrow {
     /// Pure counterpart to `slash()`: computes the same amount that slash()
     /// would take from `worker`'s slashable stake (capped the same way),
     /// but never writes it back. Used only by `preview_resolve()`.
-    fn preview_slash(env: &Env, worker: &Address, cap: i128) -> i128 {
-        let key = DataKey::Stake(worker.clone());
+    fn preview_slash(env: &Env, token: &Address, worker: &Address, cap: i128) -> i128 {
+        let Ok(key) = Self::stake_key(env, token, worker) else {
+            return 0;
+        };
         if !env.storage().persistent().has(&key) {
             return 0;
         }
-        let info = Self::stake_info(env, worker);
+        let info = Self::stake_info_for_token(env, token, worker).unwrap_or_default();
         let slashable = info.settled + info.warming + info.unbonding;
         if slashable <= 0 {
             return 0;
