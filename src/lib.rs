@@ -1765,7 +1765,7 @@ impl OracleEscrow {
         answer_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         Self::require_resolver_or_admin(&env)?;
-        Self::settle_resolution(&env, question_id, workers, losing_workers)
+        Self::settle_resolution(&env, question_id, workers, losing_workers, Some(answer_hash))
     }
 
     /// Issue #11: admin-only resolution from raw consensus data, which
