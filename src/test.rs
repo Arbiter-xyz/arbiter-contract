@@ -333,6 +333,7 @@ fn resolve_fee_computation_does_not_silently_overflow_near_i128_max() {
         &1,
         &Vec::from_array(&f.env, [worker.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_owed(&worker), amount - fee);
@@ -459,6 +460,7 @@ fn question_settlement_never_substitutes_another_asset() {
         &101,
         &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
         &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT - AMOUNT / 5);
@@ -471,6 +473,7 @@ fn question_settlement_never_substitutes_another_asset() {
         &103,
         &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
         &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(token_client(&f).balance(&f.contract_id), default_escrow_after);
     assert_eq!(
@@ -506,6 +509,7 @@ fn six_decimal_asset_uses_native_units_without_seven_decimal_scaling() {
         &103,
         &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
         &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(asset_client.balance(&f.platform), 250_000);
     assert_eq!(c.get_owed_asset(&worker, &asset), 1_000_000);
@@ -765,6 +769,7 @@ fn resolve_slashes_losing_workers_stake_to_the_platform() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     // slash = 5% of 200_000 = 10_000
@@ -799,6 +804,7 @@ fn resolve_slashes_multiple_losing_workers_independently() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser_one.clone(), loser_two.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&loser_one), 190_000);
@@ -867,6 +873,7 @@ fn stake_slash_computation_does_not_silently_overflow_near_i128_max() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&loser), stake - expected_slash);
@@ -889,6 +896,7 @@ fn resolve_slashing_an_unstaked_losing_worker_is_a_harmless_no_op() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [unstaked_loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&unstaked_loser), 0);
@@ -922,6 +930,7 @@ fn slash_redistribution_splits_half_to_workers_and_half_to_platform() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     // slash = 5% of 500_000 = 25_000
@@ -964,6 +973,7 @@ fn slash_redistribution_zero_slash_is_a_no_op_no_spurious_credit() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [zero_staker.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&zero_staker), 0);
@@ -1008,6 +1018,7 @@ fn slash_redistribution_funds_are_conserved_multi_worker_multi_loser() {
         &1,
         &Vec::from_array(&f.env, [w1.clone(), w2.clone(), w3.clone()]),
         &Vec::from_array(&f.env, [loser_a.clone(), loser_b.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let total_slashed: i128 = 15_000 + 35_000; // 50_000
@@ -1045,6 +1056,7 @@ fn withdraw_pays_out_full_accrued_balance_and_zeroes_it() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
@@ -1072,12 +1084,14 @@ fn withdraw_accumulates_across_multiple_resolved_questions_before_a_single_payou
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     c.submit(&f.payer, &2, &AMOUNT);
     c.resolve(
         &2,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     // Two questions' worth of 80% share (2_000_000 each) credited before any transfer happened.
@@ -1108,6 +1122,7 @@ fn withdraw_twice_in_a_row_fails_the_second_time() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     c.withdraw(&w1, &2_000_000);
@@ -1125,6 +1140,7 @@ fn withdraw_zero_or_negative_amount_fails() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let res = c.try_withdraw(&w1, &0);
@@ -1141,6 +1157,7 @@ fn withdraw_more_than_owed_fails_without_touching_the_balance() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let res = c.try_withdraw(&w1, &2_000_001);
@@ -1158,6 +1175,7 @@ fn partial_withdrawal_leaves_the_remainder_claimable_later() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
@@ -1183,6 +1201,7 @@ fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let withdrawn = c.withdraw_to(&w1, &beneficiary, &2_000_000);
@@ -1228,6 +1247,7 @@ fn touch_does_not_change_owed_or_stake_amounts() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     fund_worker(&f, &w1, 1_000_000);
     c.stake(&w1, &1_000_000);
@@ -1248,6 +1268,7 @@ fn touch_requires_no_authorization_from_anyone() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     c.touch(&w1);
@@ -1289,6 +1310,7 @@ fn set_admin_rotates_authority_to_a_new_key() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 }
@@ -1370,6 +1392,7 @@ fn resolve_rejects_a_worker_appearing_in_both_matching_and_losing_lists() {
         &1,
         &Vec::from_array(&f.env, [ambiguous.clone()]),
         &Vec::from_array(&f.env, [ambiguous]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
@@ -1385,6 +1408,7 @@ fn resolve_rejects_duplicate_addresses_within_the_matching_list() {
         &1,
         &Vec::from_array(&f.env, [w1.clone(), w1]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
@@ -1401,6 +1425,7 @@ fn resolve_rejects_duplicate_addresses_within_the_losing_list() {
         &1,
         &Vec::from_array(&f.env, [winner]),
         &Vec::from_array(&f.env, [loser.clone(), loser]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
@@ -1419,6 +1444,7 @@ fn resolve_with_disjoint_valid_lists_still_succeeds() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     // slash = 10_000; 50% (5_000) redistributed to winner
@@ -1564,6 +1590,7 @@ fn charged_question_settles_through_resolve_exactly_like_submit() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_question(&1).status, Status::Resolved);

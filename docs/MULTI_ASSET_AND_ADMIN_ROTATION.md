@@ -24,7 +24,14 @@ eager rewrite of existing questions or balances is required.
 
 The token is bound once when a question opens. Its fee, rounding dust,
 worker credits, and losing-worker slashes are all settled in that same
-token. Stake/unbonding state is also asset-specific; a slash for a question
+token. The one exception is a basket question (`submit_basket`): it holds
+up to 8 `(token, amount)` legs, and each leg is settled in its own token
+with the same rules, independently of the others. The contract never
+converts between assets, and dust is kept per leg rather than pooled.
+Basket questions settle through `resolve()`/`resolve_by_consensus()` and
+refund through `refund()`/`refund_timeout()`. They are rejected by
+`escalate`, `resolve_challengeable`, `migrate_pending`, `reopen_question`
+and `preview_resolve`, because those paths only handle one asset. Stake/unbonding state is also asset-specific; a slash for a question
 cannot reduce a worker's stake in another token. Removing an asset from
 the allowlist blocks new submissions, deposits, charges, and stakes, but
 does not block resolution, refunds, or withdrawals of existing balances.
