@@ -2547,8 +2547,9 @@ impl OracleEscrow {
         Ok(())
     }
 
-    /// Permissionless TTL refresh for one question — and, while it's
-    /// Pending, its pending-index entries and the contract instance too.
+    /// Permissionless TTL refresh for one question — and, while it's still
+    /// in the pending index (Pending, Disputed or ResolvedPending), its
+    /// pending-index entries and the contract instance too.
     /// Pending entries are already created live until REFUND_GRACE_LEDGERS
     /// past their refund deadline, so this is only needed for a question
     /// whose timeout_ledgers exceeds the network's max TTL, or to keep a
@@ -2569,7 +2570,10 @@ impl OracleEscrow {
             Self::extend_asset_ttl(&env, &token_key);
         }
 
-        if question.status == Status::Pending {
+        if matches!(
+            question.status,
+            Status::Pending | Status::Disputed | Status::ResolvedPending
+        ) {
             let pos_key = DataKey::PendingPos(question_id);
             if let Some(pos) = env.storage().persistent().get::<_, u32>(&pos_key) {
                 Self::extend_persistent(&env, &pos_key);
