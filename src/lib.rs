@@ -173,6 +173,16 @@ pub struct PendingAdminRotation {
     pub executable_at: u32,
 }
 
+/// One top-up that has not finished warming up. Each tranche keeps its own
+/// clock so a later top-up never delays the maturity of an earlier one (#194).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WarmingTranche {
+    pub amount: i128,
+    /// Ledger the top-up was made; matures at since + STAKE_WARMUP_LEDGERS.
+    pub since: u32,
+}
+
 /// A worker's bond. `settled + warming` is the active stake get_stake()
 /// reports; `unbonding` has left the active stake but is still slashable
 /// until `unbonding_release_at`.
@@ -181,11 +191,10 @@ pub struct PendingAdminRotation {
 pub struct StakeInfo {
     /// Stake that has been bonded for at least STAKE_WARMUP_LEDGERS.
     pub settled: i128,
-    /// The most recent top-ups, not yet matured.
+    /// Sum of `warming_tranches` amounts.
     pub warming: i128,
-    /// Ledger of the most recent top-up; `warming` matures at
-    /// warming_since + STAKE_WARMUP_LEDGERS.
-    pub warming_since: u32,
+    /// Top-ups not yet matured, oldest first. None when nothing is warming.
+    pub warming_tranches: Option<Vec<WarmingTranche>>,
     /// Requested for withdrawal via begin_unstake(), claimable via
     /// complete_unstake() once `unbonding_release_at` is reached.
     pub unbonding: i128,
@@ -2084,8 +2093,8 @@ impl OracleEscrow {
 
     /// Worker posts a default-token bond, signaling credibility. Purely opt-in;
     /// never required to submit answers or be paid. The new amount warms up
-    /// for STAKE_WARMUP_LEDGERS before get_matured_stake() counts it; any
-    /// already-warming amount has its clock restarted along with it.
+    /// for STAKE_WARMUP_LEDGERS before get_matured_stake() counts it. Each
+    /// top-up matures on its own clock; earlier warming amounts keep theirs.
     pub fn stake(env: Env, worker: Address, amount: i128) -> Result<(), ContractError> {
         worker.require_auth();
         if amount <= 0 {
@@ -2100,11 +2109,7 @@ impl OracleEscrow {
         );
 
         let mut info = Self::stake_info(&env, &worker);
-        info.warming = info
-            .warming
-            .checked_add(amount)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        info.warming_since = env.ledger().sequence();
+        Self::add_warming(&env, &mut info, amount)?;
         let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
         Self::track_participant(&env, &worker);
@@ -2138,11 +2143,7 @@ impl OracleEscrow {
         );
         let key = Self::stake_key(&env, &token, &worker)?;
         let mut info = Self::stake_info_for_token(&env, &token, &worker)?;
-        info.warming = info
-            .warming
-            .checked_add(amount)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        info.warming_since = env.ledger().sequence();
+        Self::add_warming(&env, &mut info, amount)?;
         let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &key, &info);
         Self::bump_instance(&env);
@@ -2175,7 +2176,7 @@ impl OracleEscrow {
             return Err(ContractError::InsufficientStake);
         }
         let from_warming = amount.min(info.warming);
-        info.warming -= from_warming;
+        Self::drain_warming(&env, &mut info, from_warming);
         info.settled -= amount - from_warming;
 
         let timeout_ledgers: u32 = env
@@ -2260,7 +2261,7 @@ impl OracleEscrow {
             return Err(ContractError::InsufficientStake);
         }
         let from_warming = amount.min(info.warming);
-        info.warming -= from_warming;
+        Self::drain_warming(&env, &mut info, from_warming);
         info.settled -= amount - from_warming;
         let timeout_ledgers: u32 = env
             .storage()
@@ -2347,16 +2348,19 @@ impl OracleEscrow {
         let info = Self::stake_info(&env, &worker);
         // stake_info() already moves warming → settled once the full warmup
         // has elapsed, so after maturation this is simply settled + 0.
-        if info.warming == 0 {
+        let Some(tranches) = info.warming_tranches else {
             return info.settled;
-        }
+        };
         let now = env.ledger().sequence();
-        let elapsed = now.saturating_sub(info.warming_since) as i128;
         let warmup = STAKE_WARMUP_LEDGERS as i128;
-        // Clamp elapsed to [0, warmup] for safety; linear interpolation.
-        let elapsed_clamped = elapsed.min(warmup).max(0);
-        let warming_effective = info.warming * elapsed_clamped / warmup;
-        info.settled + warming_effective
+        let mut effective = info.settled;
+        for tranche in tranches.iter() {
+            let elapsed = now.saturating_sub(tranche.since) as i128;
+            // Clamp elapsed to [0, warmup] for safety; linear interpolation.
+            let elapsed_clamped = elapsed.min(warmup).max(0);
+            effective += tranche.amount * elapsed_clamped / warmup;
+        }
+        effective
     }
 
     pub fn get_stake_info(env: Env, worker: Address) -> StakeInfo {
@@ -3148,7 +3152,10 @@ impl OracleEscrow {
         }
 
         let mut left = amount;
-        for bucket in [&mut info.warming, &mut info.settled, &mut info.unbonding] {
+        let from_warming = left.min(info.warming);
+        Self::drain_warming(env, &mut info, from_warming);
+        left -= from_warming;
+        for bucket in [&mut info.settled, &mut info.unbonding] {
             let take = left.min(*bucket);
             *bucket -= take;
             left -= take;
@@ -3174,13 +3181,78 @@ impl OracleEscrow {
     ) -> Result<StakeInfo, ContractError> {
         let key = Self::stake_key(env, token, worker)?;
         let mut info: StakeInfo = env.storage().persistent().get(&key).unwrap_or_default();
-        if info.warming > 0
-            && env.ledger().sequence() >= info.warming_since.saturating_add(STAKE_WARMUP_LEDGERS)
-        {
-            info.settled += info.warming;
-            info.warming = 0;
-        }
+        Self::mature_warming(env, &mut info);
         Ok(info)
+    }
+
+    /// Moves every warming tranche that has finished its warmup into
+    /// `settled`, keeping only the ones still warming.
+    fn mature_warming(env: &Env, info: &mut StakeInfo) {
+        let Some(tranches) = info.warming_tranches.clone() else {
+            return;
+        };
+        let now = env.ledger().sequence();
+        let mut pending = Vec::new(env);
+        for tranche in tranches.iter() {
+            if now >= tranche.since.saturating_add(STAKE_WARMUP_LEDGERS) {
+                info.settled += tranche.amount;
+                info.warming -= tranche.amount;
+            } else {
+                pending.push_back(tranche);
+            }
+        }
+        info.warming_tranches = if pending.is_empty() {
+            None
+        } else {
+            Some(pending)
+        };
+    }
+
+    /// Credits a new top-up to the warming bucket on its own clock.
+    fn add_warming(env: &Env, info: &mut StakeInfo, amount: i128) -> Result<(), ContractError> {
+        info.warming = info
+            .warming
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let mut tranches = info
+            .warming_tranches
+            .clone()
+            .unwrap_or_else(|| Vec::new(env));
+        tranches.push_back(WarmingTranche {
+            amount,
+            since: env.ledger().sequence(),
+        });
+        info.warming_tranches = Some(tranches);
+        Ok(())
+    }
+
+    /// Removes `amount` from the still-warming tranches, newest first, so
+    /// the oldest top-ups keep their original maturity. Caller ensures
+    /// `amount <= info.warming`.
+    fn drain_warming(env: &Env, info: &mut StakeInfo, amount: i128) {
+        let Some(mut tranches) = info.warming_tranches.clone() else {
+            return;
+        };
+        let mut left = amount;
+        let mut i = tranches.len();
+        while i > 0 && left > 0 {
+            i -= 1;
+            let mut tranche = tranches.get(i).unwrap();
+            let take = left.min(tranche.amount);
+            tranche.amount -= take;
+            left -= take;
+            if tranche.amount == 0 {
+                tranches.remove(i);
+            } else {
+                tranches.set(i, tranche);
+            }
+        }
+        info.warming -= amount - left;
+        info.warming_tranches = if tranches.is_empty() {
+            None
+        } else {
+            Some(tranches)
+        };
     }
 
     /// Rejects duplicate addresses within either list, and any address

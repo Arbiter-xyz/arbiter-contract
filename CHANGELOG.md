@@ -20,6 +20,12 @@ actually matches this tag's source, rather than trusting the tag name alone.
 
 ## [Unreleased]
 
+- Changed `StakeInfo` (returned by `get_stake_info` / `get_stake_info_asset`):
+  the single `warming_since` field is replaced by `warming_tranches`, an
+  optional list of `{ amount, since }` top-ups. Each `stake()` /
+  `stake_asset()` now matures on its own clock, so topping up no longer
+  delays the maturity of stake already warming (#194). Integrators reading
+  `warming_since` must switch to `warming_tranches`.
 - Added `resolve_by_consensus(question_id, answers)`: settles from per-worker
   answer commitments and slashes (via the existing slash path) an
   established worker who alone dissented from an otherwise unanimous quorum.
