@@ -13,7 +13,7 @@ WASM upload could front-run the legitimate
 `initialize(admin, token, platform, timeout_ledgers)` call and become `admin`
 themselves.
 
-`scripts/deploy-init.sh` mitigates this at the tooling layer by making deploy
+`scripts/deploy-init-wizard.sh` mitigates this at the tooling layer by making deploy
 and initialize effectively atomic from the operator's point of view:
 
 - It prompts for and validates all four `initialize()` arguments (`admin`,
@@ -25,13 +25,28 @@ and initialize effectively atomic from the operator's point of view:
   between the two submissions.
 
 ```sh
-./scripts/deploy-init.sh
+./scripts/deploy-init-wizard.sh
 ```
 
 > **This is a mitigation, not a fix.** Tooling can only narrow the window
 > between two separate transactions, never close it to zero. The contract-level
 > fix for `initialize()` front-running is tracked separately; use that if you
 > need a stronger guarantee.
+
+### After deploying
+
+The wizard only updates this repo's world, not the downstream ones. A new
+contract id has to be propagated by hand to every consumer that pins it:
+
+| Repo | Variable | Where |
+| --- | --- | --- |
+| arbiter-backend | `ORACLE_CONTRACT_ID` | backend env / deployment config |
+| arbiter-app | `VITE_ORACLE_CONTRACT_ID` | app env / build config |
+| arbiter-contract | `DEFAULT_CONTRACT_ID` | `.github/workflows/release.yml` (testnet pin, used by the WASM hash verification) |
+
+The wizard prints the new contract id and these variable names at the end of
+a run. Until all three agree, release verification and the live backend/app
+will be pointing at different contracts.
 
 ## Architecture
 
