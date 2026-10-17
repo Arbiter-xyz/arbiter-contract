@@ -3,12 +3,12 @@
 ## Schema hash (#100)
 
 Questions may carry an optional 32-byte `schema_hash` through
-`submit_with_schema_hash()` or `charge_with_schema_hash()`. It is an opaque
-commitment for off-chain auditability: the contract stores and returns it but
-does not validate the hash, retrieve schema text, or validate answers. Schema
-definitions and verification remain off-chain. Existing questions without a
-stored commitment return `None`; the storage-layout rationale is documented in
-[UPGRADES.md](UPGRADES.md).
+`submit_with_schema_hash()`. It is an opaque commitment for off-chain
+auditability: the contract stores it and returns it through
+`get_question_schema_hash()`, but does not validate the hash, retrieve schema
+text, or validate answers. Schema definitions and verification remain
+off-chain. Existing questions without a stored commitment return `None`; the
+storage-layout rationale is documented in [UPGRADES.md](UPGRADES.md).
 
 ## Range-tolerance consensus (#99)
 

@@ -22,6 +22,21 @@ Instances deployed from an earlier WASM that were never initialized are still
 open to the old front-running path. Do not call `initialize()` on them; redeploy
 with the constructor instead.
 
+### After deploying
+
+The wizard only updates this repo's world, not the downstream ones. A new
+contract id has to be propagated by hand to every consumer that pins it:
+
+| Repo | Variable | Where |
+| --- | --- | --- |
+| arbiter-backend | `ORACLE_CONTRACT_ID` | backend env / deployment config |
+| arbiter-app | `VITE_ORACLE_CONTRACT_ID` | app env / build config |
+| arbiter-contract | `DEFAULT_CONTRACT_ID` | `.github/workflows/release.yml` (testnet pin, used by the WASM hash verification) |
+
+The wizard prints the new contract id and these variable names at the end of
+a run. Until all three agree, release verification and the live backend/app
+will be pointing at different contracts.
+
 ## Architecture
 
 Every current integration with the contract goes through the JavaScript
