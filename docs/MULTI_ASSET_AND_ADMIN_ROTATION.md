@@ -104,3 +104,15 @@ capable sources can move pending questions after the target allowlists
 their assets; v0.2.0 sources must be drained/refunded and payers resubmit.
 Do not assume an instance is upgradeable; inspect its `version()` and
 entrypoints first.
+## Single-token compatibility and migration note
+
+Existing single-token integrations need no migration. `submit`, `deposit`,
+`charge`, `stake`, `withdraw`, and `refund` keep their signatures and target
+the token set at `initialize()`, which is allowlisted automatically. Only
+callers that want a second asset call the `*_asset` variants, after the admin
+has run `set_asset_allowed(token, true)`; an unlisted token fails with
+`ContractError::AssetNotAllowed`. Settlement (`resolve`, `refund`,
+`refund_timeout`) reads the token stored for the question, never the instance
+default, so two questions opened in different assets settle independently
+(see `per_question_asset_selection_settles_two_questions_in_different_assets_independently`
+in `src/test.rs`).
