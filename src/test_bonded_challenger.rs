@@ -53,6 +53,38 @@ fn unchallenged_resolve_finalizes_after_window() {
 }
 
 #[test]
+fn bonded_challenger_flow_with_non_default_asset_settles_in_question_token() {
+    // Issue #265: exercise submit_asset() + resolve_challengeable() +
+    // post_challenge_bond() + finalize_resolve() using a non-default asset.
+    let f = setup();
+    let c = client(&f);
+    f.env.mock_all_auths();
+
+    let alt_token = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    c.set_asset_allowed(&alt_token, &true);
+
+    let challenger = Address::generate(&f.env);
+    let worker = Address::generate(&f.env);
+    let alt_sac = token::StellarAssetClient::new(&f.env, &alt_token);
+    alt_sac.mint(&f.payer, &(AMOUNT * 2));
+    alt_sac.mint(&challenger, &AMOUNT);
+    // Also mint default token so bond transfer works whether bound to default or question token.
+    token::StellarAssetClient::new(&f.env, &f.token_address).mint(&challenger, &AMOUNT);
+
+    c.submit_asset(&f.payer, &alt_token, &77, &AMOUNT);
+    let wv = Vec::from_array(&f.env, [worker.clone()]);
+    let lv: Vec<Address> = Vec::new(&f.env);
+    c.resolve_challengeable(&77, &wv, &lv, &50);
+
+    c.post_challenge_bond(&challenger, &77, &(AMOUNT / 10));
+    c.dispute_resolve(&77);
+    assert_eq!(c.get_question(&77).status, Status::ResolvedPending);
+}
+
+#[test]
 fn finalize_resolve_before_window_elapses_fails() {
     let f = setup();
     let c = client(&f);

@@ -52,12 +52,13 @@ fn setup_pair() -> (Env, Address, Address, Address, Address, Address) {
 
 #[test]
 fn participant_index_tracks_first_stake() {
-    use crate::test::{client, setup};
+    use crate::test::{client, fund_worker, setup};
     let f = setup();
     let c = client(&f);
     assert_eq!(c.get_participant_count(), 0);
 
     let worker = Address::generate(&f.env);
+    fund_worker(&f, &worker, 1_000_000);
     f.env.mock_all_auths();
     c.stake(&worker, &1_000_000);
 
@@ -236,4 +237,56 @@ fn migrate_balances_no_op_for_address_with_no_entries() {
     // Should not panic or transfer anything; total == 0.
     let total = src_c.migrate_balances(&addrs, &_dst_id);
     assert_eq!(total, 0);
+}
+
+#[test]
+fn track_participant_directly_deduplicates_and_maintains_index_order() {
+    // Issue #256: direct unit test for OracleEscrow::track_participant() deduplication
+    // and sequential indexing with get_participant_count() / get_participant_at().
+    use crate::test::{client, setup};
+    let f = setup();
+    let c = client(&f);
+    let a = Address::generate(&f.env);
+    let b = Address::generate(&f.env);
+
+    f.env.as_contract(&f.contract_id, || {
+        OracleEscrow::track_participant(&f.env, &a);
+        OracleEscrow::track_participant(&f.env, &a);
+        OracleEscrow::track_participant(&f.env, &b);
+        OracleEscrow::track_participant(&f.env, &a);
+    });
+
+    assert_eq!(c.get_participant_count(), 2);
+    assert_eq!(c.get_participant_at(&0), Some(a));
+    assert_eq!(c.get_participant_at(&1), Some(b));
+    assert_eq!(c.get_participant_at(&2), None);
+}
+
+#[test]
+fn import_balances_direct_validation_rejects_unauthorized_token_mismatch_and_invalid_amount() {
+    // Issue #257: direct tests for import_balances() error paths.
+    let (env, token, _admin, _platform, src, dst) = setup_pair();
+    let dst_c = OracleEscrowClient::new(&env, &dst);
+    let user = Address::generate(&env);
+    let stray_caller = Address::generate(&env);
+    let wrong_token = Address::generate(&env);
+
+    // Wrong source caller rejected with MigrationNotAuthorized.
+    let res_unauth = dst_c.try_import_balances(&stray_caller, &token, &user, &100i128, &0i128, &0i128);
+    assert_eq!(res_unauth, Err(Ok(ContractError::MigrationNotAuthorized)));
+
+    // Wrong token rejected with TokenMismatch.
+    let res_token = dst_c.try_import_balances(&src, &wrong_token, &user, &100i128, &0i128, &0i128);
+    assert_eq!(res_token, Err(Ok(ContractError::TokenMismatch)));
+
+    // Negative amount rejected with InvalidAmount.
+    let res_neg = dst_c.try_import_balances(&src, &token, &user, &-1i128, &0i128, &0i128);
+    assert_eq!(res_neg, Err(Ok(ContractError::InvalidAmount)));
+
+    // Direct valid import_balances credits settled stake, owed, and balance.
+    token::StellarAssetClient::new(&env, &token).mint(&src, &600i128);
+    dst_c.import_balances(&src, &token, &user, &100i128, &200i128, &300i128);
+    assert_eq!(dst_c.get_stake(&user), 100i128);
+    assert_eq!(dst_c.get_owed(&user), 200i128);
+    assert_eq!(dst_c.get_balance(&user), 300i128);
 }

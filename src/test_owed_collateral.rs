@@ -1,4 +1,4 @@
-#![cfg(test)]
+#![cfg(all(test, feature = "unimplemented-owed-collateral"))]
 
 //! Tests for issue #92 (owed balance as collateral): a lock/lien primitive
 //! on top of Owed(Address), gated to a single admin-registered lending

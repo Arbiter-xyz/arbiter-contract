@@ -156,7 +156,7 @@ fn settled_questions_leave_the_index_and_the_rest_stay_listed() {
     p.env.mock_all_auths();
     let c = OracleEscrowClient::new(&p.env, &p.old);
     let w = Address::generate(&p.env);
-    c.resolve(&1, &Vec::from_array(&p.env, [w]), &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32])); // head
+    c.resolve(&1, &Vec::from_array(&p.env, [w]), &Vec::new(&p.env), &BytesN::from_array(&p.env, &[0u8; 32])); // head
     c.refund(&6); // tail
     c.refund(&3); // middle
     p.env.ledger().set_sequence_number(10_000 + TIMEOUT);
@@ -301,7 +301,7 @@ fn migrated_question_settles_normally_on_the_target_and_is_dead_on_the_source() 
 
     let old_c = OracleEscrowClient::new(&p.env, &p.old);
     assert_eq!(
-        old_c.try_resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32])),
+        old_c.try_resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&p.env, &[0u8; 32])),
         Err(Ok(ContractError::QuestionNotPending))
     );
     assert_eq!(
@@ -314,7 +314,7 @@ fn migrated_question_settles_normally_on_the_target_and_is_dead_on_the_source() 
         Err(Ok(ContractError::QuestionNotPending))
     );
 
-    OracleEscrowClient::new(&p.env, &p.new).resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32]));
+    OracleEscrowClient::new(&p.env, &p.new).resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&p.env, &[0u8; 32]));
     assert_eq!(
         OracleEscrowClient::new(&p.env, &p.new).get_owed(&w),
         AMOUNT * 8 / 10
@@ -621,6 +621,7 @@ fn randomized_migration_never_loses_or_duplicates_funds() {
                             id,
                             &Vec::from_array(&p.env, [worker.clone()]),
                             &Vec::new(&p.env),
+                            &BytesN::from_array(&p.env, &[0u8; 32]),
                         );
                         p.env.set_auths(&[]);
                         let mut k = std::vec![tag];
@@ -645,4 +646,39 @@ fn randomized_migration_never_loses_or_duplicates_funds() {
             check_invariants(&p, &owed, paid_out, total_in);
         }
     }
+}
+
+#[test]
+fn migrate_pending_requires_target_to_allowlist_non_default_asset() {
+    // Issue #292: verify migrate_pending() fails with TokenMismatch when the
+    // migration target has not yet allowlisted a non-default question's token,
+    // and succeeds once the target allowlists that token.
+    let p = pair(0);
+    p.env.mock_all_auths();
+
+    let alt_token = p
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&p.env))
+        .address();
+    let old_c = OracleEscrowClient::new(&p.env, &p.old);
+    let new_c = OracleEscrowClient::new(&p.env, &p.new);
+
+    // Allowlist alt_token ONLY on source, not yet on target.
+    old_c.set_asset_allowed(&alt_token, &true);
+
+    let payer = Address::generate(&p.env);
+    token::StellarAssetClient::new(&p.env, &alt_token).mint(&payer, &AMOUNT);
+    old_c.submit_asset(&payer, &alt_token, &42, &AMOUNT);
+
+    // Target has not allowlisted alt_token -> fails with TokenMismatch.
+    let batch = ids(&p.env, &[42]);
+    let res_unlisted = old_c.try_migrate_pending(&batch, &p.new);
+    assert_eq!(res_unlisted, Err(Ok(ContractError::TokenMismatch)));
+
+    // Once target allowlists alt_token, migrate_pending succeeds.
+    new_c.set_asset_allowed(&alt_token, &true);
+    let moved = old_c.migrate_pending(&batch, &p.new);
+    assert_eq!(moved, AMOUNT);
+    assert_eq!(new_c.get_question(&42).status, Status::Pending);
+    assert_eq!(new_c.get_question_token(&42), alt_token);
 }

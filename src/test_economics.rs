@@ -514,7 +514,7 @@ fn simulate(version: Version, s: Scenario, seed: u64) -> Outcome {
             out.refunded += 1;
             continue;
         }
-        m.with(|e| e.resolve(q, &winners, &losers, &BytesN::from_array(&env, &[0u8; 32])));
+        m.with(|e| e.resolve(q, &winners, &losers, &BytesN::from_array(&m.env, &[0u8; 32])));
         if lie && !audit && !consensus {
             out.corrupted += 1;
             bribes += s.bribe;

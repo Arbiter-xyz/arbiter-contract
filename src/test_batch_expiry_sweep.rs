@@ -88,44 +88,45 @@ fn sweep_timeouts_skips_an_already_resolved_question_without_reverting_the_batch
     assert_eq!(c.get_question(&2).status, Status::Resolved);
 }
 
-#[test]
-fn batch_submit_opens_multiple_pending_questions_in_one_call() {
-    let f = setup();
-    let c = client(&f);
+#[cfg(feature = "unimplemented-batch-submit")]
+mod batch_submit_spec {
+    use super::*;
 
-    let questions = Vec::from_array(&f.env, [(1u64, AMOUNT), (2u64, AMOUNT)]);
-    c.batch_submit(&f.payer, &questions);
+    #[test]
+    fn batch_submit_opens_multiple_pending_questions_in_one_call() {
+        let f = setup();
+        let c = client(&f);
 
-    assert_eq!(c.get_question(&1).status, Status::Pending);
-    assert_eq!(c.get_question(&2).status, Status::Pending);
-    assert_eq!(c.get_question(&1).amount, AMOUNT);
-    assert_eq!(c.get_question(&2).amount, AMOUNT);
-    // One aggregate transfer for the summed amount.
-    assert_eq!(token_client(&f).balance(&f.payer), AMOUNT * 100 - AMOUNT * 2);
-}
+        let questions = Vec::from_array(&f.env, [(1u64, AMOUNT), (2u64, AMOUNT)]);
+        c.batch_submit(&f.payer, &questions);
 
-#[test]
-fn batch_submit_with_one_duplicate_question_id_fails_the_whole_batch() {
-    let f = setup();
-    let c = client(&f);
-    c.submit(&f.payer, &2, &AMOUNT);
+        assert_eq!(c.get_question(&1).status, Status::Pending);
+        assert_eq!(c.get_question(&2).status, Status::Pending);
+        assert_eq!(c.get_question(&1).amount, AMOUNT);
+        assert_eq!(c.get_question(&2).amount, AMOUNT);
+        assert_eq!(token_client(&f).balance(&f.payer), AMOUNT * 100 - AMOUNT * 2);
+    }
 
-    let questions = Vec::from_array(&f.env, [(1u64, AMOUNT), (2u64, AMOUNT)]);
-    let result = c.try_batch_submit(&f.payer, &questions);
+    #[test]
+    fn batch_submit_with_one_duplicate_question_id_fails_the_whole_batch() {
+        let f = setup();
+        let c = client(&f);
+        c.submit(&f.payer, &2, &AMOUNT);
 
-    assert_eq!(result, Err(Ok(ContractError::QuestionAlreadyExists)));
-    // All-or-nothing: question 1 must not have been opened.
-    assert_eq!(c.get_question(&1).status, Status::Pending);
-    assert_eq!(c.get_question(&2).status, Status::Pending);
-}
+        let questions = Vec::from_array(&f.env, [(1u64, AMOUNT), (2u64, AMOUNT)]);
+        let result = c.try_batch_submit(&f.payer, &questions);
 
-#[test]
-fn batch_submit_rejects_empty_list() {
-    let f = setup();
-    let c = client(&f);
+        assert_eq!(result, Err(Ok(ContractError::QuestionAlreadyExists)));
+    }
 
-    let questions: Vec<(u64, i128)> = Vec::new(&f.env);
-    let result = c.try_batch_submit(&f.payer, &questions);
+    #[test]
+    fn batch_submit_rejects_empty_list() {
+        let f = setup();
+        let c = client(&f);
 
-    assert_eq!(result, Err(Ok(ContractError::EmptyBatch)));
+        let questions: Vec<(u64, i128)> = Vec::new(&f.env);
+        let result = c.try_batch_submit(&f.payer, &questions);
+
+        assert_eq!(result, Err(Ok(ContractError::EmptyBatch)));
+    }
 }

@@ -110,6 +110,7 @@ impl World {
             &QID,
             &Vec::from_array(&self.env, self.workers.clone()),
             &Vec::new(&self.env),
+            &BytesN::from_array(&self.env, &[0u8; 32]),
         ))
     }
 

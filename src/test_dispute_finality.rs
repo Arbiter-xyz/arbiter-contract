@@ -3,7 +3,7 @@
 //! Tests for #97: public dispute-window finality.
 
 use super::*;
-use crate::test::{client, setup};
+use crate::test::{client, setup, AMOUNT};
 use soroban_sdk::testutils::{Address as _, Ledger};
 
 #[test]
