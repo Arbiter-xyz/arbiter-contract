@@ -30,6 +30,12 @@ actually matches this tag's source, rather than trusting the tag name alone.
 - Added `get_admin()` and `get_platform()` views (alongside `get_token()`).
 - Added `get_questions(question_ids)` batch view returning
   `Vec<Option<Question>>` in input order.
+- `QuestionResolved` grew a `bond_forfeited` field (#192). `total_slashed`
+  now reports worker-stake slashing only; a challenger bond forfeited in the
+  same `finalize_resolve()` call is reported separately in `bond_forfeited`
+  (0 when no bond was posted, or the bond was returned to the challenger).
+  Existing indexers that key off the field name keep working; they can now
+  drop the workaround of subtracting bond forfeitures from `total_slashed`.
 
 ## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
 

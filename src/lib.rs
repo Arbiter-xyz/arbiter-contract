@@ -602,7 +602,14 @@ pub struct QuestionSettled {
 }
 
 /// `question_resolved` topics: question_id; data: worker_count, fee,
-/// total_slashed.
+/// total_slashed, bond_forfeited.
+///
+/// #192: `total_slashed` counts ONLY worker-stake slashing — the sum of the
+/// per-worker amounts in the accompanying `worker_slashed` events. A forfeited
+/// challenger bond is reported separately in `bond_forfeited` (0 when no bond
+/// was posted, or when the bond was returned to the challenger). Keeping the
+/// two apart stops an off-chain indexer from over-counting worker slashing by
+/// folding a spurious bond forfeiture into `total_slashed`.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionResolved {
@@ -610,7 +617,12 @@ pub struct QuestionResolved {
     pub question_id: u64,
     pub worker_count: u32,
     pub fee: i128,
+    /// Sum of the actual worker-stake slashes (`worker_slashed` amounts). Does
+    /// NOT include any forfeited challenger bond — see `bond_forfeited`.
     pub total_slashed: i128,
+    /// Challenger bond forfeited to the platform in the same call (0 if no bond
+    /// was posted, or if the bond was returned to the challenger instead).
+    pub bond_forfeited: i128,
 }
 
 /// Issue #59: on-chain answer notarization.
@@ -2077,6 +2089,8 @@ impl OracleEscrow {
             worker_count: workers.len(),
             fee,
             total_slashed,
+            // resolve() never settles a challenger bond.
+            bond_forfeited: 0,
         }
         .publish(&env);
         Ok(())
@@ -4799,6 +4813,8 @@ impl OracleEscrow {
             worker_count: workers.len(),
             fee,
             total_slashed: platform_take - fee - dust,
+            // escalate_resolve() never settles a challenger bond.
+            bond_forfeited: 0,
         }
         .publish(&env);
         EscalationResolved { question_id, overturned }.publish(&env);
@@ -5026,8 +5042,15 @@ impl OracleEscrow {
 
         let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
         let mut platform_take = fee + dust;
+        // #192: accumulate worker-stake slashing on its own, so the emitted
+        // QuestionResolved.total_slashed never folds in the challenger-bond
+        // forfeiture settled below.
+        let mut total_slashed: i128 = 0;
         for loser in losing_workers.iter() {
             let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
+            total_slashed = total_slashed
+                .checked_add(slashed)
+                .ok_or(ContractError::ArithmeticOverflow)?;
             platform_take = platform_take
                 .checked_add(slashed)
                 .ok_or(ContractError::ArithmeticOverflow)?;
@@ -5047,8 +5070,11 @@ impl OracleEscrow {
             .storage()
             .persistent()
             .get(&bond_key);
+        let mut bond_forfeited: i128 = 0;
         if let Some(bond) = maybe_bond {
             // Bond forfeited: add to platform_take so it transfers in one call.
+            // Reported separately from total_slashed (#192).
+            bond_forfeited = bond.amount;
             platform_take = platform_take
                 .checked_add(bond.amount)
                 .ok_or(ContractError::ArithmeticOverflow)?;
@@ -5076,7 +5102,8 @@ impl OracleEscrow {
             question_id,
             worker_count: workers.len(),
             fee,
-            total_slashed: platform_take - fee - dust,
+            total_slashed,
+            bond_forfeited,
         }
         .publish(&env);
         Ok(())
