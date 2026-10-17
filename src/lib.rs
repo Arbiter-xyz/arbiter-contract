@@ -2976,15 +2976,8 @@ impl OracleEscrow {
         out
     }
 
-    /// Read-only: the schema commitment stored by submit_with_schema_hash(),
-    /// or None if the question has none (including questions opened before
-    /// schema commitments existed). The contract never validates the hash.
-    pub fn get_question_schema_hash(env: Env, question_id: u64) -> Option<BytesN<32>> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::QuestionSchemaHash(question_id))
-    }
-
+    /// Number of questions opened with `category` (see DataKey::CategoryCount).
+    /// Zero for a category that has never been used.
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
