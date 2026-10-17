@@ -3915,6 +3915,90 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// #92: lending-authority-only. Pledges `amount` of the worker's
+    /// Owed(Address) as collateral, so do_withdraw() won't pay it out. Can't
+    /// lock more than Owed minus what's already locked.
+    pub fn lock_owed(
+        env: Env,
+        authority: Address,
+        worker: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::require_lending_authority(&env, &authority)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let owed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Owed(worker.clone()))
+            .unwrap_or(0);
+        let locked = Self::get_locked_owed(env.clone(), worker.clone());
+        if amount > owed - locked {
+            return Err(ContractError::LockExceedsOwed);
+        }
+        let total_locked = locked + amount;
+        Self::set_persistent(&env, &DataKey::OwedLock(worker.clone()), &total_locked);
+        Self::bump_instance(&env);
+        OwedLocked {
+            worker,
+            amount,
+            total_locked,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// #92: lending-authority-only. Releases `amount` of a previous
+    /// lock_owed() pledge, making it withdrawable again.
+    pub fn release_owed(
+        env: Env,
+        authority: Address,
+        worker: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::require_lending_authority(&env, &authority)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let locked = Self::get_locked_owed(env.clone(), worker.clone());
+        if amount > locked {
+            return Err(ContractError::NoLockToRelease);
+        }
+        let total_locked = locked - amount;
+        Self::set_persistent(&env, &DataKey::OwedLock(worker.clone()), &total_locked);
+        Self::bump_instance(&env);
+        OwedReleased {
+            worker,
+            amount,
+            total_locked,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Read-only: the part of the worker's Owed(Address) currently pledged
+    /// via lock_owed(), or 0 if nothing is locked.
+    pub fn get_locked_owed(env: Env, worker: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwedLock(worker))
+            .unwrap_or(0)
+    }
+
+    fn require_lending_authority(env: &Env, authority: &Address) -> Result<(), ContractError> {
+        let registered: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::LendingAuthority)
+            .ok_or(ContractError::LendingAuthorityNotSet)?;
+        if *authority != registered {
+            return Err(ContractError::NotLendingAuthority);
+        }
+        authority.require_auth();
+        Ok(())
+    }
+
     // ---- #128: public-goods fee-routing hook --------------------------
     //
     // Admin-settable: a share (in bps) of the platform's resolve() revenue
