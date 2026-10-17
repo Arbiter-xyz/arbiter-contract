@@ -1241,7 +1241,6 @@ pub struct ChallengeBondSettled {
     /// disputed), false = bond forfeited to platform (spurious challenge).
     pub returned: bool,
 }
-}
 
 /// #125: a worker's pending hash commitment for a question. Stored under
 /// DataKey::Commit(question_id, worker) by commit_answer() and removed by
@@ -1432,35 +1431,6 @@ impl OracleEscrow {
             &amount,
         );
         Self::open_question(&env, payer, question_id, amount, token, None, None)
-    }
-
-    /// #30: payer locks several allowlisted assets for one question, paid out
-    /// per asset by resolve() or returned per asset by refund(). Each leg is
-    /// settled in its own token with its own 20% fee, integer dust to the
-    /// platform, worker share and slash cap, so no conversion ever happens.
-    /// A one-leg basket behaves like submit_asset(). Question.amount stays 0;
-    /// read the legs back with get_question_basket().
-    pub fn submit_basket(
-        env: Env,
-        payer: Address,
-        question_id: u64,
-        basket: Vec<(Address, i128)>,
-    ) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
-        payer.require_auth();
-        Self::validate_basket(&env, &basket)?;
-        for (token, amount) in basket.iter() {
-            token::Client::new(&env, &token).transfer(
-                &payer,
-                &env.current_contract_address(),
-                &amount,
-            );
-        }
-        let (first_token, _) = basket.get(0).ok_or(ContractError::InvalidBasket)?;
-        Self::open_question(&env, payer, question_id, 0, first_token)?;
-        let key = AssetKey::QuestionBasket(question_id);
-        Self::set_persistent(&env, &key, &basket);
-        Ok(())
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -1780,15 +1750,32 @@ impl OracleEscrow {
                 token: token.clone(),
             },
         )?;
-        if let Some(schema_hash) = schema_hash {
-            Self::set_persistent(env, &DataKey::QuestionSchemaHash(question_id), &schema_hash);
+        if let Some(hash) = schema_hash {
+            env.storage()
+                .persistent()
+                .set(&DataKey::QuestionSchemaHash(question_id), &hash);
         }
         if let Some(category) = category {
             let key = DataKey::CategoryCount(category);
-            let next: u32 = env.storage().persistent().get(&key).unwrap_or(0).saturating_add(1);
-            Self::set_persistent(env, &key, &next);
+            let next: u32 = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(0)
+                .saturating_add(1);
+            env.storage().persistent().set(&key, &next);
         }
         Ok(())
+    }
+
+    /// The stored Question for `question_id` (any status), or
+    /// QuestionNotFound. Shared by the read-only getters and the settlement
+    /// entry points.
+    fn load_question(env: &Env, question_id: u64) -> Result<Question, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)
     }
 
     /// Stores a brand-new Pending question, indexes it, and emits
@@ -4188,7 +4175,8 @@ impl OracleEscrow {
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
-        if env.ledger().sequence() < question.deadline {
+        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
+        if env.ledger().sequence() < deadline {
             return Err(ContractError::TimeoutNotReached);
         }
         Self::do_refund(env, question_id, true)?;
@@ -5577,7 +5565,6 @@ impl OracleEscrow {
         env.storage()
             .persistent()
             .get(&DataKey::ChallengerBond(question_id))
-    }
     }
 }
 
