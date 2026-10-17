@@ -2513,7 +2513,12 @@ impl OracleEscrow {
         for key in [
             DataKey::Owed(account.clone()),
             DataKey::Stake(account.clone()),
-            DataKey::Balance(account),
+            DataKey::Balance(account.clone()),
+            DataKey::PasskeyPubkey(account.clone()),
+            DataKey::KycAttestation(account.clone()),
+            DataKey::Reputation(account.clone()),
+            DataKey::ResolvedCount(account.clone()),
+            DataKey::TopUpThreshold(account),
         ] {
             if env.storage().persistent().has(&key) {
                 Self::extend_persistent(&env, &key);
@@ -2680,7 +2685,10 @@ impl OracleEscrow {
     ///
     /// Calling with `Some(resolver)` is idempotent: a second call replaces
     /// the previous delegate. Calling with `None` revokes the delegation;
-    /// after revocation only the admin may call resolve() again.
+    /// after revocation only the admin may call resolve() again. Unlike
+    /// `propose_admin_rotation()`, `set_resolver()` takes effect immediately
+    /// without a timelock delay so the admin can instantly revoke a
+    /// compromised hot operational resolver key (#267).
     pub fn set_resolver(
         env: Env,
         resolver: Option<Address>,
@@ -2798,13 +2806,15 @@ impl OracleEscrow {
     }
 
     /// Read-only batch form of get_question() for indexers and dashboards:
-    /// one call instead of N. Output is in input order, with `None` at the
-    /// position of any id that doesn't exist rather than failing the whole
-    /// call. No maximum length is enforced here; simulation resource limits
-    /// bound it in practice.
+    /// one call instead of N. Output is in input order (up to MAX_PENDING_PAGE
+    /// items per call so transaction/simulation footprint stays bounded), with
+    /// `None` at the position of any id that doesn't exist rather than failing
+    /// the whole call.
     pub fn get_questions(env: Env, question_ids: Vec<u64>) -> Vec<Option<Question>> {
         let mut out = Vec::new(&env);
-        for question_id in question_ids.iter() {
+        let limit = question_ids.len().min(MAX_PENDING_PAGE);
+        for i in 0..limit {
+            let question_id = question_ids.get(i).unwrap();
             out.push_back(Self::load_question(&env, question_id).ok());
         }
         out
@@ -3092,7 +3102,7 @@ impl OracleEscrow {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
-        if timeout_ledgers == 0 {
+        if timeout_ledgers == 0 || timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
         if env
@@ -3429,7 +3439,7 @@ impl OracleEscrow {
             .persistent()
             .get(&key)
             .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
+        if question.status != Status::Pending && question.status != Status::Disputed {
             return Err(ContractError::QuestionNotPending);
         }
 
@@ -3460,6 +3470,11 @@ impl OracleEscrow {
         question: &mut Question,
         status: Status,
     ) {
+        if question.status == Status::Disputed && status == Status::Refunded {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::EscalatedQuestion(question_id));
+        }
         question.status = status;
         Self::set_persistent(env, key, question);
         Self::index_remove(env, question_id);
@@ -3501,15 +3516,20 @@ impl OracleEscrow {
             .persistent()
             .get(&DataKey::PendingCount)
             .unwrap_or(0);
+        if count == 0 {
+            env.storage().persistent().remove(&pos_key);
+            return;
+        }
         let last = count - 1;
-        if pos != last {
-            let last_id: u64 = env
+        if pos < last {
+            if let Some(last_id) = env
                 .storage()
                 .persistent()
-                .get(&DataKey::PendingAt(last))
-                .unwrap();
-            Self::set_persistent(env, &DataKey::PendingAt(pos), &last_id);
-            Self::set_persistent(env, &DataKey::PendingPos(last_id), &pos);
+                .get::<_, u64>(&DataKey::PendingAt(last))
+            {
+                Self::set_persistent(env, &DataKey::PendingAt(pos), &last_id);
+                Self::set_persistent(env, &DataKey::PendingPos(last_id), &pos);
+            }
         }
         env.storage().persistent().remove(&DataKey::PendingAt(last));
         env.storage().persistent().remove(&pos_key);
@@ -3801,8 +3821,8 @@ impl OracleEscrow {
     // refund_timeout()'s own behavior, error cases and signature are
     // unchanged.
 
-    /// The per-question logic refund_timeout() has always run: only
-    /// eligible once Pending and past its deadline, verbatim.
+    /// The per-question logic refund_timeout() has always run: eligible once
+    /// Pending or Disputed and past its deadline (#221).
     fn try_refund_timeout(env: &Env, question_id: u64) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
         let question: Question = env
@@ -3810,10 +3830,11 @@ impl OracleEscrow {
             .persistent()
             .get(&key)
             .ok_or(ContractError::QuestionNotFound)?;
-        if question.status != Status::Pending {
+        if question.status != Status::Pending && question.status != Status::Disputed {
             return Err(ContractError::QuestionNotPending);
         }
-        if env.ledger().sequence() < question.deadline {
+        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
+        if env.ledger().sequence() < deadline {
             return Err(ContractError::TimeoutNotReached);
         }
         Self::do_refund(env, question_id, true)?;
@@ -3902,6 +3923,11 @@ impl OracleEscrow {
     // lock_owed() set it to (open question 3). Authorization is a single
     // admin-registered address (open question 2), the same shape as
     // set_migration_source()/MigrationSource above.
+
+    /// Read-only getter for the registered lending authority address (#92 / #258).
+    pub fn get_lending_authority(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::LendingAuthority)
+    }
 
     /// Admin-only. Registers the one address allowed to call
     /// lock_owed()/release_owed() — e.g. a separate lending-protocol
@@ -4045,8 +4071,8 @@ impl OracleEscrow {
 
     /// Admin-only. Configures the ed25519 public key of the single trusted
     /// off-chain KYC attestor whose signed claims attest_kyc() will accept
-    /// (issue #75). Replacing it does not retroactively invalidate
-    /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
+    /// (issue #75). Rotating to a new public key immediately invalidates
+    /// attestations signed by the previous key in `is_kyc_verified()` (#225).
     pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage()
@@ -4084,12 +4110,16 @@ impl OracleEscrow {
             return Err(ContractError::InvalidKycExpiry);
         }
 
-        let mut message = subject.to_xdr(&env);
+        let mut message = subject.clone().to_xdr(&env);
         message.append(&expiry_ledger.to_xdr(&env));
         env.crypto()
             .ed25519_verify(&attestor_pubkey, &message, &signature);
 
-        Self::set_persistent(&env, &DataKey::KycAttestation(subject.clone()), &expiry_ledger);
+        Self::set_persistent(
+            &env,
+            &DataKey::KycAttestation(subject.clone()),
+            &(attestor_pubkey, expiry_ledger),
+        );
         Self::bump_instance(&env);
         KycAttested {
             subject,
@@ -4099,8 +4129,9 @@ impl OracleEscrow {
         Ok(())
     }
 
-    /// Returns None for a question with no minted claim yet (unresolved or
-    /// simply not minted), matching this issue's third acceptance criterion.
+    /// Read-only lookup for `#93` question claim records (`DataKey::Claim`).
+    /// Returns `None` for any question without a recorded `ClaimRecord`
+    /// (#259).
     pub fn get_claim(env: Env, question_id: u64) -> Option<ClaimRecord> {
         env.storage().persistent().get(&DataKey::Claim(question_id))
     }
@@ -4115,23 +4146,18 @@ impl OracleEscrow {
     // there is no function anywhere in this contract that moves a
     // Reputation entry between addresses.
 
-    /// Admin-only, opt-in companion to resolve(): records the same
-    /// workers/losing_workers outcome for `question_id` into each worker's
-    /// running Reputation tally. Guarded against being called twice for the
-    /// same question_id so a resolved question's counters can't be
-    /// double-counted. Intentionally does not duplicate resolve()'s
-    /// validation (list overlap, size cap) — this trusts the same admin
-    /// that already authorized resolve() and is meant to be called
-    /// immediately alongside it.
     /// Permissionless batch version of refund_timeout(): attempts the same
     /// per-question deadline check and refund for every id in
-    /// `question_ids`, continuing past individual failures (a question
-    /// that's not-yet-eligible or already settled) instead of reverting the
-    /// whole call. Returns one `Result` per input id, in the same order, so
-    /// the caller can see exactly which ones actually refunded.
+    /// `question_ids` (up to `MAX_PENDING_PAGE` per call so transaction
+    /// footprint stays bounded, #288), continuing past individual failures
+    /// (a question that's not-yet-eligible or already settled) instead of
+    /// reverting the whole call. Returns one `Result` per processed id, in
+    /// the same order, so the caller can see which ones actually refunded.
     pub fn sweep_timeouts(env: Env, question_ids: Vec<u64>) -> Vec<Result<(), ContractError>> {
         let mut results = Vec::new(&env);
-        for question_id in question_ids.iter() {
+        let limit = question_ids.len().min(MAX_PENDING_PAGE);
+        for i in 0..limit {
+            let question_id = question_ids.get(i).unwrap();
             results.push_back(Self::try_refund_timeout(&env, question_id));
         }
         results
@@ -4299,15 +4325,25 @@ impl OracleEscrow {
         }
     }
 
-    /// Whether `subject` currently holds an unexpired KYC attestation.
+    /// Whether `subject` currently holds an unexpired KYC attestation signed
+    /// by the currently configured `KycAttestorPubkey` (#225).
     /// Informational only — see attest_kyc()'s doc comment.
     pub fn is_kyc_verified(env: Env, subject: Address) -> bool {
-        let expiry: Option<u32> = env
+        let Some(current_attestor) = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::KycAttestorPubkey)
+        else {
+            return false;
+        };
+        let attestation: Option<(BytesN<32>, u32)> = env
             .storage()
             .persistent()
             .get(&DataKey::KycAttestation(subject));
-        match expiry {
-            Some(expiry) => env.ledger().sequence() < expiry,
+        match attestation {
+            Some((attestor, expiry)) => {
+                attestor == current_attestor && env.ledger().sequence() < expiry
+            }
             None => false,
         }
     }
@@ -4725,27 +4761,14 @@ impl OracleEscrow {
             .persistent()
             .get(&DataKey::EscalatedQuestion(question_id));
         let overturned = if let Some(ref eq) = escalated {
-            // Lists differ if lengths differ, or if any element differs.
-            let workers_match = eq.first_workers.len() == workers.len() && {
-                let mut same = true;
-                for i in 0..workers.len() {
-                    if eq.first_workers.get(i).unwrap() != workers.get(i).unwrap() {
-                        same = false;
-                        break;
-                    }
-                }
-                same
-            };
-            let losers_match = eq.first_losing_workers.len() == losing_workers.len() && {
-                let mut same = true;
-                for i in 0..losing_workers.len() {
-                    if eq.first_losing_workers.get(i).unwrap() != losing_workers.get(i).unwrap() {
-                        same = false;
-                        break;
-                    }
-                }
-                same
-            };
+            // Compare as order-independent sets (validate_worker_lists guarantees no duplicates, #223).
+            let workers_match = eq.first_workers.len() == workers.len()
+                && eq.first_workers.iter().all(|w| workers.contains(&w));
+            let losers_match = eq.first_losing_workers.len() == losing_workers.len()
+                && eq
+                    .first_losing_workers
+                    .iter()
+                    .all(|w| losing_workers.contains(&w));
             !workers_match || !losers_match
         } else {
             false
@@ -4890,9 +4913,10 @@ impl OracleEscrow {
     }
 
     /// Permissionless: anyone with a bond can stake a claim that the pending
-    /// resolution is wrong. The bond (`amount` in the default token) is held
-    /// by this contract. The caller must be the one named in subsequent
-    /// finalize_resolve() checks. Only one bond per question_id is tracked.
+    /// resolution is wrong. The bond (`amount` in the question's bound token,
+    /// #222) is held by this contract. The caller must be the one named in
+    /// subsequent finalize_resolve() checks. Only one bond per question_id is
+    /// tracked.
     ///
     /// The question must be in ResolvedPending status and must have an
     /// unexpired dispute window (current ledger < dispute_deadline).
@@ -4933,7 +4957,7 @@ impl OracleEscrow {
             return Err(ContractError::BondAlreadyPosted);
         }
 
-        let token_addr = Self::token(&env)?;
+        let token_addr = Self::question_token(&env, question_id)?;
         token::Client::new(&env, &token_addr).transfer(
             &challenger,
             &env.current_contract_address(),
