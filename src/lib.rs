@@ -1396,7 +1396,7 @@ impl OracleEscrow {
             &env.current_contract_address(),
             &amount,
         );
-        Self::open_question(&env, payer, question_id, amount, token)
+        Self::open_question(&env, payer, question_id, amount, token, None, None)
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -1680,7 +1680,7 @@ impl OracleEscrow {
         }
         Self::set_persistent(&env, &key, &(existing - amount));
 
-        Self::open_question(env, payer, question_id, amount, token)
+        Self::open_question(env, payer, question_id, amount, token, None, None)
     }
 
     /// Shared by submit() (fresh transfer) and charge() (drawn from an
@@ -1694,6 +1694,8 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
+        schema_hash: Option<BytesN<32>>,
+        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
         let timeout_ledgers: u32 = env
             .storage()
@@ -1714,6 +1716,14 @@ impl OracleEscrow {
                 token: token.clone(),
             },
         )?;
+        if let Some(schema_hash) = schema_hash {
+            Self::set_persistent(env, &DataKey::QuestionSchemaHash(question_id), &schema_hash);
+        }
+        if let Some(category) = category {
+            let key = DataKey::CategoryCount(category);
+            let next: u32 = env.storage().persistent().get(&key).unwrap_or(0).saturating_add(1);
+            Self::set_persistent(env, &key, &next);
+        }
         Ok(())
     }
 
@@ -2831,11 +2841,20 @@ impl OracleEscrow {
         out
     }
 
+    /// Read-only: the schema commitment stored by submit_with_schema_hash(),
+    /// or None if the question has none (including questions opened before
+    /// schema commitments existed). The contract never validates the hash.
+    pub fn get_question_schema_hash(env: Env, question_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::QuestionSchemaHash(question_id))
+    }
+
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)
+            .get(&DataKey::CategoryCount(category))
+            .unwrap_or(0)
     }
 
     /// #109 circuit breaker. Admin-only. `true` makes every funding entry
