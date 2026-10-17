@@ -40,7 +40,12 @@ harness every other test in this crate already uses.
   end-to-end should be filed as its own issue per #73's acceptance
   criteria, rather than expanding this one.
 
-# Cross-chain settlement bridge (issue #71)
+# Cross-chain settlement bridge (issue #71 — canonical specification)
+
+> **Single source of truth (#281, #282):** This section is the canonical design
+> specification for the #71 cross-chain settlement bridge. Other documents
+> (`docs/SETTLEMENT_OBSERVABILITY.md`, `docs/migration.md`) link here rather
+> than maintaining separate copies.
 
 ## Verdict
 
@@ -66,19 +71,23 @@ exactly the hook this pattern needs.
 
 1. Payer holds USDC on an origin chain (e.g. Base) and calls CCTP's
    `depositForBurn` with `mintRecipient` set to the **forwarder contract's
-   Stellar address** and a `hookData` payload naming the payer's Stellar
-   address and the target question parameters.
+   Stellar address** and a `hookData` payload naming the payer's designated
+   Stellar address and the target question parameters.
 2. Circle attests the burn; the attestation is submitted to Stellar's CCTP
-   `MessageTransmitter`, which mints USDC to the forwarder and invokes the
-   forwarder with the `hookData`.
-3. The forwarder calls `token::Client::transfer` to move the minted USDC to
-   the payer's Stellar address (or holds it and calls `submit()` directly
-   — see the open interface question below).
-4. `submit()` (or `charge()`) runs as today: `payer.require_auth()` is
-   satisfied by the forwarder acting on the payer's behalf, and
-   `token::Client::transfer` moves USDC into escrow. `open_question()` is
-   then called with the resulting `Question`, exactly as in the native
-   path.
+   `MessageTransmitter`, which mints native USDC to the forwarder and invokes
+   the forwarder with the `hookData`.
+3. The forwarder validates that a non-zero Stellar payer address of record was
+   supplied in `hookData`, then either:
+   - **(Option A — direct forwarder call):** calls `submit()` / `charge()` with
+     the payer's designated Stellar address as `Question.payer` (requiring
+     that address's authorization or a pre-funded `deposit()`), or
+   - **(Option B — two-step transfer):** transfers the minted USDC to the
+     payer's Stellar address so the payer (or a relayer holding their signed
+     auth entry) calls `submit()`.
+4. `submit()` (or `charge()`) runs unchanged: `payer.require_auth()` is
+   satisfied and `token::Client::transfer` moves the Stellar-native USDC into
+   escrow. `open_question()` records the question with that designated Stellar
+   address as `Question.payer`.
 
 ## Refund path for a bridged payer
 
@@ -91,31 +100,21 @@ to the origin chain is explicitly out of scope for this issue — it would
 require `do_refund()` to emit a CCTP burn and a second attestation round,
 which is a much larger change than the forwarder pattern above.
 
-## Open questions
+## Open questions resolved & remaining interface decision
 
 1. **Does the bridged payer need their own Stellar address as
-   `Question.payer` of record?** Yes, under this design. `refund()` and
-   `refund_timeout()` pay `Question.payer` on Stellar, so the payer of
-   record must be a Stellar address the payer controls (or a forwarder
-   acting for them). Making the origin-chain address the payer of record
-   would force `do_refund()` to bridge back, which is out of scope.
+   `Question.payer` of record?** Yes. `refund()` and `refund_timeout()` pay
+   `Question.payer` on Stellar, so the payer of record must be a Stellar
+   address the payer controls.
 2. **CCTP vs Axelar GMP?** CCTP for native USDC, as above. Axelar GMP is
    the better fit only if the escrowed asset or the refund path needs
    general message-passing across chains this contract does not currently
    touch.
-
-## Interface still to settle (blocks code)
-
-- Does the forwarder call `submit()`/`charge()` itself (acting as the
-  authenticated payer), or does it transfer to the payer's Stellar address
-  and let the payer call `submit()`? The former is closer to how `charge()`
-  already lets the admin open a question funded by a prior `deposit()`
-  without a per-question payer signature; the latter keeps the payer as the
-  direct caller.
-- What address is `Question.payer` in each case, and does that address
-  match what `refund()`/`refund_timeout()` will pay?
-
-No contract code changes land until these are settled.
+3. **Remaining forwarder-to-escrow interface decision (blocks code):**
+   Choosing between Option A (forwarder calls `charge()` against a prepaid
+   balance) and Option B (forwarder transfers to the payer's Stellar address
+   and submits with the payer's Soroban auth entry). No contract code changes
+   land until this choice is finalized.
 
 # Stealth-address worker identity (issue #58)
 

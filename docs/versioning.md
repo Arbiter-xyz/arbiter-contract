@@ -51,10 +51,11 @@ deployment**, because the contract had no way to replace its own code. Since
 Class A changes can use that path; B and D should still go through a
 migration or a fresh deployment.
 
-**Known issue:** `src/lib.rs` still references `NoUpgradePending` and
-`UpgradeNotReady`, but neither variant is currently defined in
-`ContractError`. The merge in row 6 dropped them. When they are restored, give
-them **new** codes (not 16/17), for the class-D reason above.
+**Resolved note on upgrade error codes (#247):** Earlier merges temporarily dropped
+`NoUpgradePending` and `UpgradeNotReady` when codes 15–18 collided in row 6.
+Both variants are now defined in `ContractError` in the 400s range
+(`NoUpgradePending = 401`, `UpgradeNotReady = 402`, alongside
+`UpgradeInProgress = 403`) so they do not collide with codes 15–19.
 
 ## PR checklist (copy into the PR description)
 

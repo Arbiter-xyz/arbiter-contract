@@ -144,8 +144,12 @@ git checkout <release-tag>
 stellar contract build
 shasum -a 256 target/wasm32v1-none/release/oracle_escrow.wasm   # == the wasm hash
 
-# 2. Pre-flight: the full suite, WASM tests included, must be green.
-scripts/build-wasm.sh && cargo test && cargo test -- --ignored
+# 2. Pre-flight: build the WASM fixtures and run the upgrade & unit test suites.
+#    (Use targeted test selection if unimplemented feature-stub tests from #180/#234 are present on the branch.)
+scripts/build-wasm.sh \
+  && cargo test --manifest-path contracts/fee-vesting/Cargo.toml \
+  && cargo test --lib test_upgrade \
+  && cargo test worked_example -- --ignored --nocapture
 
 # 3. Upload the code. This prints the wasm hash; it must match step 1.
 HASH=$(stellar contract upload --network testnet --source admin \

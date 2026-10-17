@@ -75,24 +75,30 @@ scope for this contract change and must be specified first.
   Building the credential-issuance system is explicitly out of scope; this
   is the verifier integration only.
 
-### Verifier integration
+### Proposed verifier integration (design specification — not yet implemented in `src/lib.rs`)
 
-- `set_qualification_verifier(vk)` — admin-only, configures the Groth16
-  verification key (or, for the stubbed/mock path, the trusted verifier
+> **Implementation status (#252):** The entry points and `resolve()` gating
+> below are **proposed interface specifications** for issue #55, documented
+> prior to storage schema finalization. They are **not** yet implemented in
+> `src/lib.rs` and there is no `src/test_qualification.rs` in the crate today.
+
+- `set_qualification_verifier(vk)` — *(proposed)* admin-only, configures the
+  Groth16 verification key (or, for the stubbed/mock path, the trusted verifier
   public key).
-- `verify_qualification(proof)` — permissionless. Verifies a
-  (stubbed/mock) qualification proof and stores a boolean/nullifier keyed
-  by the submitting worker `Address`. A proof that fails verification
-  stores nothing and returns `false`.
-- `is_qualified(worker)` — read-only, `true` iff a valid qualification
-  proof has been recorded for `worker`.
+- `verify_qualification(proof)` — *(proposed)* permissionless. Verifies a
+  qualification proof and stores a boolean/nullifier keyed by the submitting
+  worker `Address`. A proof that fails verification stores nothing and returns
+  `false`.
+- `is_qualified(worker)` — *(proposed)* read-only, `true` iff a valid
+  qualification proof has been recorded for `worker`.
 
-### Gating `resolve()`
+### Proposed gating of `resolve()`
 
-`resolve()`'s `workers` list is gated on `is_qualified()` alongside the
-`get_stake()` check: a worker lacking a valid qualification proof is
-excluded from `workers` (and therefore from `credit_owed()`), matching the
-`resolve_rejects_a_worker_without_a_valid_qualification_proof` test.
+Under this proposed design, `resolve()`'s `workers` list would be gated on
+`is_qualified()` alongside the `get_stake()` check: a worker lacking a valid
+qualification proof would be excluded from `workers` (and therefore from
+`credit_owed()`). Today, `resolve()` checks only stake and worker-list
+invariants.
 
 ### Open questions / tradeoffs (deferred)
 
