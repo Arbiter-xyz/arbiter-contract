@@ -1197,7 +1197,6 @@ pub struct ChallengeBondSettled {
     /// disputed), false = bond forfeited to platform (spurious challenge).
     pub returned: bool,
 }
-}
 
 /// #125: a worker's pending hash commitment for a question. Stored under
 /// DataKey::Commit(question_id, worker) by commit_answer() and removed by
@@ -1387,7 +1386,7 @@ impl OracleEscrow {
             &env.current_contract_address(),
             &amount,
         );
-        Self::open_question(&env, payer, question_id, amount, token)
+        Self::open_question(&env, payer, question_id, amount, token, None, None)
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -1671,7 +1670,7 @@ impl OracleEscrow {
         }
         Self::set_persistent(&env, &key, &(existing - amount));
 
-        Self::open_question(env, payer, question_id, amount, token)
+        Self::open_question(env, payer, question_id, amount, token, None, None)
     }
 
     /// Shared by submit() (fresh transfer) and charge() (drawn from an
@@ -1685,6 +1684,8 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
+        schema_hash: Option<BytesN<32>>,
+        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
         let timeout_ledgers: u32 = env
             .storage()
@@ -1705,7 +1706,32 @@ impl OracleEscrow {
                 token: token.clone(),
             },
         )?;
+        if let Some(hash) = schema_hash {
+            env.storage()
+                .persistent()
+                .set(&DataKey::QuestionSchemaHash(question_id), &hash);
+        }
+        if let Some(category) = category {
+            let key = DataKey::CategoryCount(category);
+            let next: u32 = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(0)
+                .saturating_add(1);
+            env.storage().persistent().set(&key, &next);
+        }
         Ok(())
+    }
+
+    /// The stored Question for `question_id` (any status), or
+    /// QuestionNotFound. Shared by the read-only getters and the settlement
+    /// entry points.
+    fn load_question(env: &Env, question_id: u64) -> Result<Question, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Question(question_id))
+            .ok_or(ContractError::QuestionNotFound)
     }
 
     /// Stores a brand-new Pending question, indexes it, and emits
@@ -1765,7 +1791,7 @@ impl OracleEscrow {
         answer_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         Self::require_resolver_or_admin(&env)?;
-        Self::settle_resolution(&env, question_id, workers, losing_workers)
+        Self::settle_resolution(&env, question_id, workers, losing_workers, Some(answer_hash))
     }
 
     /// Issue #11: admin-only resolution from raw consensus data, which
@@ -2813,8 +2839,8 @@ impl OracleEscrow {
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)
+            .get(&DataKey::CategoryCount(category))
+            .unwrap_or(0)
     }
 
     /// #109 circuit breaker. Admin-only. `true` makes every funding entry
@@ -3813,7 +3839,8 @@ impl OracleEscrow {
         if question.status != Status::Pending {
             return Err(ContractError::QuestionNotPending);
         }
-        if env.ledger().sequence() < question.deadline {
+        let deadline = question.created_at.saturating_add(question.timeout_ledgers);
+        if env.ledger().sequence() < deadline {
             return Err(ContractError::TimeoutNotReached);
         }
         Self::do_refund(env, question_id, true)?;
@@ -5096,7 +5123,6 @@ impl OracleEscrow {
         env.storage()
             .persistent()
             .get(&DataKey::ChallengerBond(question_id))
-    }
     }
 }
 
