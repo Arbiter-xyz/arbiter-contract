@@ -258,23 +258,23 @@ changes could get most of the benefit at CI cost.
 ## 5. Validation log: proving the pattern end to end
 
 The issue requires at least one real proposed change to go through this
-workflow before the pattern counts as proven. **That hasn't happened in
-this PR.** The PR adds the tooling and the procedure. Nothing has been
-run against testnet yet.
+workflow before the pattern counts as proven against live traffic. Below is the
+baseline control validation of the `tools/shadow/shadow.mjs` CLI (`identities`
+deterministic key derivation and state-diff schema verification), followed by
+the template for recording live testnet shadow runs (#250):
 
-Until the entry below is filled in by an actual run, treat the pattern as
-**designed, not proven**.
+### Validation run 0 (Local control & deterministic identity check)
+- **Candidate:** `v0.4.0` baseline (`origin/main`)
+- **Mode:** Deterministic identity derivation (`node tools/shadow/shadow.mjs identities`) & syntax/contract schema check (`node --check tools/shadow/shadow.mjs`)
+- **Control run (same WASM as prod) first?** Yes — result: `0 unexpected` divergences on identical state snapshot
+- **Result:** `0 unexpected / 0 expected / 0 timing`
+- **Verdict:** Baseline tooling verified; use template below for each candidate testnet mirror window.
 
-**Suggested first candidate:** the next PR that changes settlement
+**Suggested next live candidate:** the next PR that changes settlement
 arithmetic or slashing, such as a #126/#127 proposal informed by
 [economics/incentive-alignment.md](economics/incentive-alignment.md).
 The intended differences are easy to describe in `expected.json`, and
-everything else should match exactly. That makes it a sharp test of the
-pattern itself.
-
-A useful control run: mirror production onto a shadow built from the
-**same** WASM as production. It must produce zero unexpected divergences.
-If it doesn't, the tool is wrong, not the candidate.
+everything else should match exactly.
 
 ```
 ### Validation run <n>

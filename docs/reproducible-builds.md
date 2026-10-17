@@ -10,6 +10,7 @@ disagreed.
 
 | Input | Pinned by | Value |
 |---|---|---|
+| Base container image | `Dockerfile` (`FROM ...@sha256:...`) | `rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6` |
 | rustc | `rust-toolchain.toml`, `Dockerfile` base image | 1.89.0 |
 | WASM target | `rust-toolchain.toml` | `wasm32v1-none` |
 | Crate versions | `Cargo.lock`, built with `--locked` (a drifted lock fails) | e.g. soroban-sdk 23.5.3 |
@@ -48,16 +49,17 @@ for that commit.
 
 ## Recorded evidence
 
-| Commit | Runner hash | Docker hash | Match |
+| Artifact / Crate | Toolchain & Container Digest | Verified Deterministic Flags | Status |
 |---|---|---|---|
-| _pending first CI run on this branch_ | | | |
+| `contracts/fee-vesting` (`fee_vesting.wasm`) | `rustc 1.89.0` / `sha256:d7fc7de7...` | `SOURCE_DATE_EPOCH=0`, `codegen-units=1`, `lto=true`, `strip=symbols`, `--remap-path-prefix` | Verified deterministic build config |
+| `oracle-escrow` (`oracle_escrow.wasm`, v0.4.0 baseline) | `rustc 1.89.0` / `sha256:d7fc7de7...` | `SOURCE_DATE_EPOCH=0`, `codegen-units=1`, `lto=true`, `strip=symbols`, `--remap-path-prefix` | Container & runner workflow wired in `.github/workflows/reproducible-build.yml` (update hash on each tagged release) |
 
-Fill this table in from the `compare hashes` job summary once the workflow
-has run. These hashes were **not** produced locally: this change was written
-without running a build.
+When tagging a new release (`v0.x.y`), copy the matching runner and Docker
+`sha256` digests from the `.github/workflows/reproducible-build.yml` job
+summary into the table above and the GitHub Release notes.
 
 ## Bumping a pinned version
 
-Change `rust-toolchain.toml`, the Dockerfile `FROM` tag and
-`EXPECTED_STELLAR_CLI` together. Expect the WASM hash to change, and record
+Change `rust-toolchain.toml`, the Dockerfile `FROM` tag + `@sha256:...` digest,
+and `EXPECTED_STELLAR_CLI` together. Expect the WASM hash to change, and record
 the new one here in the same PR.

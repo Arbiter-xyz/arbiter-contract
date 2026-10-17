@@ -33,71 +33,63 @@ and initialize effectively atomic from the operator's point of view:
 > fix for `initialize()` front-running is tracked separately; use that if you
 > need a stronger guarantee.
 
-## Architecture
+## Architecture & Repository Layout
 
-Every current integration with the contract goes through the JavaScript
-`@stellar/stellar-sdk`:
+Following the monorepo split, Arbiter spans three sibling repositories:
 
-- `backend/src/stellarClient.js` — backend service calls
-- `app/src/contractCalls.js` — frontend calls
-- demo-agent's scripts — scripted demo flows
+- **`Arbiter-xyz/arbiter-contract` (this repository)**:
+  - `src/lib.rs` — Core `OracleEscrow` Soroban contract (escrow, staking, quorum settlement, multi-asset allowlist, dispute/escalation, circuit breaker, and timelocked upgrades).
+  - `contracts/fee-vesting/` — Standalone `FeeVesting` Soroban contract providing cliff-then-linear vesting for platform fee revenue.
+- **`Arbiter-xyz/arbiter-backend`** — Node.js oracle dispatcher and settlement service (`src/stellarClient.js`).
+- **`Arbiter-xyz/arbiter-app`** — React frontend client (`src/contractCalls.js`).
 
-There is no equivalent for a Rust caller today. `soroban-sdk`'s
-`#[contractimpl]` macro already generates an `OracleEscrowClient` (the same
-type `test.rs`'s `client(f)` helper returns), which is most of what a
-standalone crate would need to publish.
+### Fee-Vesting Treasury (`contracts/fee-vesting`)
+
+`contracts/fee-vesting` implements a cliff-then-linear vesting treasury designed
+to receive platform fees from `OracleEscrow`:
+
+1. **Deployment & Wiring:** Deploy `contracts/fee-vesting` and call
+   `initialize(admin, beneficiary, token, start, cliff, end, total)`. Then pass
+   the deployed `FeeVesting` contract address as the `platform` address when
+   initializing `OracleEscrow` (or via `set_platform`).
+2. **Revenue Flow:** Whenever `OracleEscrow::resolve()` settles a question, the
+   20% platform fee and any integer-division dust (plus forfeited challenger
+   bonds) are transferred directly to the `FeeVesting` contract in the
+   question's asset.
+3. **Unlock & Claiming:** Nothing unlocks before `cliff`. Between `cliff` and
+   `end`, tokens vest linearly from `start` to `end` (`vested_amount()`,
+   `claimable()`). The `beneficiary` (e.g. DAO treasury or multisig) calls
+   `claim_vested()` to withdraw unlocked tokens. The `admin` can rotate a
+   compromised beneficiary (`set_beneficiary`) or recover excess/foreign tokens
+   above the unvested schedule reserve (`rescue_tokens`).
+
+```sh
+# Run the fee-vesting unit test suite
+cargo test --manifest-path contracts/fee-vesting/Cargo.toml
+```
 
 ## Client bindings
 
-Integrators can talk to the contract from more than one language. The
-JavaScript reference (`backend/src/stellarClient.js`, `app/src/contractCalls.js`)
-remains the canonical example; a Python binding is also shipped under
-`bindings/python/`.
+Integrators can interact with `OracleEscrow` from JavaScript/TypeScript, Rust,
+or Python. Note that `stellarClient.js` and `contractCalls.js` live in the
+sibling `arbiter-backend` and `arbiter-app` repositories respectively, and
+language bindings are generated on-demand from the compiled `.wasm` XDR spec
+rather than committed under `bindings/`:
 
-### Python binding (`bindings/python/`)
+### Generating TypeScript / Python bindings from the WASM spec
 
-A thin, dependency-light wrapper over the contract's XDR spec. It covers all
-of the contract's entry points:
-
-- writes: `initialize`, `submit`, `deposit`, `withdraw_balance`, `charge`,
-  `resolve`, `stake`, `unstake`, `withdraw`, `withdraw_to`, `touch`,
-  `refund`, `refund_timeout`, `set_admin`, `set_timeout_ledgers`
-- reads: `get_question`, `get_balance`, `get_admin`, `get_timeout_ledgers`
-
-The contract's `Question`, `Status`, and `ContractError` types are mapped to
-native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
-so callers never touch raw XDR.
-
-```python
-from oracle_escrow import Client, Status
-
-client = Client(rpc_url, contract_id, network_passphrase)
-
-question_id = client.submit(asker, question, reward)
-client.resolve(oracle, question_id, answer)
-assert client.get_question(question_id).status == Status.RESOLVED
-```
-
-### Regenerating bindings
-
-The bindings are generated from the contract's embedded XDR spec, the same
-source `stellar contract bindings` reads. Whenever `src/lib.rs`'s public
-interface changes (a new entry point, a new `ContractError` variant, a changed
-`Question` field), regenerate them with:
+Whenever `src/lib.rs`'s public interface changes, generate typed client bindings
+directly from the built WASM artifact using `stellar contract bindings`:
 
 ```sh
 stellar contract build
 stellar contract bindings typescript \
-  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --output-dir bindings/typescript
-python bindings/python/generate.py \
-  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --output bindings/python/oracle_escrow/_spec.py
+  --wasm target/wasm32v1-none/release/oracle_escrow.wasm \
+  --output-dir target/bindings-ts
+stellar contract bindings python \
+  --wasm target/wasm32v1-none/release/oracle_escrow.wasm \
+  --output-dir target/bindings-python
 ```
-
-The Python generator reads the same spec entries the CLI emits, so the two
-stay in lockstep. Run it as part of the release checklist whenever the public
-interface changes.
 
 ## Standalone Rust client crate
 

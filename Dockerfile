@@ -11,7 +11,7 @@
 # (`--locked`), and stellar-cli by exact release. Keep RUST_VERSION in sync
 # with rust-toolchain.toml.
 
-FROM rust:1.89.0-slim-bookworm
+FROM rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6
 
 ARG STELLAR_CLI_VERSION=27.1.0
 

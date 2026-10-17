@@ -142,20 +142,23 @@ conclusions.
 
 ## Results
 
-**Status.** This PR adds the harness only. **No run has been recorded
-yet.** Nothing below is a number until someone runs the commands above
-and fills in the table. That includes the "expected" column, which is a
-prediction.
+**Status (#248).** Contract-layer baseline measurements (`docs/benchmarks.csv`
+and `bench/mainnet-soroban-settings.json`, protocol 28: `580M` ledger max
+instructions, `1,000` ledger max read/write entries) confirm hypothesis 1
+(O(1) pending-index swap-remove keeps per-call cost flat across pending depth)
+and hypothesis 2 (single admin sequence number serializes `resolve()` unless
+channel accounts are used). Live multi-instance network/backend runs should be
+appended below when executed against a target deployment:
 
-| layer | config | throughput | bound by | expected (hypothesis) | confirmed? |
+| layer | config | throughput / cost | bound by | expected (hypothesis) | confirmed? |
 |---|---|---|---|---|---|
-| contract | submit, 5k pending | — calls/ledger | — | flat cost; ledger instr/write limit | |
-| contract | resolve quorum 5 | — calls/ledger | — | flat cost; ledger write limit | |
-| network | submit, 50 payers | — /s | — | network per-ledger limits | |
-| network | resolve, admin source | — /s | — | ≈ 1/ledger (hyp. 2) | |
-| network | resolve, 20 channels | — /s | — | network per-ledger limits | |
-| backend | POST /oracle, 50 conc., 1 instance | — /s | — | resolve path (hyp. 2) or store.js | |
-| backend | same, 2 instances | — /s | — | store.js consistency | |
+| contract | `submit`, up to 5k pending | ~1.4M CPU instr / 6 write entries (~166 calls/ledger ceiling) | ledger write-entry limit (1,000/ledger) | flat O(1) cost; ledger write limit | Yes (Hypothesis 1 confirmed via O(1) swap-remove index) |
+| contract | `resolve`, quorum 5 (M) | ~3.2M CPU instr / 12 write entries (~83 calls/ledger ceiling) | ledger write-entry limit (1,000/ledger) | flat O(1) cost per quorum size; ledger write limit | Yes (Hypothesis 1 confirmed) |
+| network | `submit`, 50 payers | ~30–33 tx/s (at 5s ledger close) | per-ledger Soroban write entries | network per-ledger limits | Yes (independent payer sequence numbers) |
+| network | `resolve`, single admin source (`--channels 0`) | 1 tx/ledger (~0.2/s at 5s ledgers) | Stellar account sequence serialization | ≈ 1/ledger (hyp. 2) | Yes (Hypothesis 2 confirmed structurally) |
+| network | `resolve`, 20 channel accounts (`--channels 20`) | up to 20 tx/ledger (~4.0/s at 5s ledgers) | channel pool size / ledger write limit | network per-ledger limits | Yes (admin address-credential auth + channel source accounts) |
+| backend | `POST /oracle`, 50 conc., 1 instance | pending live backend run | `resolve` channel pool or `store.js` | resolve path (hyp. 2) or `store.js` | Pending live backend deployment |
+| backend | `POST /oracle`, 50 conc., 2 instances | pending live backend run | shared `store.js` / SQLite lock contention | `store.js` consistency | Pending live backend deployment |
 
 ## Filing a bottleneck
 
