@@ -4562,6 +4562,8 @@ impl OracleEscrow {
         if source != allowed {
             return Err(ContractError::MigrationNotAuthorized);
         }
+        source.require_auth();
+
         let default_token = Self::token(&env)?;
         if token != default_token {
             return Err(ContractError::TokenMismatch);
