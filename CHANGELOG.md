@@ -27,6 +27,27 @@ actually matches this tag's source, rather than trusting the tag name alone.
   still go through `resolve()`. Threshold is configurable with
   `set_established_answer_count` / `get_established_answer_count`
   (default 20 credited resolutions). New `unanimous_dissent` event.
+- Added emergency circuit breaker (`pause(admin)`, `unpause(admin)`,
+  `is_paused()`) and `ContractError::ContractPaused` to halt state-mutating
+  submissions and settlements while keeping emergency recovery paths explicit.
+- Added multi-stage dispute and escalation lifecycle (`dispute`, `escalate`,
+  `resolve_dispute`, `get_dispute`, `set_dispute_bond`,
+  `set_escalation_bond`, `set_dispute_window_ledgers`) allowing bond-backed
+  challenges within a post-resolution dispute window.
+- Added WebAuthn / passkey (`secp256r1`) payer authentication support
+  (`register_passkey`, `get_passkey`, `submit_with_passkey`) for hardware-key
+  and browser-passkey signed question submissions.
+- Added on-chain KYC attestation gating (`set_kyc_issuer`,
+  `set_kyc_required_threshold`, `register_kyc_attestation`,
+  `revoke_kyc_attestation`, `is_kyc_verified`) for high-value escrow
+  submissions and institutional payouts.
+- Added worker stake snapshotting at question submission/dispatch so
+  `resolve()` and `resolve_by_consensus()` weight payouts and slashes against
+  the stake locked at question creation rather than post-facto stake changes.
+- Added `contracts/fee-vesting` (`initialize`, `claim_vested`,
+  `claim_vested_as`, `claimable`, `claimable_amount`, `vested_amount`,
+  `get_admin`, `get_schedule`, `set_beneficiary`, `rescue_tokens`) for
+  cliff-then-linear platform fee revenue vesting.
 - Added `get_admin()` and `get_platform()` views (alongside `get_token()`).
 - Added `get_questions(question_ids)` batch view returning
   `Vec<Option<Question>>` in input order.
@@ -86,8 +107,8 @@ point:
 
 Errors 1–12 (`AlreadyInitialized` through `InvalidWorkerLists`).
 
-[Unreleased]: https://github.com/nayt9/arbiter-contract/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/nayt9/arbiter-contract/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/nayt9/arbiter-contract/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/nayt9/arbiter-contract/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/nayt9/arbiter-contract/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Arbiter-xyz/arbiter-contract/releases/tag/v0.1.0

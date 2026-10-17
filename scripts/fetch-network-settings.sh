@@ -5,11 +5,14 @@
 # network votes new settings in, then re-run the benchmark
 # (see docs/RESOURCE_LIMITS.md).
 #
-#   scripts/fetch-network-settings.sh                   # mainnet
-#   NETWORK=testnet scripts/fetch-network-settings.sh
+#   scripts/fetch-network-settings.sh                   # mainnet refresh
+#   NETWORK=testnet scripts/fetch-network-settings.sh   # testnet refresh
+#   scripts/fetch-network-settings.sh --check-staleness # verify snapshot age <= MAX_AGE_DAYS (default 30)
 set -euo pipefail
 
 NETWORK="${NETWORK:-mainnet}"
+MAX_AGE_DAYS="${MAX_AGE_DAYS:-30}"
+
 case "$NETWORK" in
   mainnet)
     RPC_URL="${RPC_URL:-https://mainnet.sorobanrpc.com}"
@@ -21,6 +24,35 @@ case "$NETWORK" in
 esac
 
 cd "$(dirname "$0")/.."
+
+if [[ "${1:-}" == "--check-staleness" ]]; then
+  python3 - "$NETWORK" "$MAX_AGE_DAYS" <<'PY'
+import datetime, json, os, sys
+network, max_age_days = sys.argv[1], int(sys.argv[2])
+path = f"bench/{network}-soroban-settings.json"
+if not os.path.exists(path):
+    print(f"error: missing snapshot {path}; run scripts/fetch-network-settings.sh", file=sys.stderr)
+    sys.exit(1)
+data = json.load(open(path))
+fetched_str = data.get("fetched_at")
+if not fetched_str:
+    print(f"error: {path} missing fetched_at timestamp", file=sys.stderr)
+    sys.exit(1)
+fetched_at = datetime.datetime.strptime(fetched_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+now = datetime.datetime.now(datetime.timezone.utc)
+age_days = (now - fetched_at).total_seconds() / 86400.0
+if age_days > max_age_days:
+    print(
+        f"stale: {path} was fetched {age_days:.1f} days ago ({fetched_str} > {max_age_days}d); "
+        f"re-run scripts/fetch-network-settings.sh",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(f"ok: {path} fetched_at={fetched_str} (age={age_days:.1f}d <= {max_age_days}d, protocol={data.get('protocol_version')})")
+PY
+  exit 0
+fi
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

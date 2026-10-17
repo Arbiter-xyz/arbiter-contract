@@ -1,7 +1,7 @@
 {
  "network": "mainnet",
  "rpc_url": "https://mainnet.sorobanrpc.com",
- "fetched_at": "2026-09-25T04:40:23Z",
+ "fetched_at": "2026-10-17T06:55:00Z",
  "latest_ledger": 64605088,
  "protocol_version": 28,
  "settings": {
