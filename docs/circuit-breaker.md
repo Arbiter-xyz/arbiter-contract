@@ -29,7 +29,7 @@ original payers and cannot be redirected. What does protect payers is that
 |---|---|
 | `submit`, `submit_with_schema_hash`, `submit_with_category`, `submit_asset` | **rejected** with `ContractPaused` (400) |
 | `deposit`, `deposit_asset` | **rejected** |
-| `charge`, `charge_with_schema_hash`, `charge_with_category`, `charge_asset` | **rejected** (checked in `charge_for_token`) |
+| `charge`, `charge_asset` | **rejected** (checked in `charge_for_token`) |
 | `reopen_question` | **rejected** (it pulls a fresh payer transfer) |
 | `resolve`, `refund`, `refund_timeout`, `sweep_timeouts` | allowed |
 | `withdraw*`, `withdraw_balance*`, `begin_unstake`/`complete_unstake*` | allowed |
