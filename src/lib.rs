@@ -2810,11 +2810,13 @@ impl OracleEscrow {
         out
     }
 
+    /// Number of questions opened with `category` (see DataKey::CategoryCount).
+    /// Zero for a category that has never been used.
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)
+            .get(&DataKey::CategoryCount(category))
+            .unwrap_or(0)
     }
 
     /// #109 circuit breaker. Admin-only. `true` makes every funding entry
