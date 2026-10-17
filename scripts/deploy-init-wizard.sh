@@ -183,6 +183,13 @@ echo "    contract id:            ${CONTRACT_ID}"
 echo "    deploy -> initialize:   ${GAP_MS} ms (measured)"
 echo "    deploy + initialize:    ${TOTAL_MS} ms (measured)"
 echo
+echo "==> after deploying: point downstream repos at the new contract id"
+echo "    arbiter-backend: ORACLE_CONTRACT_ID=${CONTRACT_ID}"
+echo "    arbiter-app:     VITE_ORACLE_CONTRACT_ID=${CONTRACT_ID}"
+echo "    arbiter-contract: update the pinned testnet id in .github/workflows/release.yml"
+echo "                      (DEFAULT_CONTRACT_ID) if this is the testnet deployment"
+echo "    until all three agree, release verification and the live backend/app will disagree."
+echo
 echo "NOTE: this wizard is a mitigation, not a fix. The deploy -> initialize"
 echo "gap above is narrowed but never zero; the contract-level initialize()"
 echo "front-running issue is tracked separately. See README.md."
