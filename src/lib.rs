@@ -399,7 +399,8 @@ pub enum AssetKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ContractError {
-    /// initialize() called on an instance whose Admin is already set.
+    /// Retained so existing error codes keep their values. Setup now runs in
+    /// `__constructor` at deploy time, so this is no longer returned.
     AlreadyInitialized = 1,
     /// A function that reads Admin, Token, Platform or TimeoutLedgers from
     /// instance storage (every admin-gated call, resolve(), submit()/charge(),
@@ -1288,24 +1289,23 @@ pub struct OracleEscrow;
 
 #[contractimpl]
 impl OracleEscrow {
-    /// One-time setup. `timeout_ledgers` fixes how long a question may sit
-    /// Pending before `refund_timeout` becomes callable by anyone. It is
-    /// immutable after init so payers can rely on the number quoted to them
-    /// at question-submission time.
-    pub fn initialize(
+    /// One-time setup, run atomically as part of deployment. Because the
+    /// arguments are supplied to the deploy call itself, no separate
+    /// `initialize()` transaction exists for a third party to front-run.
+    /// `timeout_ledgers` fixes how long a question may sit Pending before
+    /// `refund_timeout` becomes callable by anyone. It is immutable after
+    /// deployment so payers can rely on the number quoted to them at
+    /// question-submission time.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         token: Address,
         platform: Address,
         timeout_ledgers: u32,
     ) -> Result<(), ContractError> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(ContractError::AlreadyInitialized);
-        }
         if timeout_ledgers == 0 || timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
-        admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);

@@ -3,35 +3,24 @@
 A Soroban smart contract implementing an oracle-based escrow with dispute
 resolution, plus the JavaScript integrations that talk to it.
 
-## Guided deploy + initialize wizard
+## Deployment and the constructor
 
-`initialize()` is only guarded by `AlreadyInitialized`: it accepts whoever
-calls it first, requiring only that caller's own signature on whatever `admin`
-address they pass in. A freshly-deployed, not-yet-initialized contract is
-therefore racing the real deployer — anyone watching for a new `OracleEscrow`
-WASM upload could front-run the legitimate
-`initialize(admin, token, platform, timeout_ledgers)` call and become `admin`
-themselves.
+OracleEscrow has no public `initialize()` function. Its setup arguments
+(`admin`, `token`, `platform`, `timeout_ledgers`) are taken by `__constructor`,
+which the network runs inside the same transaction that creates the contract.
+There is no window between the WASM upload and setup for a third party to
+claim the contract, so nobody can front-run the deployer's `admin` assignment.
 
-`scripts/deploy-init-wizard.sh` mitigates this at the tooling layer by making deploy
-and initialize effectively atomic from the operator's point of view:
-
-- It prompts for and validates all four `initialize()` arguments (`admin`,
-  `token`, `platform`, `timeout_ledgers`) **before** any transaction is
-  submitted, so nothing has to be looked up after the contract id is known.
-- It then runs `stellar contract deploy` and
-  `stellar contract invoke -- initialize` back-to-back in the same invocation,
-  with no manual pause in between, and prints the measured elapsed time
-  between the two submissions.
+The guided wizard collects and validates those arguments before it submits
+anything, then deploys in one call:
 
 ```sh
 ./scripts/deploy-init-wizard.sh
 ```
 
-> **This is a mitigation, not a fix.** Tooling can only narrow the window
-> between two separate transactions, never close it to zero. The contract-level
-> fix for `initialize()` front-running is tracked separately; use that if you
-> need a stronger guarantee.
+Instances deployed from an earlier WASM that were never initialized are still
+open to the old front-running path. Do not call `initialize()` on them; redeploy
+with the constructor instead.
 
 ### After deploying
 
