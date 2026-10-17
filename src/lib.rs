@@ -2073,46 +2073,18 @@ impl OracleEscrow {
         let dust = pool - share * n;
 
         let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let mut platform_take = fee + dust;
-        // Accumulated per-worker bonus from slash redistribution (issue #19).
-        // For each loser SLASH_REDISTRIBUTE_BPS of their slashed amount goes
-        // to the matching workers instead of the platform. The portion is
-        // split evenly across n workers with integer division; any remainder
-        // (redist_dust) follows the same dust-to-platform convention as the
-        // fee/pool split above, guaranteeing funds are conserved to the last
-        // stroop.
-        let mut total_slashed: i128 = 0;
-        let mut slash_redist_per_worker: i128 = 0;
-        for loser in losing_workers.iter() {
-            let slashed = Self::slash(&env, token, &loser, slash_cap);
-            if slashed > 0 {
-                // Split: worker_portion redistributed to winners,
-                // platform_portion retained by the platform.
-                let worker_portion = Self::mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
-                let platform_portion = slashed - worker_portion;
-                // Per-winner share of worker_portion; remainder to platform.
-                let redist_share = worker_portion / n;
-                let redist_dust = worker_portion - redist_share * n;
-                slash_redist_per_worker = slash_redist_per_worker
-                    .checked_add(redist_share)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                platform_take = platform_take
-                    .checked_add(platform_portion)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                platform_take = platform_take
-                    .checked_add(redist_dust)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                total_slashed = total_slashed
-                    .checked_add(slashed)
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-                WorkerSlashed {
-                    question_id,
-                    worker: loser,
-                    amount: slashed,
-                }
-                .publish(&env);
-            }
-        }
+        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
+            Self::distribute_slashes(
+                &env,
+                question_id,
+                &question_token,
+                &losing_workers,
+                slash_cap,
+                n,
+            )?;
+        let platform_take = (fee + dust)
+            .checked_add(slash_platform_take)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         // Each matching worker earns their base share plus their cut of the
         // redistributed slash. Both go through credit_owed() so the worker
         // collects everything in one withdraw() call.
@@ -3345,6 +3317,59 @@ impl OracleEscrow {
                 token: token.clone(),
             },
         )
+    }
+
+    /// Shared slash-and-redistribute step of every settlement path
+    /// (resolve(), escalate_resolve(), finalize_resolve()). For each loser
+    /// SLASH_REDISTRIBUTE_BPS of their slashed amount goes to the matching
+    /// workers instead of the platform (issue #19). That portion is split
+    /// evenly across `n` workers with integer division; the remainder
+    /// (redist_dust) goes to the platform so funds are conserved to the
+    /// last stroop. Returns (platform_take, slash_redist_per_worker,
+    /// total_slashed); the caller credits each worker with
+    /// `slash_redist_per_worker` on top of their base share.
+    fn distribute_slashes(
+        env: &Env,
+        question_id: u64,
+        question_token: &Address,
+        losing_workers: &Vec<Address>,
+        slash_cap: i128,
+        n: i128,
+    ) -> Result<(i128, i128, i128), ContractError> {
+        let mut platform_take: i128 = 0;
+        let mut total_slashed: i128 = 0;
+        let mut slash_redist_per_worker: i128 = 0;
+        for loser in losing_workers.iter() {
+            let slashed = Self::slash(env, question_token, &loser, slash_cap);
+            if slashed > 0 {
+                // Split: worker_portion redistributed to winners,
+                // platform_portion retained by the platform.
+                let worker_portion = Self::mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
+                let platform_portion = slashed - worker_portion;
+                // Per-winner share of worker_portion; remainder to platform.
+                let redist_share = worker_portion / n;
+                let redist_dust = worker_portion - redist_share * n;
+                slash_redist_per_worker = slash_redist_per_worker
+                    .checked_add(redist_share)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(platform_portion)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(redist_dust)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                total_slashed = total_slashed
+                    .checked_add(slashed)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                WorkerSlashed {
+                    question_id,
+                    worker: loser,
+                    amount: slashed,
+                }
+                .publish(env);
+            }
+        }
+        Ok((platform_take, slash_redist_per_worker, total_slashed))
     }
 
     /// Slashes up to SLASH_BPS of `worker`'s slashable stake (active +
@@ -5204,19 +5229,29 @@ impl OracleEscrow {
         let dust = pool - share * n;
 
         let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let mut platform_take = fee + dust;
-        for loser in losing_workers.iter() {
-            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
-            platform_take = platform_take
-                .checked_add(slashed)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            if slashed > 0 {
-                WorkerSlashed { question_id, worker: loser, amount: slashed }.publish(&env);
-            }
-        }
+        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
+            Self::distribute_slashes(
+                &env,
+                question_id,
+                &question_token,
+                &losing_workers,
+                slash_cap,
+                n,
+            )?;
+        let platform_take = (fee + dust)
+            .checked_add(slash_platform_take)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let worker_credit = share
+            .checked_add(slash_redist_per_worker)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         for worker in workers.iter() {
-            Self::credit_owed(&env, &question_token, &worker, share)?;
-            WorkerCredited { question_id, worker: worker.clone(), amount: share }.publish(&env);
+            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
+            WorkerCredited {
+                question_id,
+                worker: worker.clone(),
+                amount: worker_credit,
+            }
+            .publish(&env);
             Self::record_resolved_credit(&env, &worker);
         }
         Self::route_platform_take(&env, &token_client, &platform, platform_take);
@@ -5233,7 +5268,7 @@ impl OracleEscrow {
             question_id,
             worker_count: workers.len(),
             fee,
-            total_slashed: platform_take - fee - dust,
+            total_slashed,
         }
         .publish(&env);
         EscalationResolved { question_id, overturned }.publish(&env);
@@ -5461,19 +5496,29 @@ impl OracleEscrow {
         let dust = pool - share * n;
 
         let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let mut platform_take = fee + dust;
-        for loser in losing_workers.iter() {
-            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
-            platform_take = platform_take
-                .checked_add(slashed)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            if slashed > 0 {
-                WorkerSlashed { question_id, worker: loser, amount: slashed }.publish(&env);
-            }
-        }
+        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
+            Self::distribute_slashes(
+                &env,
+                question_id,
+                &question_token,
+                &losing_workers,
+                slash_cap,
+                n,
+            )?;
+        let mut platform_take = (fee + dust)
+            .checked_add(slash_platform_take)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let worker_credit = share
+            .checked_add(slash_redist_per_worker)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         for worker in workers.iter() {
-            Self::credit_owed(&env, &question_token, &worker, share)?;
-            WorkerCredited { question_id, worker: worker.clone(), amount: share }.publish(&env);
+            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
+            WorkerCredited {
+                question_id,
+                worker: worker.clone(),
+                amount: worker_credit,
+            }
+            .publish(&env);
             Self::record_resolved_credit(&env, &worker);
         }
 
@@ -5483,11 +5528,13 @@ impl OracleEscrow {
             .storage()
             .persistent()
             .get(&bond_key);
+        let mut forfeited_bond: i128 = 0;
         if let Some(bond) = maybe_bond {
             // Bond forfeited: add to platform_take so it transfers in one call.
             platform_take = platform_take
                 .checked_add(bond.amount)
                 .ok_or(ContractError::ArithmeticOverflow)?;
+            forfeited_bond = bond.amount;
             env.storage().persistent().remove(&bond_key);
             ChallengeBondSettled {
                 question_id,
@@ -5510,7 +5557,7 @@ impl OracleEscrow {
             question_id,
             worker_count: workers.len(),
             fee,
-            total_slashed: platform_take - fee - dust,
+            total_slashed: total_slashed + forfeited_bond,
         }
         .publish(&env);
         Ok(())
