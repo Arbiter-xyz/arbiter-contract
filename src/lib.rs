@@ -179,6 +179,16 @@ pub struct PendingAdminRotation {
     pub executable_at: u32,
 }
 
+/// One top-up that has not finished warming up. Each tranche keeps its own
+/// clock so a later top-up never delays the maturity of an earlier one (#194).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WarmingTranche {
+    pub amount: i128,
+    /// Ledger the top-up was made; matures at since + STAKE_WARMUP_LEDGERS.
+    pub since: u32,
+}
+
 /// A worker's bond. `settled + warming` is the active stake get_stake()
 /// reports; `unbonding` has left the active stake but is still slashable
 /// until `unbonding_release_at`.
@@ -187,11 +197,10 @@ pub struct PendingAdminRotation {
 pub struct StakeInfo {
     /// Stake that has been bonded for at least STAKE_WARMUP_LEDGERS.
     pub settled: i128,
-    /// The most recent top-ups, not yet matured.
+    /// Sum of `warming_tranches` amounts.
     pub warming: i128,
-    /// Ledger of the most recent top-up; `warming` matures at
-    /// warming_since + STAKE_WARMUP_LEDGERS.
-    pub warming_since: u32,
+    /// Top-ups not yet matured, oldest first. None when nothing is warming.
+    pub warming_tranches: Option<Vec<WarmingTranche>>,
     /// Requested for withdrawal via begin_unstake(), claimable via
     /// complete_unstake() once `unbonding_release_at` is reached.
     pub unbonding: i128,
@@ -419,8 +428,8 @@ pub enum ContractError {
     /// refund_timeout() (or a sweep_timeouts() entry) called before the
     /// question's own `created_at + timeout_ledgers` deadline.
     TooEarlyForTimeout = 8,
-    /// initialize()/set_timeout_ledgers() received a timeout of 0 or above
-    /// MAX_TIMEOUT_LEDGERS, or import_question() received a timeout of 0.
+    /// initialize()/set_timeout_ledgers()/import_question() received a timeout
+    /// of 0 or above MAX_TIMEOUT_LEDGERS.
     InvalidTimeout = 9,
     /// begin_unstake*() asked to unbond more than the worker's active stake
     /// (settled + warming).
@@ -1422,7 +1431,7 @@ impl OracleEscrow {
             &env.current_contract_address(),
             &amount,
         );
-        Self::open_question(&env, payer, question_id, amount, token)
+        Self::open_question(&env, payer, question_id, amount, token, None, None)
     }
 
     /// #30: payer locks several allowlisted assets for one question, paid out
@@ -1735,7 +1744,7 @@ impl OracleEscrow {
         }
         Self::set_persistent(&env, &key, &(existing - amount));
 
-        Self::open_question(env, payer, question_id, amount, token)
+        Self::open_question(env, payer, question_id, amount, token, None, None)
     }
 
     /// Shared by submit() (fresh transfer) and charge() (drawn from an
@@ -1749,6 +1758,8 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
         token: Address,
+        schema_hash: Option<BytesN<32>>,
+        category: Option<Symbol>,
     ) -> Result<(), ContractError> {
         let timeout_ledgers: u32 = env
             .storage()
@@ -1769,6 +1780,14 @@ impl OracleEscrow {
                 token: token.clone(),
             },
         )?;
+        if let Some(schema_hash) = schema_hash {
+            Self::set_persistent(env, &DataKey::QuestionSchemaHash(question_id), &schema_hash);
+        }
+        if let Some(category) = category {
+            let key = DataKey::CategoryCount(category);
+            let next: u32 = env.storage().persistent().get(&key).unwrap_or(0).saturating_add(1);
+            Self::set_persistent(env, &key, &next);
+        }
         Ok(())
     }
 
@@ -1829,7 +1848,7 @@ impl OracleEscrow {
         answer_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         Self::require_resolver_or_admin(&env)?;
-        Self::settle_resolution(&env, question_id, workers, losing_workers)
+        Self::settle_resolution(&env, question_id, workers, losing_workers, Some(answer_hash))
     }
 
     /// Issue #11: admin-only resolution from raw consensus data, which
@@ -1965,6 +1984,73 @@ impl OracleEscrow {
     /// per leg for a basket, so every leg keeps the same rounding and dust
     /// rules. Returns (fee, total_slashed) for this leg.
     fn settle_asset(
+    /// Sends platform_take to the platform, routing the admin-configured
+    /// public-goods share (#128) to the public-goods address first. Shared by
+    /// every settlement path (resolve(), escalate_resolve(), finalize_resolve())
+    /// so they all split platform_take identically.
+    fn route_platform_take(
+        env: &Env,
+        token_client: &token::Client,
+        platform: &Address,
+        platform_take: i128,
+    ) {
+        if platform_take > 0 {
+            // #128: if a public-goods address + bps have been configured,
+            // split platform_take into two transfers:
+            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
+            //   platform_remainder = platform_take - public_goods_share
+            // Any dust from the integer division stays with the platform
+            // (same dust-rounding discipline resolve() already uses for the
+            // worker pool split). If unconfigured (0 bps or absent address)
+            // the behaviour is identical to the current single transfer.
+            let public_goods_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsBps)
+                .unwrap_or(0);
+            let maybe_pg_addr: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsAddress);
+            if public_goods_bps > 0 {
+                if let Some(pg_addr) = maybe_pg_addr {
+                    let public_goods_share =
+                        Self::mul_bps(platform_take, public_goods_bps as i128);
+                    let platform_remainder = platform_take - public_goods_share;
+                    if public_goods_share > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &pg_addr,
+                            &public_goods_share,
+                        );
+                    }
+                    if platform_remainder > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            platform,
+                            &platform_remainder,
+                        );
+                    }
+                } else {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        platform,
+                        &platform_take,
+                    );
+                }
+            } else {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    platform,
+                    &platform_take,
+                );
+            }
+        }
+    }
+
+    /// Shared settlement body of resolve() and resolve_by_consensus(). The
+    /// caller has already checked admin auth.
+    fn settle_resolution(
         env: &Env,
         question_id: u64,
         token: &Address,
@@ -2202,8 +2288,8 @@ impl OracleEscrow {
 
     /// Worker posts a default-token bond, signaling credibility. Purely opt-in;
     /// never required to submit answers or be paid. The new amount warms up
-    /// for STAKE_WARMUP_LEDGERS before get_matured_stake() counts it; any
-    /// already-warming amount has its clock restarted along with it.
+    /// for STAKE_WARMUP_LEDGERS before get_matured_stake() counts it. Each
+    /// top-up matures on its own clock; earlier warming amounts keep theirs.
     pub fn stake(env: Env, worker: Address, amount: i128) -> Result<(), ContractError> {
         worker.require_auth();
         if amount <= 0 {
@@ -2218,11 +2304,7 @@ impl OracleEscrow {
         );
 
         let mut info = Self::stake_info(&env, &worker);
-        info.warming = info
-            .warming
-            .checked_add(amount)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        info.warming_since = env.ledger().sequence();
+        Self::add_warming(&env, &mut info, amount)?;
         let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
         Self::track_participant(&env, &worker);
@@ -2256,11 +2338,7 @@ impl OracleEscrow {
         );
         let key = Self::stake_key(&env, &token, &worker)?;
         let mut info = Self::stake_info_for_token(&env, &token, &worker)?;
-        info.warming = info
-            .warming
-            .checked_add(amount)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        info.warming_since = env.ledger().sequence();
+        Self::add_warming(&env, &mut info, amount)?;
         let new_total = info.settled + info.warming;
         Self::set_persistent(&env, &key, &info);
         Self::bump_instance(&env);
@@ -2293,7 +2371,7 @@ impl OracleEscrow {
             return Err(ContractError::InsufficientStake);
         }
         let from_warming = amount.min(info.warming);
-        info.warming -= from_warming;
+        Self::drain_warming(&env, &mut info, from_warming);
         info.settled -= amount - from_warming;
 
         let timeout_ledgers: u32 = env
@@ -2378,7 +2456,7 @@ impl OracleEscrow {
             return Err(ContractError::InsufficientStake);
         }
         let from_warming = amount.min(info.warming);
-        info.warming -= from_warming;
+        Self::drain_warming(&env, &mut info, from_warming);
         info.settled -= amount - from_warming;
         let timeout_ledgers: u32 = env
             .storage()
@@ -2465,16 +2543,19 @@ impl OracleEscrow {
         let info = Self::stake_info(&env, &worker);
         // stake_info() already moves warming → settled once the full warmup
         // has elapsed, so after maturation this is simply settled + 0.
-        if info.warming == 0 {
+        let Some(tranches) = info.warming_tranches else {
             return info.settled;
-        }
+        };
         let now = env.ledger().sequence();
-        let elapsed = now.saturating_sub(info.warming_since) as i128;
         let warmup = STAKE_WARMUP_LEDGERS as i128;
-        // Clamp elapsed to [0, warmup] for safety; linear interpolation.
-        let elapsed_clamped = elapsed.min(warmup).max(0);
-        let warming_effective = info.warming * elapsed_clamped / warmup;
-        info.settled + warming_effective
+        let mut effective = info.settled;
+        for tranche in tranches.iter() {
+            let elapsed = now.saturating_sub(tranche.since) as i128;
+            // Clamp elapsed to [0, warmup] for safety; linear interpolation.
+            let elapsed_clamped = elapsed.min(warmup).max(0);
+            effective += tranche.amount * elapsed_clamped / warmup;
+        }
+        effective
     }
 
     pub fn get_stake_info(env: Env, worker: Address) -> StakeInfo {
@@ -2665,8 +2746,9 @@ impl OracleEscrow {
         Ok(())
     }
 
-    /// Permissionless TTL refresh for one question — and, while it's
-    /// Pending, its pending-index entries and the contract instance too.
+    /// Permissionless TTL refresh for one question — and, while it's still
+    /// in the pending index (Pending, Disputed or ResolvedPending), its
+    /// pending-index entries and the contract instance too.
     /// Pending entries are already created live until REFUND_GRACE_LEDGERS
     /// past their refund deadline, so this is only needed for a question
     /// whose timeout_ledgers exceeds the network's max TTL, or to keep a
@@ -2691,7 +2773,10 @@ impl OracleEscrow {
             Self::extend_asset_ttl(&env, &basket_key);
         }
 
-        if question.status == Status::Pending {
+        if matches!(
+            question.status,
+            Status::Pending | Status::Disputed | Status::ResolvedPending
+        ) {
             let pos_key = DataKey::PendingPos(question_id);
             if let Some(pos) = env.storage().persistent().get::<_, u32>(&pos_key) {
                 Self::extend_persistent(&env, &pos_key);
@@ -2932,11 +3017,20 @@ impl OracleEscrow {
         out
     }
 
+    /// Read-only: the schema commitment stored by submit_with_schema_hash(),
+    /// or None if the question has none (including questions opened before
+    /// schema commitments existed). The contract never validates the hash.
+    pub fn get_question_schema_hash(env: Env, question_id: u64) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::QuestionSchemaHash(question_id))
+    }
+
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)
+            .get(&DataKey::CategoryCount(category))
+            .unwrap_or(0)
     }
 
     /// #109 circuit breaker. Admin-only. `true` makes every funding entry
@@ -3221,7 +3315,7 @@ impl OracleEscrow {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
-        if timeout_ledgers == 0 {
+        if timeout_ledgers == 0 || timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
         if env
@@ -3277,7 +3371,10 @@ impl OracleEscrow {
         }
 
         let mut left = amount;
-        for bucket in [&mut info.warming, &mut info.settled, &mut info.unbonding] {
+        let from_warming = left.min(info.warming);
+        Self::drain_warming(env, &mut info, from_warming);
+        left -= from_warming;
+        for bucket in [&mut info.settled, &mut info.unbonding] {
             let take = left.min(*bucket);
             *bucket -= take;
             left -= take;
@@ -3303,13 +3400,78 @@ impl OracleEscrow {
     ) -> Result<StakeInfo, ContractError> {
         let key = Self::stake_key(env, token, worker)?;
         let mut info: StakeInfo = env.storage().persistent().get(&key).unwrap_or_default();
-        if info.warming > 0
-            && env.ledger().sequence() >= info.warming_since.saturating_add(STAKE_WARMUP_LEDGERS)
-        {
-            info.settled += info.warming;
-            info.warming = 0;
-        }
+        Self::mature_warming(env, &mut info);
         Ok(info)
+    }
+
+    /// Moves every warming tranche that has finished its warmup into
+    /// `settled`, keeping only the ones still warming.
+    fn mature_warming(env: &Env, info: &mut StakeInfo) {
+        let Some(tranches) = info.warming_tranches.clone() else {
+            return;
+        };
+        let now = env.ledger().sequence();
+        let mut pending = Vec::new(env);
+        for tranche in tranches.iter() {
+            if now >= tranche.since.saturating_add(STAKE_WARMUP_LEDGERS) {
+                info.settled += tranche.amount;
+                info.warming -= tranche.amount;
+            } else {
+                pending.push_back(tranche);
+            }
+        }
+        info.warming_tranches = if pending.is_empty() {
+            None
+        } else {
+            Some(pending)
+        };
+    }
+
+    /// Credits a new top-up to the warming bucket on its own clock.
+    fn add_warming(env: &Env, info: &mut StakeInfo, amount: i128) -> Result<(), ContractError> {
+        info.warming = info
+            .warming
+            .checked_add(amount)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let mut tranches = info
+            .warming_tranches
+            .clone()
+            .unwrap_or_else(|| Vec::new(env));
+        tranches.push_back(WarmingTranche {
+            amount,
+            since: env.ledger().sequence(),
+        });
+        info.warming_tranches = Some(tranches);
+        Ok(())
+    }
+
+    /// Removes `amount` from the still-warming tranches, newest first, so
+    /// the oldest top-ups keep their original maturity. Caller ensures
+    /// `amount <= info.warming`.
+    fn drain_warming(env: &Env, info: &mut StakeInfo, amount: i128) {
+        let Some(mut tranches) = info.warming_tranches.clone() else {
+            return;
+        };
+        let mut left = amount;
+        let mut i = tranches.len();
+        while i > 0 && left > 0 {
+            i -= 1;
+            let mut tranche = tranches.get(i).unwrap();
+            let take = left.min(tranche.amount);
+            tranche.amount -= take;
+            left -= take;
+            if tranche.amount == 0 {
+                tranches.remove(i);
+            } else {
+                tranches.set(i, tranche);
+            }
+        }
+        info.warming -= amount - left;
+        info.warming_tranches = if tranches.is_empty() {
+            None
+        } else {
+            Some(tranches)
+        };
     }
 
     /// Rejects duplicate addresses within either list, and any address
@@ -3929,9 +4091,10 @@ impl OracleEscrow {
         let dust = pool - share_per_worker * n;
 
         let slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM;
+        let question_token = Self::question_token(&env, question_id)?;
         let mut total_slashed: i128 = 0;
         for loser in losing_workers.iter() {
-            total_slashed += Self::preview_slash(&env, &loser, slash_cap);
+            total_slashed += Self::preview_slash(&env, &question_token, &loser, slash_cap);
         }
 
         // Mirror the redistribution split from resolve(): SLASH_REDISTRIBUTE_BPS
@@ -3954,12 +4117,14 @@ impl OracleEscrow {
     /// Pure counterpart to `slash()`: computes the same amount that slash()
     /// would take from `worker`'s slashable stake (capped the same way),
     /// but never writes it back. Used only by `preview_resolve()`.
-    fn preview_slash(env: &Env, worker: &Address, cap: i128) -> i128 {
-        let key = DataKey::Stake(worker.clone());
+    fn preview_slash(env: &Env, token: &Address, worker: &Address, cap: i128) -> i128 {
+        let Ok(key) = Self::stake_key(env, token, worker) else {
+            return 0;
+        };
         if !env.storage().persistent().has(&key) {
             return 0;
         }
-        let info = Self::stake_info(env, worker);
+        let info = Self::stake_info_for_token(env, token, worker).unwrap_or_default();
         let slashable = info.settled + info.warming + info.unbonding;
         if slashable <= 0 {
             return 0;
@@ -4097,6 +4262,90 @@ impl OracleEscrow {
             .instance()
             .set(&DataKey::LendingAuthority, &authority);
         Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// #92: lending-authority-only. Pledges `amount` of the worker's
+    /// Owed(Address) as collateral, so do_withdraw() won't pay it out. Can't
+    /// lock more than Owed minus what's already locked.
+    pub fn lock_owed(
+        env: Env,
+        authority: Address,
+        worker: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::require_lending_authority(&env, &authority)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let owed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Owed(worker.clone()))
+            .unwrap_or(0);
+        let locked = Self::get_locked_owed(env.clone(), worker.clone());
+        if amount > owed - locked {
+            return Err(ContractError::LockExceedsOwed);
+        }
+        let total_locked = locked + amount;
+        Self::set_persistent(&env, &DataKey::OwedLock(worker.clone()), &total_locked);
+        Self::bump_instance(&env);
+        OwedLocked {
+            worker,
+            amount,
+            total_locked,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// #92: lending-authority-only. Releases `amount` of a previous
+    /// lock_owed() pledge, making it withdrawable again.
+    pub fn release_owed(
+        env: Env,
+        authority: Address,
+        worker: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        Self::require_lending_authority(&env, &authority)?;
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let locked = Self::get_locked_owed(env.clone(), worker.clone());
+        if amount > locked {
+            return Err(ContractError::NoLockToRelease);
+        }
+        let total_locked = locked - amount;
+        Self::set_persistent(&env, &DataKey::OwedLock(worker.clone()), &total_locked);
+        Self::bump_instance(&env);
+        OwedReleased {
+            worker,
+            amount,
+            total_locked,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Read-only: the part of the worker's Owed(Address) currently pledged
+    /// via lock_owed(), or 0 if nothing is locked.
+    pub fn get_locked_owed(env: Env, worker: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwedLock(worker))
+            .unwrap_or(0)
+    }
+
+    fn require_lending_authority(env: &Env, authority: &Address) -> Result<(), ContractError> {
+        let registered: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::LendingAuthority)
+            .ok_or(ContractError::LendingAuthorityNotSet)?;
+        if *authority != registered {
+            return Err(ContractError::NotLendingAuthority);
+        }
+        authority.require_auth();
         Ok(())
     }
 
@@ -4747,6 +4996,8 @@ impl OracleEscrow {
         if source != allowed {
             return Err(ContractError::MigrationNotAuthorized);
         }
+        source.require_auth();
+
         let default_token = Self::token(&env)?;
         if token != default_token {
             return Err(ContractError::TokenMismatch);
@@ -4968,9 +5219,7 @@ impl OracleEscrow {
             WorkerCredited { question_id, worker: worker.clone(), amount: share }.publish(&env);
             Self::record_resolved_credit(&env, &worker);
         }
-        if platform_take > 0 {
-            token_client.transfer(&env.current_contract_address(), &platform, &platform_take);
-        }
+        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         // Clean up escalation storage.
         if escalated.is_some() {
@@ -5249,9 +5498,7 @@ impl OracleEscrow {
             .publish(&env);
         }
 
-        if platform_take > 0 {
-            token_client.transfer(&env.current_contract_address(), &platform, &platform_take);
-        }
+        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         // Clean up.
         env.storage()

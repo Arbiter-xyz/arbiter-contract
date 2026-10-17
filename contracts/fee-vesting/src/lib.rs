@@ -68,7 +68,7 @@ impl FeeVesting {
     }
 
     /// Amount currently unlocked by the schedule but not yet claimed.
-    pub fn claimable(env: Env) -> i128 {
+    pub fn claimable_amount(env: Env) -> i128 {
         let vested = Self::vested_amount(&env);
         let claimed: i128 = env
             .storage()
@@ -102,7 +102,7 @@ impl FeeVesting {
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
     pub fn claim_vested(env: Env) -> i128 {
-        let amount = Self::claimable(env.clone());
+        let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
             panic!("nothing to claim");
         }
@@ -130,6 +130,22 @@ impl FeeVesting {
         );
 
         amount
+    }
+
+    /// Same as `claim_vested`, but the caller must be the beneficiary.
+    pub fn claim_vested_as(env: Env, caller: Address) -> i128 {
+        caller.require_auth();
+
+        let beneficiary: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Beneficiary)
+            .unwrap();
+        if caller != beneficiary {
+            panic!("not beneficiary");
+        }
+
+        Self::claim_vested(env)
     }
 }
 
