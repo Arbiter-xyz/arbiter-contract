@@ -419,8 +419,8 @@ pub enum ContractError {
     /// refund_timeout() (or a sweep_timeouts() entry) called before the
     /// question's own `created_at + timeout_ledgers` deadline.
     TooEarlyForTimeout = 8,
-    /// initialize()/set_timeout_ledgers() received a timeout of 0 or above
-    /// MAX_TIMEOUT_LEDGERS, or import_question() received a timeout of 0.
+    /// initialize()/set_timeout_ledgers()/import_question() received a timeout
+    /// of 0 or above MAX_TIMEOUT_LEDGERS.
     InvalidTimeout = 9,
     /// begin_unstake*() asked to unbond more than the worker's active stake
     /// (settled + warming).
@@ -3132,7 +3132,7 @@ impl OracleEscrow {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
-        if timeout_ledgers == 0 {
+        if timeout_ledgers == 0 || timeout_ledgers > MAX_TIMEOUT_LEDGERS {
             return Err(ContractError::InvalidTimeout);
         }
         if env
