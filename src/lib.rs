@@ -5354,6 +5354,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         challenger.require_auth();
 
         if amount <= 0 {
