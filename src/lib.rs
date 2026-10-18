@@ -2977,6 +2977,7 @@ impl OracleEscrow {
     }
 
     /// Number of questions opened with `category` (see DataKey::CategoryCount).
+    /// Incremented by `open_question()`, so it is bumped by `submit_with_category()`.
     /// Zero for a category that has never been used.
     pub fn get_category_count(env: Env, category: Symbol) -> u32 {
         env.storage()
