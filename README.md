@@ -172,6 +172,17 @@ untouched.
 
 ### Problem
 
+`submit()` and `deposit()` both require `payer.require_auth()` and a direct
+`token::Client::transfer` from an address the contract can authenticate on
+Stellar. There is no path today for a payer whose funds originate on another
+chain to reach escrow without first bridging to a Stellar-native balance
+themselves.
+
+### Chosen rail: Circle CCTP + a Stellar forwarder
+
+We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
+Stellar, rather than Axelar GMP.
+
 ## WASM binary size
 
 The release profile in `Cargo.toml` is tuned for size (`opt-level = "z"`,
@@ -251,28 +262,6 @@ gh workflow run wasm-hash-verify.yml \
 There is no incident-alerting wiring in this repo, so the action does not
 assume a notification channel exists — a mismatch is surfaced as a failed CI
 check.
-
-## Handsoff notes
-
-`submit()` and `deposit()` both require `payer.require_auth()` and a direct
-`token::Client::transfer` from an address the contract can authenticate on
-Stellar. There is no path today for a payer whose funds originate on another
-chain to reach escrow without first bridging to a Stellar-native balance
-themselves.
-
-### Chosen rail: Circle CCTP + a Stellar forwarder
-
-We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
-Stellar, rather than Axelar GMP.
-
-sm
-```
-
-**Baseline: 15.5KB** (optimized). The build must stay at or below this
-number; a PR that regresses it should be visible in CI output. Note the
-tradeoff: aggressive optimization can make a failed transaction's trap
-less readable, so debugging a revert may require a separate unoptimized
-build.
 
 ## Handsoff notes
 
