@@ -1,5 +1,18 @@
 # Settlement Races and Partial Consensus
 
+> **Status: design proposal, not implemented (#195).** Issue #40, which this
+> document and [answer-metadata-and-consensus.md](answer-metadata-and-consensus.md)
+> were written against, was closed without the `PartiallySettled` status
+> variant or its `resolve()`-adjacent entry point ever being built. The real
+> `Status` enum has only `Pending`/`Resolved`/`Refunded`/`Migrated`/
+> `ResolvedPending`/`Disputed` — grep `PartiallySettled` across `src/` and
+> you'll find no hits in any `.rs` file. Everything below describes a feature
+> that does not exist on-chain. If partial-consensus settlement is still
+> wanted, #40 needs to be reopened and this design revisited (in particular,
+> the slashing question in the section below, which this document and
+> answer-metadata-and-consensus.md used to answer differently — see that
+> section for the resolution).
+
 This document describes how terminal settlement states interact in the oracle-escrow
 contract, and how the proportional partial-refund path introduced for issue #40
 fits alongside the existing all-or-nothing `resolve()` / `refund()` behavior.
@@ -14,7 +27,8 @@ fits alongside the existing all-or-nothing `resolve()` / `refund()` behavior.
 - `Refunded` — the question was cancelled or timed out; 100% of
   `question.amount` is returned to the payer via `do_refund()`.
 
-Issue #40 adds a fourth variant:
+Issue #40 proposed a fourth variant (never implemented — see the status note
+above):
 
 - `PartiallySettled` — a consensus fraction `f` in `[0, 1]` was reached. The
   winning workers are paid `f` of the pool through the existing
@@ -59,11 +73,16 @@ lists remains out of scope for this issue.
 
 ## Slashing at partial consensus
 
-Slashing of `losing_workers` is unchanged: a partial consensus is still a
-settlement in which the supplied `losing_workers` are treated as non-matching
-and slashed according to the existing rules. "Partial success" refers only to
-the split of `question.amount` between payout and refund, not to a relaxation
-of the slashing policy.
+**Resolved (#195): this previously contradicted
+[answer-metadata-and-consensus.md](answer-metadata-and-consensus.md), which said
+slashing does NOT apply at partial consensus.** That is the correct answer
+going forward, for the reasoning laid out there: at partial consensus nobody
+is formally a "loser" — the non-consensus fraction is refunded to the payer
+rather than being attributed to a specific set of non-matching workers, so
+there is no `losing_workers` list to slash against. Slashing remains a
+full-`resolve()`-only concern. The claim that previously stood here — that
+`losing_workers` would still be slashed under partial consensus — was never
+implemented and should not be treated as settled design.
 
 ## On-chain shape
 

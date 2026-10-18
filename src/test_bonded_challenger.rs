@@ -17,8 +17,8 @@
 use super::*;
 use crate::test::{client, setup, AMOUNT};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token,
+    testutils::{Address as _, Events as _, Ledger},
+    token, IntoVal, Map, Symbol, Val,
 };
 
 // ---------------------------------------------------------------------------
@@ -245,6 +245,57 @@ fn spurious_challenge_bond_forfeited_to_platform() {
         platform_after - platform_before,
         fee + bond_amount,
         "platform must receive fee + forfeited bond"
+    );
+}
+
+/// #192: `QuestionResolved.total_slashed` must report worker-stake
+/// slashing only; a forfeited challenger bond is reported separately in
+/// `bond_forfeited`, not folded into `total_slashed`. Here there's no
+/// losing worker (empty `losing_workers`), so `total_slashed` must be 0
+/// even though the platform did receive a forfeited bond.
+#[test]
+fn finalize_resolve_event_reports_bond_forfeiture_separately_from_total_slashed() {
+    let f = setup();
+    let c = client(&f);
+    let worker = Address::generate(&f.env);
+    let challenger = Address::generate(&f.env);
+
+    f.env.mock_all_auths();
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let wv = Vec::from_array(&f.env, [worker.clone()]);
+    let lv: Vec<Address> = Vec::new(&f.env);
+    c.resolve_challengeable(&1, &wv, &lv, &50);
+
+    let bond_amount: i128 = 80_000;
+    token::StellarAssetClient::new(&f.env, &f.token_address).mint(&challenger, &bond_amount);
+    c.post_challenge_bond(&challenger, &1, &bond_amount);
+
+    // No dispute_resolve() call — bond is spurious.
+    f.env.ledger().with_mut(|li| li.sequence_number += 51);
+
+    c.finalize_resolve(&1);
+
+    let (emitter, topics, data) = f.env.events().all().last().unwrap();
+    assert_eq!(emitter, f.contract_id);
+    let topic: Symbol = topics.get(0).unwrap().into_val(&f.env);
+    assert_eq!(topic, Symbol::new(&f.env, "question_resolved"));
+    let data: Map<Symbol, Val> = data.into_val(&f.env);
+    let total_slashed: i128 = data
+        .get(Symbol::new(&f.env, "total_slashed"))
+        .unwrap()
+        .into_val(&f.env);
+    let bond_forfeited: i128 = data
+        .get(Symbol::new(&f.env, "bond_forfeited"))
+        .unwrap()
+        .into_val(&f.env);
+    assert_eq!(
+        total_slashed, 0,
+        "no losing workers were slashed; total_slashed must not include the bond"
+    );
+    assert_eq!(
+        bond_forfeited, bond_amount,
+        "the forfeited bond must be reported in its own field"
     );
 }
 
