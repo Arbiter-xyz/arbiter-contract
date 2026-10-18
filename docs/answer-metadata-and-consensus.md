@@ -28,6 +28,16 @@ reconciliation backend, so no backend code or tests are changed here.
 
 ## Partial-consensus settlement (#40)
 
+> **Status: design proposal, not implemented (#195).** Issue #40 was closed
+> without this ever being built — the real `Status` enum has no
+> `PartiallySettled` variant and there is no `resolve()`-adjacent
+> partial-consensus entry point anywhere in `src/`. This section is a design
+> record, not documentation of shipped behavior. If the feature is still
+> wanted, #40 should be reopened. See
+> [SETTLEMENT_RACES.md](SETTLEMENT_RACES.md#slashing-at-partial-consensus) for
+> the slashing question below, which that document used to answer the
+> opposite way; "No" (below) is the resolution.
+
 **Decision: settlement math only, driven by a trusted consensus fraction.**
 `resolve()` today is binary: every winning worker in `workers` receives an
 equal `1/n` share of the entire 80% pool via `credit_owed()`, and

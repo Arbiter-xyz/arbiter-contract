@@ -615,7 +615,15 @@ pub struct QuestionSettled {
 }
 
 /// `question_resolved` topics: question_id; data: worker_count, fee,
-/// total_slashed.
+/// total_slashed, bond_forfeited.
+///
+/// #192: `total_slashed` is worker-stake slashing only. A forfeited
+/// challenger bond (finalize_resolve(), spurious challenge) is reported
+/// separately in `bond_forfeited` rather than folded into `total_slashed`,
+/// since an off-chain indexer trusting `total_slashed` to mean
+/// "worker-stake slashed" would otherwise over-count whenever a bond is
+/// forfeited in the same call. `bond_forfeited` is 0 for every resolution
+/// path that doesn't involve a challenger bond.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionResolved {
@@ -624,6 +632,7 @@ pub struct QuestionResolved {
     pub worker_count: u32,
     pub fee: i128,
     pub total_slashed: i128,
+    pub bond_forfeited: i128,
 }
 
 /// `worker_credited` topics: question_id, worker; data: amount. Emitted by
@@ -2249,6 +2258,7 @@ impl OracleEscrow {
             worker_count: workers.len(),
             fee: resolved_fee,
             total_slashed: resolved_slashed,
+            bond_forfeited: 0,
         }
         .publish(&env);
         Ok(())
@@ -2259,6 +2269,7 @@ impl OracleEscrow {
     /// for STAKE_WARMUP_LEDGERS before get_matured_stake() counts it. Each
     /// top-up matures on its own clock; earlier warming amounts keep theirs.
     pub fn stake(env: Env, worker: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         worker.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -2294,6 +2305,7 @@ impl OracleEscrow {
         token: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         worker.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -3215,6 +3227,18 @@ impl OracleEscrow {
             Self::reject_basket(&env, question_id)?;
             let token_addr = Self::question_token(&env, question_id)?;
 
+            // #200: settle the local state (mark Migrated, drop the open
+            // count, remove from the pending index) BEFORE the external
+            // call below — checks-effects-interactions. A malicious or
+            // buggy target that reenters refund_timeout()/sweep_timeouts()
+            // on this same question_id mid-call must see it already gone
+            // from Pending, not still live for a second settlement.
+            let amount = question.amount;
+            let payer = question.payer.clone();
+            let created_at = question.created_at;
+            let timeout_ledgers = question.timeout_ledgers;
+            Self::settle_question(&env, question_id, &key, &mut question, Status::Migrated);
+
             // The target pulls the funds (rather than us pushing them) so the
             // target only ever records what it actually received. That pull
             // is a token call one level below us, so our authorization for it
@@ -3225,7 +3249,7 @@ impl OracleEscrow {
                     context: ContractContext {
                         contract: token_addr.clone(),
                         fn_name: transfer_fn.clone(),
-                        args: (this.clone(), target.clone(), question.amount).into_val(&env),
+                        args: (this.clone(), target.clone(), amount).into_val(&env),
                     },
                     sub_invocations: Vec::new(&env),
                 }),
@@ -3234,23 +3258,22 @@ impl OracleEscrow {
                 &this,
                 &token_addr,
                 &question_id,
-                &question.payer,
-                &question.amount,
-                &question.created_at,
-                &question.timeout_ledgers,
+                &payer,
+                &amount,
+                &created_at,
+                &timeout_ledgers,
             );
 
             total = total
-                .checked_add(question.amount)
+                .checked_add(amount)
                 .ok_or(ContractError::ArithmeticOverflow)?;
             QuestionMigrated {
                 question_id,
                 target: target.clone(),
                 token: token_addr,
-                amount: question.amount,
+                amount,
             }
             .publish(&env);
-            Self::settle_question(&env, question_id, &key, &mut question, Status::Migrated);
         }
 
         Ok(total)
@@ -4964,6 +4987,21 @@ impl OracleEscrow {
                 .ok_or(ContractError::ArithmeticOverflow)?;
 
             if sum > 0 {
+                // #200: zero out local entries BEFORE the external call
+                // below — checks-effects-interactions. A malicious or
+                // buggy target that reenters refund_timeout()/
+                // sweep_timeouts() mid-call must see these entries already
+                // cleared, not still holding the stale amounts.
+                if stake_amount > 0 {
+                    env.storage().persistent().remove(&stake_key);
+                }
+                if owed_amount > 0 {
+                    env.storage().persistent().remove(&owed_key);
+                }
+                if balance_amount > 0 {
+                    env.storage().persistent().remove(&balance_key);
+                }
+
                 // Pre-authorize exactly this amount so target.import_balances()
                 // can pull it from this contract's token balance.
                 env.authorize_as_current_contract(vec![
@@ -4985,16 +5023,6 @@ impl OracleEscrow {
                     &owed_amount,
                     &balance_amount,
                 );
-                // Zero out local entries.
-                if stake_amount > 0 {
-                    env.storage().persistent().remove(&stake_key);
-                }
-                if owed_amount > 0 {
-                    env.storage().persistent().remove(&owed_key);
-                }
-                if balance_amount > 0 {
-                    env.storage().persistent().remove(&balance_key);
-                }
                 total = total
                     .checked_add(sum)
                     .ok_or(ContractError::ArithmeticOverflow)?;
@@ -5288,6 +5316,7 @@ impl OracleEscrow {
             worker_count: workers.len(),
             fee,
             total_slashed,
+            bond_forfeited: 0,
         }
         .publish(&env);
         EscalationResolved { question_id, overturned }.publish(&env);
@@ -5577,7 +5606,8 @@ impl OracleEscrow {
             question_id,
             worker_count: workers.len(),
             fee,
-            total_slashed: total_slashed + forfeited_bond,
+            total_slashed,
+            bond_forfeited: forfeited_bond,
         }
         .publish(&env);
         Ok(())
