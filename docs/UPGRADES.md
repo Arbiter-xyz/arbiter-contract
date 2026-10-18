@@ -97,10 +97,11 @@ Rules for the next version:
 5. If a pin genuinely has to change, write the migration plan in this
    file first, then update the pinned value.
 
-Question schema commitments follow rule 2: the public `Question` returned by
-`get_question()` includes `schema_hash`, but the persisted question keeps its
-original pinned shape. The optional 32-byte hash is stored separately; for
-questions opened before this field existed, `get_question()` returns `None`.
+Question schema commitments follow rule 2: the persisted `Question` keeps its
+original pinned shape and has no `schema_hash` field. The optional 32-byte hash
+is stored separately under `QuestionSchemaHash(u64)` and read back with
+`get_question_schema_hash()`; for questions opened before this field existed,
+it returns `None`.
 The contract treats the hash as opaque and does not fetch or validate a schema.
 
 ### Worked example

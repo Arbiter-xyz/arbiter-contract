@@ -3,35 +3,39 @@
 A Soroban smart contract implementing an oracle-based escrow with dispute
 resolution, plus the JavaScript integrations that talk to it.
 
-## Guided deploy + initialize wizard
+## Deployment and the constructor
 
-`initialize()` is only guarded by `AlreadyInitialized`: it accepts whoever
-calls it first, requiring only that caller's own signature on whatever `admin`
-address they pass in. A freshly-deployed, not-yet-initialized contract is
-therefore racing the real deployer — anyone watching for a new `OracleEscrow`
-WASM upload could front-run the legitimate
-`initialize(admin, token, platform, timeout_ledgers)` call and become `admin`
-themselves.
+OracleEscrow has no public `initialize()` function. Its setup arguments
+(`admin`, `token`, `platform`, `timeout_ledgers`) are taken by `__constructor`,
+which the network runs inside the same transaction that creates the contract.
+There is no window between the WASM upload and setup for a third party to
+claim the contract, so nobody can front-run the deployer's `admin` assignment.
 
-`scripts/deploy-init.sh` mitigates this at the tooling layer by making deploy
-and initialize effectively atomic from the operator's point of view:
-
-- It prompts for and validates all four `initialize()` arguments (`admin`,
-  `token`, `platform`, `timeout_ledgers`) **before** any transaction is
-  submitted, so nothing has to be looked up after the contract id is known.
-- It then runs `stellar contract deploy` and
-  `stellar contract invoke -- initialize` back-to-back in the same invocation,
-  with no manual pause in between, and prints the measured elapsed time
-  between the two submissions.
+The guided wizard collects and validates those arguments before it submits
+anything, then deploys in one call:
 
 ```sh
-./scripts/deploy-init.sh
+./scripts/deploy-init-wizard.sh
 ```
 
-> **This is a mitigation, not a fix.** Tooling can only narrow the window
-> between two separate transactions, never close it to zero. The contract-level
-> fix for `initialize()` front-running is tracked separately; use that if you
-> need a stronger guarantee.
+Instances deployed from an earlier WASM that were never initialized are still
+open to the old front-running path. Do not call `initialize()` on them; redeploy
+with the constructor instead.
+
+### After deploying
+
+The wizard only updates this repo's world, not the downstream ones. A new
+contract id has to be propagated by hand to every consumer that pins it:
+
+| Repo | Variable | Where |
+| --- | --- | --- |
+| arbiter-backend | `ORACLE_CONTRACT_ID` | backend env / deployment config |
+| arbiter-app | `VITE_ORACLE_CONTRACT_ID` | app env / build config |
+| arbiter-contract | `DEFAULT_CONTRACT_ID` | `.github/workflows/release.yml` (testnet pin, used by the WASM hash verification) |
+
+The wizard prints the new contract id and these variable names at the end of
+a run. Until all three agree, release verification and the live backend/app
+will be pointing at different contracts.
 
 ## Architecture
 
@@ -168,6 +172,17 @@ untouched.
 
 ### Problem
 
+`submit()` and `deposit()` both require `payer.require_auth()` and a direct
+`token::Client::transfer` from an address the contract can authenticate on
+Stellar. There is no path today for a payer whose funds originate on another
+chain to reach escrow without first bridging to a Stellar-native balance
+themselves.
+
+### Chosen rail: Circle CCTP + a Stellar forwarder
+
+We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
+Stellar, rather than Axelar GMP.
+
 ## WASM binary size
 
 The release profile in `Cargo.toml` is tuned for size (`opt-level = "z"`,
@@ -247,28 +262,6 @@ gh workflow run wasm-hash-verify.yml \
 There is no incident-alerting wiring in this repo, so the action does not
 assume a notification channel exists — a mismatch is surfaced as a failed CI
 check.
-
-## Handsoff notes
-
-`submit()` and `deposit()` both require `payer.require_auth()` and a direct
-`token::Client::transfer` from an address the contract can authenticate on
-Stellar. There is no path today for a payer whose funds originate on another
-chain to reach escrow without first bridging to a Stellar-native balance
-themselves.
-
-### Chosen rail: Circle CCTP + a Stellar forwarder
-
-We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
-Stellar, rather than Axelar GMP.
-
-sm
-```
-
-**Baseline: 15.5KB** (optimized). The build must stay at or below this
-number; a PR that regresses it should be visible in CI output. Note the
-tradeoff: aggressive optimization can make a failed transaction's trap
-less readable, so debugging a revert may require a separate unoptimized
-build.
 
 ## Handsoff notes
 
