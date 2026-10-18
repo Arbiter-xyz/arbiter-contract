@@ -1,8 +1,11 @@
 [workspace]
 resolver = "2"
-members = [
-    "contracts/fee-vesting",
-]
+# contracts/oracle-escrow is docs only (INVOKE_EXAMPLES.md, no crate) — the
+# real oracle-escrow crate is this workspace's own root package below.
+# contracts/fee-vesting is a real second contract (cliff-then-linear vesting
+# for platform fee revenue) that already expects this parent workspace via
+# its own `soroban-sdk = { workspace = true }`.
+members = ["contracts/fee-vesting"]
 # cargo-fuzz manages the fuzz crate in fuzz/ as an excluded non-workspace
 # member to avoid conflicting with the release profile and WASM build.
 exclude = ["fuzz"]
@@ -36,6 +39,14 @@ testutils = ["soroban-sdk/testutils"]
 upgrade-test-v3 = []
 # Lifts MAX_QUORUM_SIZE so the resource sweep can measure past it.
 bench-uncapped-quorum = []
+
+# NOTE: a standalone Rust client crate (issue #69) and a `cargo bench`
+# harness (issue #65, benches/resources.rs) were both previously claimed as
+# delivered but neither exists on disk — client/ doesn't exist and bench/
+# only holds a JSON settings file, not a Rust benchmark harness. Removed
+# the duplicate `[workspace] members = ["client"]` table (a Cargo.toml with
+# two [workspace] tables is a hard parse error) and the `[[bench]]` entry
+# pointing at a nonexistent file. Tracked as open work, not re-faked here.
 
 # Size-oriented release profile (issue #64). `stellar contract build` compiles
 # with this profile and then runs wasm-opt, so the deployed bytecode is the
