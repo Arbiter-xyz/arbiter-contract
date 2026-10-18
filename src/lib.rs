@@ -5096,6 +5096,9 @@ impl OracleEscrow {
         if first_workers.is_empty() {
             return Err(ContractError::NoWorkers);
         }
+        if first_workers.len().saturating_add(first_losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
         Self::validate_worker_lists(&first_workers, &first_losing_workers)?;
 
         let mut question = Self::load_question(&env, question_id)?;
