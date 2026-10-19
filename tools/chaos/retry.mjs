@@ -68,13 +68,16 @@ export async function loadRetry(modulePath) {
 }
 
 /// Wraps `fn` so every attempt is logged into `log` as
-/// { callId, label, attempt, start, end, ok, error }. All attempts of one
-/// retry() call share `callId`. `end` is when fn itself settled, which for
-/// a timed-out attempt can be after the retry layer gave up on it.
-export function instrument(log, { callId, label }, fn) {
+/// { callId, label, attempt, start, end, ok, error, nonRetryable }. All attempts
+/// of one retry() call share `callId`. `end` is when fn itself settled, which
+/// for a timed-out attempt can be after the retry layer gave up on it.
+///
+/// When `nonRetryable` is provided, each caught error is tested against it and
+/// the result is recorded on the attempt record.
+export function instrument(log, { callId, label }, fn, { nonRetryable = () => false } = {}) {
   let n = 0;
   return async (...args) => {
-    const rec = { callId, label, attempt: n++, start: Date.now(), end: null, ok: false, error: null };
+    const rec = { callId, label, attempt: n++, start: Date.now(), end: null, ok: false, error: null, nonRetryable: false };
     log.push(rec);
     try {
       const v = await fn(...args);
@@ -82,6 +85,7 @@ export function instrument(log, { callId, label }, fn) {
       return v;
     } catch (e) {
       rec.error = String(e?.message ?? e).slice(0, 120);
+      rec.nonRetryable = nonRetryable(e);
       throw e;
     } finally {
       rec.end = Date.now();
@@ -124,6 +128,11 @@ export function checkRetrySpec(log, { attempts, baseDelayMs, timeoutMs, jitterMs
     }
     if (recs.some((r, i) => r.ok && i < recs.length - 1)) {
       violations.push({ call: id, label, kind: "retried-after-success" });
+    }
+    // The first attempt's error was classified nonRetryable — the retry layer
+    // must throw immediately without further attempts.
+    if (recs.length > 1 && recs[0].nonRetryable) {
+      violations.push({ call: id, label, kind: "retried-after-nonRetryable", attempts: recs.length });
     }
   }
   return { calls: byCall.size, violations };
