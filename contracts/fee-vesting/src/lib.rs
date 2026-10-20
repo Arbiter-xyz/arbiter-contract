@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 /// Storage keys for the fee-vesting treasury contract.
 ///
@@ -101,6 +101,9 @@ impl FeeVesting {
 
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
+    ///
+    /// Emits a `vested` event with topics `(vested, beneficiary)` and the
+    /// claimed `amount` as data, so indexers can track vesting claims.
     pub fn claim_vested(env: Env) -> i128 {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
@@ -128,6 +131,9 @@ impl FeeVesting {
             &beneficiary,
             &amount,
         );
+
+        env.events()
+            .publish((symbol_short!("vested"), beneficiary), amount);
 
         amount
     }
