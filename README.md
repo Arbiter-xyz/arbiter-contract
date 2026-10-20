@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-240 -->
+- #240: Review: test_question_templates.rs (#88) calls missing functions
