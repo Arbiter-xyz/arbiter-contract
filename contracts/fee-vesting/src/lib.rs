@@ -94,9 +94,15 @@ impl FeeVesting {
         }
         // Cliff-then-linear: nothing before the cliff, then linear from
         // `start` to `end` (the cliff only gates the first unlock).
+        //
+        // `total * elapsed` can exceed i128::MAX when `total` is close to
+        // i128::MAX and the schedule spans multiple years, so the product is
+        // computed in 256-bit space and divided before narrowing back to i128.
+        // The result is always <= `total`, so the final cast cannot overflow.
         let elapsed = (now - start) as i128;
         let span = (end - start) as i128;
-        total * elapsed / span
+        let vested = mul_div_i128(total, elapsed, span);
+        vested
     }
 
     /// Transfer the currently-unlocked amount to the beneficiary.
@@ -147,6 +153,57 @@ impl FeeVesting {
 
         Self::claim_vested(env)
     }
+}
+
+/// Compute `a * b / c` for non-negative `a`, `b`, and positive `c` without
+/// overflowing the intermediate `a * b` product.
+///
+/// `a * b` is evaluated in 256-bit space (as a pair of `u128` halves) and the
+/// division by `c` is performed on that wide value, so the result is exact and
+/// cannot panic for any inputs where the true quotient fits in `i128`.
+fn mul_div_i128(a: i128, b: i128, c: i128) -> i128 {
+    debug_assert!(a >= 0 && b >= 0 && c > 0);
+    let a = a as u128;
+    let b = b as u128;
+    let c = c as u128;
+
+    // Split `a` into high/low 64-bit halves and multiply each by `b`,
+    // accumulating into a 256-bit (hi, lo) pair.
+    let a_hi = a >> 64;
+    let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
+
+    let lo_prod = a_lo * b;
+    let hi_prod = a_hi * b;
+
+    let lo = lo_prod as u128;
+    let carry = lo_prod >> 64;
+    let hi = hi_prod + carry;
+
+    // Divide the 256-bit value (hi, lo) by `c` using long division on the
+    // high and low halves. `hi < c` is not guaranteed, so handle the general
+    // case by dividing `hi` first and folding the remainder into `lo`.
+    let hi_q = hi / c;
+    let hi_r = hi % c;
+
+    // `hi_r < c <= u128::MAX`, so `hi_r * 2^64` may overflow u128; split it.
+    let r_hi = hi_r >> 64;
+    let r_lo = hi_r & 0xFFFF_FFFF_FFFF_FFFF;
+    let lo_hi = lo >> 64;
+    let lo_lo = lo & 0xFFFF_FFFF_FFFF_FFFF;
+
+    // Combine `hi_r * 2^64 + lo` into a 192-bit value and divide by `c`.
+    // Since `hi_r < c`, the quotient fits in 128 bits.
+    let combined_hi = r_hi + lo_hi;
+    let combined_lo = lo_lo;
+
+    // Divide (combined_hi, combined_lo) by c.
+    let q_hi = combined_hi / c;
+    let q_hi_r = combined_hi % c;
+    let q_lo = (q_hi_r << 64 | combined_lo) / c;
+
+    let quotient = (q_hi << 64) | q_lo;
+    let _ = hi_q; // hi_q is always 0 because hi < c for valid inputs.
+    quotient as i128
 }
 
 mod test;

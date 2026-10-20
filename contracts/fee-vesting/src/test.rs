@@ -198,3 +198,28 @@ fn only_beneficiary_can_claim() {
     let result = s.client.try_claim_vested_as(&stranger);
     assert!(result.is_err());
 }
+
+#[test]
+fn near_i128_max_total_does_not_overflow_vested_amount() {
+    // Total close to i128::MAX with a multi-year span. The vested computation
+    // multiplies total by elapsed time, so this exercises the near-overflow
+    // path and asserts a sane partial amount is returned instead of panicking.
+    let total: i128 = i128::MAX - 1;
+    let start: u64 = 1_000;
+    let duration: u64 = 4 * 365 * 24 * 60 * 60; // ~4 years
+    let s = setup(start, 0, duration, total);
+
+    // Halfway through the schedule: expect roughly half of total vested.
+    set_time(&s.env, start + duration / 2);
+    let vested = s.client.vested_amount();
+    assert!(vested > 0, "vested amount should be positive mid-schedule");
+    assert!(vested <= total, "vested amount must not exceed total");
+    // Allow a small rounding tolerance around the expected half.
+    let expected = total / 2;
+    let diff = if vested > expected { vested - expected } else { expected - vested };
+    assert!(diff <= 2, "vested amount should be ~half of total");
+
+    // At the end of the schedule everything is vested, capped at total.
+    set_time(&s.env, start + duration);
+    assert_eq!(s.client.vested_amount(), total);
+}
