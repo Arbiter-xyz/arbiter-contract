@@ -116,6 +116,17 @@ jobs:
         # hand, not a gate. See docs/RESOURCE_LIMITS.md.
         run: cargo test -- --ignored --skip bench_ --nocapture
       - name: Deep property-based fuzz run
-        run: cargo test escrow_invariant_holds_for_every_call_sequence
+        # `cargo test <filter>` exits 0 when the filter matches zero tests, so
+        # a renamed/removed test or a missing `mod` declaration would silently
+        # turn this step into a no-op. Assert the named test actually ran by
+        # requiring at least one passing test in the output.
+        run: |
+          set -euo pipefail
+          OUT=$(cargo test escrow_invariant_holds_for_every_call_sequence -- --nocapture 2>&1)
+          echo "$OUT"
+          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<<"$OUT"; then
+            echo "::error::property-fuzz step matched zero tests; the named test is not compiled in"
+            exit 1
+          fi
         env:
           PROPTEST_CASES: "1000"
