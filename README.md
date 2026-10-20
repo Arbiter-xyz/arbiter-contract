@@ -200,3 +200,8 @@ ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
 
 **Baseline: 15.5KB** (optimized). The build must stay at or below this
 number; a PR that reg
+
+## Handsoff notes
+
+<!-- handsoff-issue-255 -->
+- #255: Review: check_quorum_bounds() has zero direct test coverage
