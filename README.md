@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-269 -->
+- #269: Review: index_remove() could panic on inconsistent index state
