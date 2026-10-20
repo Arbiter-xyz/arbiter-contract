@@ -223,3 +223,32 @@ fn near_i128_max_total_does_not_overflow_vested_amount() {
     set_time(&s.env, start + duration);
     assert_eq!(s.client.vested_amount(), total);
 }
+
+#[test]
+fn rescue_stray_token_transfers_balance_to_admin() {
+    // A stray token (not the vesting token) sent to the contract can be swept
+    // by the admin to a recipient, without touching the vesting token balance.
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    let (stray, stray_admin) = create_token(&s.env, &s.admin);
+    let contract_id = s.client.address.clone();
+    stray_admin.mint(&contract_id, &4_242);
+
+    let recipient = Address::generate(&s.env);
+    s.client.rescue_token(&stray.address, &recipient);
+
+    assert_eq!(stray.balance(&recipient), 4_242);
+    assert_eq!(stray.balance(&contract_id), 0);
+    // Vesting token balance is untouched by the rescue.
+    assert_eq!(s.token.balance(&contract_id), 10_000);
+}
+
+#[test]
+#[should_panic]
+fn rescue_reverts_when_targeting_the_vesting_token() {
+    // The rescue path must never be able to drain the vesting token balance.
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    let recipient = Address::generate(&s.env);
+    s.client.rescue_token(&s.token.address, &recipient);
+}

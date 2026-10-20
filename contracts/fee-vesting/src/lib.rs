@@ -153,6 +153,32 @@ impl FeeVesting {
 
         Self::claim_vested(env)
     }
+
+    /// Admin-only rescue of stray tokens sent to the contract address.
+    ///
+    /// Transfers the full balance of `token` held by this contract to `to`.
+    /// The vesting token itself cannot be swept: its balance backs the
+    /// outstanding (unclaimed) vesting obligation, so rescuing it would
+    /// strand the beneficiary. Use `claim_vested` for the vesting token.
+    pub fn rescue_token(env: Env, token: Address, to: Address) -> i128 {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let vesting_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        if token == vesting_token {
+            panic!("cannot rescue vesting token");
+        }
+
+        let client = token::Client::new(&env, &token);
+        let balance = client.balance(&env.current_contract_address());
+        if balance <= 0 {
+            panic!("nothing to rescue");
+        }
+
+        client.transfer(&env.current_contract_address(), &to, &balance);
+
+        balance
+    }
 }
 
 /// Compute `a * b / c` for non-negative `a`, `b`, and positive `c` without
