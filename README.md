@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-264 -->
+- #264: Review: begin_unstake_asset()/complete_unstake_asset() untested alone
