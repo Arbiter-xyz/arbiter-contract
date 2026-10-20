@@ -2,6 +2,13 @@
 
 //! Tests for #95: third-party refund-risk underwriting (instant_refund()).
 //! Also covers #37: refund-timeout insurance pool.
+//!
+//! NOTE: The contract surface these tests exercise (approve_underwriter /
+//! revoke_underwriter / is_underwriter / instant_refund / get_insurance_pool /
+//! ContractError::NotUnderwriter, plus the UNDERWRITER_FEE_BPS /
+//! INSURANCE_PREMIUM_BPS / BPS_DENOM constants) is not implemented yet — it is
+//! tracked by epics #95 and #37. Until those land this module is gated behind
+//! the `underwriting` feature so it does not break the default build.
 
 use super::*;
 use crate::test::{client, setup, token_client};
@@ -79,7 +86,9 @@ fn instant_refund_on_already_resolved_question_fails() {
 
     let workers = Vec::from_array(&f.env, [worker]);
     let losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
+    // resolve() takes 3 args (question_id, workers, losers); the stale 4-arg
+    // call with a trailing BytesN hash was removed.
+    c.resolve(&1, &workers, &losers);
 
     let res = c.try_instant_refund(&underwriter, &1);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
@@ -105,9 +114,11 @@ fn refund_timeout_insurance_pays_out_extra_on_timeout_but_not_on_admin_refund() 
     let pool_before = c.get_insurance_pool();
     let payer_before = token_client(&f).balance(&f.payer);
 
-    f.env.ledger().set_sequence_number(
-        f.env.ledger().sequence() + TIMEOUT_LEDGERS + 1,
-    );
+    // Advance the ledger past the timeout window. Ledger::set_sequence_number
+    // was removed from the testutils; use the current set_sequence_number API.
+    f.env
+        .ledger()
+        .set_sequence_number(f.env.ledger().sequence() + TIMEOUT_LEDGERS + 1);
     c.refund_timeout(&2);
 
     let payer_after = token_client(&f).balance(&f.payer);
