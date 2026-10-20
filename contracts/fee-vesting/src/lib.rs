@@ -37,6 +37,13 @@ impl FeeVesting {
     /// `start` is the vesting start timestamp, `cliff` the timestamp at
     /// which the first tokens unlock, and `end` the timestamp at which
     /// the entire `total` is unlocked. Requires `start <= cliff <= end`.
+    ///
+    /// # Authorization
+    ///
+    /// Requires the auth of `admin` (and `beneficiary`). This prevents a
+    /// front-runner from initializing a freshly deployed instance with
+    /// attacker-controlled parameters before the real deployer's call lands
+    /// (same class of bug as arbiter-contract#23/#188).
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -56,6 +63,9 @@ impl FeeVesting {
         if total < 0 {
             panic!("invalid total");
         }
+
+        admin.require_auth();
+        beneficiary.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Beneficiary, &beneficiary);

@@ -200,3 +200,31 @@ fn claim_vested_requires_beneficiary_auth() {
     let result = s.client.try_claim_vested();
     assert!(result.is_err());
 }
+
+#[test]
+fn initialize_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token, _token_admin) = create_token(&env, &admin);
+
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Without mocking auth, a caller that is not the admin must be rejected
+    // by the `admin.require_auth()` gate in `initialize()`, preventing a
+    // front-runner from initializing with attacker-controlled parameters.
+    env.set_auths(&[]);
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token.address,
+        &1_000,
+        &500,
+        &1_000,
+        &10_000,
+    );
+    assert!(result.is_err());
+}
