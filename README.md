@@ -303,3 +303,6 @@ check.
 
 <!-- handsoff-issue-234 -->
 - #234: Shared src/test.rs harness fails to compile with 55 errors
+
+<!-- handsoff-issue-235 -->
+- #235: test.rs's own resolve() helpers use the stale 3-arg signature
