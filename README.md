@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-333 -->
+- #333: Duplicate load_question() definition — second compile error hiding behind #332
