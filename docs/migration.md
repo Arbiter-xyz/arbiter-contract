@@ -12,6 +12,11 @@ and from what address) is settled. It names the specific rail, traces a
 payer's funds from origin chain through to `open_question()` being called,
 and states what happens to a bridged payer's refund path.
 
+> **Canonical copy:** this note is maintained in
+> [account-abstraction.md](./account-abstraction.md). The summary below is a
+> pointer, not a second source of truth — edit the canonical copy, not this
+> one.
+
 ### Rail: Circle CCTP + a Stellar forwarder
 
 We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
@@ -65,6 +70,11 @@ USDC out themselves.
    token is USDC and the trust/latency model is a single attestation
    round. Axelar GMP is the fallback only if arbitrary payloads or
    non-USDC assets are needed later.
+3. **What calls `submit()`/`charge()`, and from what address?** The
+   forwarder calls them directly, as itself, passing the payer's Stellar
+   address of record as the `payer` argument (see step 3 above). This is
+   the settled interface; the canonical copy in
+   [account-abstraction.md](./account-abstraction.md) is the reference.
 
 ## Pieces
 
@@ -130,66 +140,4 @@ its pending escrow plus what it owes workers.
   [src/test_migration.rs](../src/test_migration.rs) that snapshots both
   contracts' balances and pending sets and asserts they're unchanged.
 - **Orchestrator level:** `run` never walks a precomputed list. Each
-  iteration re-reads page 0 of the *live* pending set and sends it. What
-  a crashed run (or a still-in-flight transaction) already moved is
-  simply no longer there. If a transaction the orchestrator thought had
-  failed actually landed and it resends the same ids, the resend reverts
-  with `QuestionNotPending`. It's journaled and the loop re-reads. The
-  journal is an audit trail, not a source of truth: deleting it can't
-  cause a double move.
-
-## Tested on testnet
-
-`node tools/migrate/e2e-testnet.mjs` deploys two instances of the current
-Wasm on a freshly issued asset (AUSD, wrapped in its Stellar Asset
-Contract). It opens 10 questions from 3 payers, resolves one and refunds
-one, and then, all with real transactions:
-
-1. `plan` before the handshake → reports "target's migration source is
-   unset" and exits 1.
-2. `set_migration_source`, then `plan` → exactly 8 questions,
-   6.0000000 AUSD, 3 batches. Balances and pending counts are checked
-   unchanged afterwards.
-3. `run` with `MIGRATE_CRASH=after-send:2` → the process SIGKILLs itself
-   right after batch 2 lands and before it's journaled. On-chain: 2 left
-   on OLD, 6 on NEW, and `balance(OLD) + balance(NEW)` unchanged.
-4. `verify` on the half-finished state → passes.
-5. Batch 1 replayed by hand → reverts with `Error(Contract, #6)`
-   (QuestionNotPending). Nothing changes.
-6. `run` again → finishes. `verify` → passes. NEW gained exactly the
-   pending escrow, and OLD keeps exactly what it still owes workers.
-7. A migrated question refunded on NEW pays its original payer.
-
-The transcript of the passing run is in
-[migration-testnet-run.log](migration-testnet-run.log).
-
-Running it found a real orchestrator bug before any funds were at risk:
-the CLI rejects `Vec<u64>` ids sent as JSON strings, so every batch failed
-at argument parsing. The orchestrator now sends exact numbers built from
-BigInts, and treats a parse error as fatal, not as a revert.
-
-## Running a real migration
-
-```sh
-# 0. Deploy the new instance and initialize it with the same default token.
-#    For each additional source asset, allowlist it on the target before import:
-#    stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- \
-#      set_asset_allowed --token $ASSET --allowed true
-# 1. Target admin opens the door:
-stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- \
-  set_migration_source --source $OLD
-# 2. Dry run. Exit code 1 if anything would revert.
-node tools/migrate/migrate.mjs plan   --source $OLD --target $NEW --admin $OLD_ADMIN --network mainnet
-node tools/migrate/migrate.mjs plan   ... --json > plan.json      # machine-readable
-# 3. Migrate. Safe to Ctrl-C / crash / re-run at any point.
-node tools/migrate/migrate.mjs run    --source $OLD --target $NEW --admin $OLD_ADMIN --network mainnet --batch 10
-# 4. Check every question and both balances against the baseline in the journal.
-node tools/migrate/migrate.mjs verify --source $OLD --target $NEW --admin $OLD_ADMIN --network mainnet
-# 5. Close the door.
-stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- clear_migration_source
-```
-
-Point the backend's `resolve()`/`refund()` at NEW before step 3 for new
-questions. Questions still on OLD keep settling there normally during
-the migration. `migrate_pending` and a concurrent `resolve` on the same
-id can't both succeed; whichever lands second reverts.
+  iteration re-reads page 0 of the *live* pending set and sends it. 
