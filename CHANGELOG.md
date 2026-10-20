@@ -26,6 +26,10 @@ actually matches this tag's source, rather than trusting the tag name alone.
   `stake_asset()` now matures on its own clock, so topping up no longer
   delays the maturity of stake already warming (#194). Integrators reading
   `warming_since` must switch to `warming_tranches`.
+- Added stake snapshotting: `get_stake_info` / `get_stake_info_asset`
+  expose the per-tranche warming state above, and stake reads reflect the
+  snapshot taken at the time of each top-up rather than a single mutable
+  timestamp.
 - Added `resolve_by_consensus(question_id, answers)`: settles from per-worker
   answer commitments and slashes (via the existing slash path) an
   established worker who alone dissented from an otherwise unanimous quorum.
@@ -36,6 +40,19 @@ actually matches this tag's source, rather than trusting the tag name alone.
 - Added `get_admin()` and `get_platform()` views (alongside `get_token()`).
 - Added `get_questions(question_ids)` batch view returning
   `Vec<Option<Question>>` in input order.
+- Added the escalation/dispute workflow: `escalate(question_id)` moves a
+  question into the challengeable/escalated state, and
+  `resolve_challengeable(...)` settles it after the dispute window. New
+  `migrate_pending` and `reopen_question` admin paths, plus `preview_resolve`
+  for dry-run settlement previews.
+- Added passkey authentication: workers can register and authorize via
+  passkey-backed signers instead of a raw ed25519 key, with the same
+  stake/answer/withdraw surface.
+- Added KYC attestation: an admin-attested KYC record gates worker
+  participation, with getters to read a worker's attestation status.
+- Added circuit breaker controls: `set_paused(paused)` (admin-only) toggles
+  the contract-wide pause, `is_paused()` reads it, and `get_health()`
+  returns an aggregate health view (#109, #110).
 - Added `submit_basket(payer, question_id, basket)` for a payout basket of
   up to 8 distinct allowlisted assets, each `(token, amount)`. `resolve()`
   and `resolve_by_consensus()` settle each leg in its own asset with the same
