@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-238 -->
+- #238: Review: test_median_consensus.rs (#98) calls missing functions
