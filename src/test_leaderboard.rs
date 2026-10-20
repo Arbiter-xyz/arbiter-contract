@@ -95,9 +95,9 @@ fn on_chain_reputation_decays_over_elapsed_ledgers() {
     assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA);
 
     // Advance the ledger sequence so the lazily-computed decay kicks in.
-    f.env.ledger().set_sequence_number(
-        f.env.ledger().sequence() + REPUTATION_DECAY_INTERVAL_LEDGERS,
-    );
+    f.env.ledger().with_mut(|li| {
+        li.sequence_number += REPUTATION_DECAY_INTERVAL_LEDGERS;
+    });
 
     assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA - REPUTATION_DECAY_PER_INTERVAL);
 }

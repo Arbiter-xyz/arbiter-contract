@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::test::{client, setup, token_client};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 
 #[test]
 fn registered_underwriter_can_front_an_instant_refund_before_the_timeout_deadline() {
@@ -105,9 +105,9 @@ fn refund_timeout_insurance_pays_out_extra_on_timeout_but_not_on_admin_refund() 
     let pool_before = c.get_insurance_pool();
     let payer_before = token_client(&f).balance(&f.payer);
 
-    f.env.ledger().set_sequence_number(
-        f.env.ledger().sequence() + TIMEOUT_LEDGERS + 1,
-    );
+    f.env.ledger().with_mut(|li| {
+        li.sequence_number = li.sequence_number + TIMEOUT_LEDGERS + 1;
+    });
     c.refund_timeout(&2);
 
     let payer_after = token_client(&f).balance(&f.payer);
