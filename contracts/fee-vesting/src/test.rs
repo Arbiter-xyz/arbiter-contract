@@ -219,3 +219,28 @@ fn only_beneficiary_can_claim() {
     let result = s.client.try_claim_vested_as(&stranger);
     assert!(result.is_err());
 }
+
+#[test]
+fn get_schedule_returns_the_full_schedule() {
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    let schedule = s.client.get_schedule();
+    assert_eq!(schedule.start, 1_000);
+    assert_eq!(schedule.cliff, 500);
+    assert_eq!(schedule.duration, 1_000);
+    assert_eq!(schedule.total, 10_000);
+    assert_eq!(schedule.end, 2_000);
+}
+
+#[test]
+fn get_schedule_is_stable_across_time_and_claims() {
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    let before = s.client.get_schedule();
+
+    set_time(&s.env, 1_500);
+    s.client.claim_vested();
+
+    let after = s.client.get_schedule();
+    assert_eq!(before, after);
+}
