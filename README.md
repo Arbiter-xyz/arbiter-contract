@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-223 -->
+- #223: Suspected: escalate_resolve()'s overturned check is order-sensitive, not set-sensitive
