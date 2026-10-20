@@ -67,6 +67,15 @@ impl FeeVesting {
         env.storage().instance().set(&DataKey::Claimed, &0i128);
     }
 
+    /// Return the configured admin address.
+    ///
+    /// The admin is the deployer that configured the schedule. It is exposed
+    /// so operators and audits can verify who set up the contract; the
+    /// schedule itself is immutable and there is no admin-gated mutation.
+    pub fn admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).unwrap()
+    }
+
     /// Amount currently unlocked by the schedule but not yet claimed.
     pub fn claimable_amount(env: Env) -> i128 {
         let vested = Self::vested_amount(&env);

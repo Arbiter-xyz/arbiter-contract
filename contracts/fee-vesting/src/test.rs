@@ -217,3 +217,38 @@ fn vested_amount_does_not_overflow_for_large_total_and_long_duration() {
     let expected = total / 2;
     assert_eq!(s.client.vested_amount(), expected);
 }
+
+// Issue #227: `DataKey::Admin` is written during `initialize` but never read
+// by any contract entry point. This test pins that intentional behavior: the
+// stored admin has no privileged powers (no pause, recovery, or beneficiary
+// rotation), so a stranger cannot use admin identity to move funds or mutate
+// the schedule. If admin-gated functionality is ever added, this test should
+// be updated alongside it.
+#[test]
+fn admin_has_no_privileged_powers_over_the_schedule() {
+    let s = setup(1_000, 500, 1_000, 10_000);
+    set_time(&s.env, 1_500);
+
+    // The admin cannot claim on behalf of the beneficiary.
+    let result = s.client.try_claim_vested_as(&s.admin);
+    assert!(result.is_err());
+
+    // The admin cannot re-initialize or otherwise mutate the schedule.
+    let result = s.client.try_initialize(
+        &s.admin,
+        &s.admin,
+        &s.token.address,
+        &1_000,
+        &500,
+        &1_000,
+        &10_000,
+    );
+    assert!(result.is_err());
+
+    // Only the beneficiary can pull vested funds; the admin's balance is
+    // untouched by any admin action.
+    assert_eq!(s.token.balance(&s.admin), 0);
+    s.client.claim_vested();
+    assert_eq!(s.token.balance(&s.beneficiary), 5_000);
+    assert_eq!(s.token.balance(&s.admin), 0);
+}
