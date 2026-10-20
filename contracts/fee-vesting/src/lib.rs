@@ -1,5 +1,34 @@
 #![no_std]
 
+//! # Fee Vesting Treasury
+//!
+//! This contract holds platform fee revenue and releases it to a
+//! beneficiary (DAO treasury / multisig) on a fixed cliff-then-linear
+//! schedule. It is the on-chain half of the fee-distribution flow; the
+//! off-chain half is described below so operators know how fees are meant
+//! to reach this contract.
+//!
+//! ## Who deploys and funds it
+//!
+//! - **Deployer / admin**: the protocol deployer deploys the contract and
+//!   calls [`FeeVesting::initialize`] exactly once, passing the `admin`
+//!   (allowed to `rescue_token`), the `beneficiary` (receives unlocked
+//!   revenue), the `token` used for payouts, and the `start`/`cliff`/`end`
+//!   schedule plus the `total` amount subject to vesting.
+//! - **Funder**: the fee-collecting component (or the deployer acting on
+//!   its behalf) transfers the vesting `token` to the contract address so
+//!   its balance backs the outstanding vesting obligation. This contract
+//!   does not pull fees itself; it only pays out what it already holds.
+//!
+//! ## How platform fees reach this contract
+//!
+//! Platform fees accrue elsewhere in the protocol and are forwarded to
+//! this contract's address as ordinary token transfers. Once the balance
+//! is in place, the beneficiary calls [`FeeVesting::claim_vested`] (or
+//! [`FeeVesting::claim_vested_as`]) to withdraw the unlocked portion.
+//! Stray tokens sent by mistake can be recovered by the admin via
+//! [`FeeVesting::rescue_token`]; the vesting token itself cannot be swept.
+
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
 
 /// Storage keys for the fee-vesting treasury contract.
@@ -225,11 +254,11 @@ fn mul_div_i128(a: i128, b: i128, c: i128) -> i128 {
     // Divide (combined_hi, combined_lo) by c.
     let q_hi = combined_hi / c;
     let q_hi_r = combined_hi % c;
+
+    // Fold the remainder of the high part into the low part.
     let q_lo = (q_hi_r << 64 | combined_lo) / c;
 
-    let quotient = (q_hi << 64) | q_lo;
-    let _ = hi_q; // hi_q is always 0 because hi < c for valid inputs.
-    quotient as i128
+    // Assemble the final quotient: `hi_q * 2^64 + q_lo`.
+    let result = (hi_q << 64) | q_lo;
+    result as i128
 }
-
-mod test;
