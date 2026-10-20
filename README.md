@@ -303,3 +303,6 @@ check.
 
 <!-- handsoff-issue-207 -->
 - #207: Suspected: KYC attestor signature has no domain separation
+
+<!-- handsoff-issue-208 -->
+- #208: do_withdraw_for_token()'s OwedLock check blocks withdrawal of unrelated assets entirely — no longer dead code, lock_owed() is now real
