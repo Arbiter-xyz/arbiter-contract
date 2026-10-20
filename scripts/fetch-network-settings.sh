@@ -3,7 +3,7 @@
 # network's current Soroban resource limits and cost-model parameters, which
 # src/test_resources.rs measures resolve() against. Re-run whenever the
 # network votes new settings in, then re-run the benchmark
-# (see docs/RESOURCE_LIMITS.md).
+# (see docs/RESOURCE_LIMITS.md, "Refreshing network settings").
 #
 #   scripts/fetch-network-settings.sh                   # mainnet
 #   NETWORK=testnet scripts/fetch-network-settings.sh

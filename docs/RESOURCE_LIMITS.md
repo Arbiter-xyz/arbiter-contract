@@ -23,12 +23,22 @@ measured, not assumed, by the resource sweep described below.
   cargo test bench_resolve_resource_sweep -- --ignored --nocapture
   ```
 
+  Note: `src/test_resources.rs` is not currently wired into the crate's module
+  tree, so the sweep is not compiled by a plain `cargo test` run. It is kept as
+  the reference harness for the limits below.
+
 - **Load tests** — `bench_load_*` in `src/test_load.rs`, documented in
   `docs/LOAD_TESTING.md`.
 
 - **Network settings snapshot** — `bench/mainnet-soroban-settings.json`, refreshed
-  by `scripts/fetch-network-settings.sh`. It supplies the limits that the sweep
-  re-prices measured cost against.
+  by `scripts/fetch-network-settings.sh`. That script writes
+  `bench/<network>-soroban-settings.json` (e.g. `bench/mainnet-soroban-settings.json`)
+  and is the source of the limits that `bench_resolve_resource_sweep` in
+  `src/test_resources.rs` re-prices measured cost against. To refresh the snapshot:
+
+  ```sh
+  scripts/fetch-network-settings.sh mainnet
+  ```
 
 ## Not yet built
 
