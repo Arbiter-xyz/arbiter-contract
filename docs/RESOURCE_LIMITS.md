@@ -30,6 +30,25 @@ measured, not assumed, by the resource sweep described below.
   by `scripts/fetch-network-settings.sh`. It supplies the limits that the sweep
   re-prices measured cost against.
 
+## Batch-view entry points
+
+`sweep_timeouts()` (see `src/lib.rs`) takes a caller-supplied `question_ids`
+`Vec` and iterates it in a single transaction. There is **no explicit batch-size
+cap** in the contract; the comment above the function states that callers are
+expected to size batches sensibly. This is intentional: the per-transaction
+resource budget is enforced by the network (CPU instructions, ledger read/write
+entries, and memory), not by an in-contract constant, so a caller that passes a
+very large `question_ids` vector will simply have the transaction rejected by
+the host once it exceeds the budget in `bench/mainnet-soroban-settings.json`
+(`txMaxInstructions`, `txMaxReadLedgerEntries`, `txMaxWriteLedgerEntries`,
+`txMaxMemoryBytes`).
+
+Because the failure mode is a clean host-side rejection rather than incorrect
+state, this is **not a bug** — it is a documented caller contract. Keepers
+should size `question_ids` batches so that the resulting read/write set stays
+within the network limits above; the resource sweep is the tool for measuring
+where that boundary sits for a given network configuration.
+
 ## Not yet built
 
 The following were planned under issue #65 but do not exist in the repo:
