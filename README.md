@@ -200,3 +200,8 @@ ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
 
 **Baseline: 15.5KB** (optimized). The build must stay at or below this
 number; a PR that reg
+
+## Handsoff notes
+
+<!-- handsoff-issue-291 -->
+- #291: Review: CannotDisableDefaultAsset has zero test coverage
