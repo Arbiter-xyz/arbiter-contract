@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-184 -->
+- #184: dispute_resolve() permanently freezes a question's escrow and challenger bond — no recovery path exists
