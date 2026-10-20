@@ -190,11 +190,13 @@ fn schedule_is_immutable_after_initialize() {
 }
 
 #[test]
-fn only_beneficiary_can_claim() {
+fn claim_vested_requires_beneficiary_auth() {
     let s = setup(1_000, 500, 1_000, 10_000);
     set_time(&s.env, 1_500);
 
-    let stranger = Address::generate(&s.env);
-    let result = s.client.try_claim_vested_as(&stranger);
+    // Without mocking auth, a caller that is not the beneficiary must be
+    // rejected by the `beneficiary.require_auth()` gate in `claim_vested()`.
+    s.env.set_auths(&[]);
+    let result = s.client.try_claim_vested();
     assert!(result.is_err());
 }

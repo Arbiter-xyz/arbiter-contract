@@ -101,6 +101,17 @@ impl FeeVesting {
 
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
+    ///
+    /// # Authorization
+    ///
+    /// This entry point is intentionally permissionless: it does not call
+    /// `require_auth()` on any address. The payout destination is always the
+    /// fixed `Beneficiary` stored at `initialize()` time, never the caller, so
+    /// an arbitrary third party can only trigger a transfer that the
+    /// beneficiary is entitled to receive anyway. There is no fund-safety
+    /// issue — the worst a caller can do is accelerate a payout to the correct
+    /// address. Callers that want to prove beneficiary identity should use
+    /// `claim_vested_as`, which requires the beneficiary's auth.
     pub fn claim_vested(env: Env) -> i128 {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
