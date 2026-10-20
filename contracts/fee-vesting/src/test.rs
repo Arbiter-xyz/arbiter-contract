@@ -198,3 +198,22 @@ fn only_beneficiary_can_claim() {
     let result = s.client.try_claim_vested_as(&stranger);
     assert!(result.is_err());
 }
+
+#[test]
+fn vested_amount_does_not_overflow_for_large_total_and_long_duration() {
+    // total * elapsed would overflow i128 if computed naively: pick a total and
+    // elapsed whose product exceeds i128::MAX. vested_amount must still return
+    // the correct (bounded) result rather than panicking.
+    let total = i128::MAX / 2;
+    let duration = 1_000_000_000u64;
+    let start = 1_000u64;
+    let s = setup(start, 0, duration, total);
+
+    // Halfway through the schedule: elapsed = duration / 2.
+    let elapsed = duration / 2;
+    set_time(&s.env, start + elapsed);
+
+    // total * elapsed overflows i128 (total ~ 1.7e38, elapsed ~ 5e8).
+    let expected = total / 2;
+    assert_eq!(s.client.vested_amount(), expected);
+}
