@@ -30,6 +30,18 @@ measured, not assumed, by the resource sweep described below.
   by `scripts/fetch-network-settings.sh`. It supplies the limits that the sweep
   re-prices measured cost against.
 
+## Review status
+
+- **Load-testing harness (#248)** — reviewed. The `bench_load_*` tests in
+  `src/test_load.rs` are `#[ignore]`d and have never been recorded as a run in
+  the repo; the Results table and the three throughput hypotheses in
+  `docs/LOAD_TESTING.md` (flat contract cost, admin-source `resolve()`
+  serialization, network-side ceiling) remain explicitly unconfirmed. This is
+  expected for an opt-in harness, not a defect: no committed run data exists to
+  contradict the documented claims, and the hypotheses are already labelled
+  unconfirmed. Closing #248 as not-a-bug; actually running the harness to close
+  out #119 is tracked there, not here.
+
 ## Not yet built
 
 The following were planned under issue #65 but do not exist in the repo:

@@ -64,6 +64,25 @@ transferred, and direct `i128 * bps` could overflow on very large amounts.
 Resolution now transfers the per-question platform amount in its bound
 asset and uses overflow-safe integer basis-point calculation.
 
+## Load-testing harness review (#248)
+
+This section records the review conclusion for the load-testing harness
+referenced by `docs/LOAD_TESTING.md:143-159`. The Results table and the
+three throughput hypotheses (flat contract cost, admin-source `resolve()`
+serialization, network-side ceiling) are explicitly marked unconfirmed.
+
+Conclusion: **not-a-bug-closed-with-reasoning** for the harness itself. The
+harness is a measurement tool, not a correctness surface; the absence of a
+recorded run is a missing measurement, not a defect in the code under test.
+The unconfirmed hypotheses remain unconfirmed by design until someone runs
+`bench_load_*` and the network layer against a real deployment. No
+benchmark numbers are asserted here, and no run data is fabricated.
+
+Follow-up: closing out #119 for real requires an actual run. That is
+tracked separately as a measurement task, not as a code fix in this review.
+Until such a run is recorded, treat the Results table and all three
+hypotheses as unverified.
+
 ## Cross-chain settlement bridge (design note, #71)
 
 This note is documentation only. No contract code changes land until the
