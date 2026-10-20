@@ -306,3 +306,6 @@ check.
 
 <!-- handsoff-issue-208 -->
 - #208: do_withdraw_for_token()'s OwedLock check blocks withdrawal of unrelated assets entirely — no longer dead code, lock_owed() is now real
+
+<!-- handsoff-issue-209 -->
+- #209: Dead-code: compute_median() underflows/panics on an empty answers vector
