@@ -309,3 +309,6 @@ check.
 
 <!-- handsoff-issue-209 -->
 - #209: Dead-code: compute_median() underflows/panics on an empty answers vector
+
+<!-- handsoff-issue-215 -->
+- #215: 16 of ~46 test files are never compiled or run — no mod declaration in lib.rs
