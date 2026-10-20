@@ -139,17 +139,6 @@ during the test, `--sweep --keeper-secret S...` acts as one. It still
 reports how many questions were overdue before the sweep: that number is
 what the backend and keeper left behind.
 
-**Testnet.** Point `--rpc`, `--friendbot` and `--passphrase` at testnet,
-using a contract initialized with a short `timeout_ledgers`. This is the
-only way to see the real lag on top of the injected faults (see §3.1).
+**Testnet.**
 
-## 3. The issue's open questions
-
-### 3.1 Real testnet or a local mock?
-
-**Both, on the same harness, for different jobs.** The proxy is agnostic
-about its upstream.
-
-- **Local quickstart behind the proxy (the default).** Every fault is
-  controlled and reproducible from a seed. That's what makes a regression
-  test possible. The 
+/* … truncated 539 chars — edit only what you need near the top … */
