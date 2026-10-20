@@ -71,11 +71,11 @@ fn nothing_is_vested_before_the_cliff() {
 
     set_time(&s.env, 1_000);
     assert_eq!(s.client.vested_amount(), 0);
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 
     set_time(&s.env, 1_499);
     assert_eq!(s.client.vested_amount(), 0);
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn cliff_unlocks_the_cliff_portion_at_once() {
 
     set_time(&s.env, 1_500);
     assert_eq!(s.client.vested_amount(), 5_000);
-    assert_eq!(s.client.claimable_amount(), 5_000);
+    assert_eq!(s.client.claimable(), 5_000);
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn claim_transfers_only_the_unlocked_amount() {
     let claimed = s.client.claim_vested();
     assert_eq!(claimed, 5_000);
     assert_eq!(s.token.balance(&s.beneficiary), 5_000);
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 
     set_time(&s.env, 1_750);
     let claimed = s.client.claim_vested();
@@ -154,12 +154,12 @@ fn claimable_amount_tracks_claimed_balance() {
     let s = setup(1_000, 500, 1_000, 10_000);
 
     set_time(&s.env, 1_500);
-    assert_eq!(s.client.claimable_amount(), 5_000);
+    assert_eq!(s.client.claimable(), 5_000);
     s.client.claim_vested();
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 
     set_time(&s.env, 1_750);
-    assert_eq!(s.client.claimable_amount(), 2_500);
+    assert_eq!(s.client.claimable(), 2_500);
 }
 
 #[test]
