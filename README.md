@@ -303,3 +303,6 @@ check.
 
 <!-- handsoff-issue-333 -->
 - #333: Duplicate load_question() definition — second compile error hiding behind #332
+
+<!-- handsoff-issue-334 -->
+- #334: BasketLegSettled event is used but never defined — third compile error behind #332
