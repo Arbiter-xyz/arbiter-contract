@@ -205,3 +205,6 @@ number; a PR that reg
 
 <!-- handsoff-issue-291 -->
 - #291: Review: CannotDisableDefaultAsset has zero test coverage
+
+<!-- handsoff-issue-292 -->
+- #292: Review: migrate_pending() non-default-asset coverage unconfirmed
