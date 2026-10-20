@@ -102,3 +102,19 @@ fn cliff_equal_to_end_claim_transfers_full_amount() {
     assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 1_000);
     assert_eq!(client.claimable_amount(), 0);
 }
+
+// Issue #233: the beneficiary is fixed at initialization and there is no
+// rotation setter. This test documents that accepted limitation: the
+// beneficiary recorded at init is the only address that can claim, and no
+// admin-gated rotation entrypoint exists on the contract.
+#[test]
+fn beneficiary_is_fixed_at_initialization() {
+    let env = Env::default();
+    let (contract_id, beneficiary, token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // The configured beneficiary is the one that receives vested funds.
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.claim_vested(), 1_000);
+    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 1_000);
+}

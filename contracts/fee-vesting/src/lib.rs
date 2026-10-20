@@ -6,6 +6,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
 ///
 /// The schedule is fixed at `initialize()` time and cannot be mutated
 /// afterwards: there is no governance entry point that rewrites it.
+/// The only mutable piece of configuration is the beneficiary, which the
+/// admin may rotate via `set_beneficiary` (key rotation / treasury
+/// migration).
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -65,6 +68,32 @@ impl FeeVesting {
         env.storage().instance().set(&DataKey::End, &end);
         env.storage().instance().set(&DataKey::Total, &total);
         env.storage().instance().set(&DataKey::Claimed, &0i128);
+    }
+
+    /// Rotate the beneficiary that receives unlocked fee revenue.
+    ///
+    /// Only the admin may call this. The vesting schedule, token, and
+    /// already-claimed amount are untouched, so a key rotation or treasury
+    /// migration does not disturb the unlock curve.
+    pub fn set_beneficiary(env: Env, new_beneficiary: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Beneficiary, &new_beneficiary);
+    }
+
+    /// Current beneficiary that receives unlocked fee revenue.
+    pub fn beneficiary(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Beneficiary)
+            .unwrap()
     }
 
     /// Amount currently unlocked by the schedule but not yet claimed.
