@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-234 -->
+- #234: Shared src/test.rs harness fails to compile with 55 errors
