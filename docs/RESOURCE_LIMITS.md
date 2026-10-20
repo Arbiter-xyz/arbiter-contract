@@ -32,19 +32,22 @@ measured, not assumed, by the resource sweep described below.
 
 ## Batch-view entry points
 
-`sweep_timeouts()` (see `src/lib.rs`) takes a caller-supplied `question_ids`
-`Vec` and iterates it in a single transaction. There is **no explicit batch-size
-cap** in the contract; the comment above the function states that callers are
-expected to size batches sensibly. This is intentional: the per-transaction
-resource budget is enforced by the network (CPU instructions, ledger read/write
-entries, and memory), not by an in-contract constant, so a caller that passes a
-very large `question_ids` vector will simply have the transaction rejected by
-the host once it exceeds the budget in `bench/mainnet-soroban-settings.json`
-(`txMaxInstructions`, `txMaxReadLedgerEntries`, `txMaxWriteLedgerEntries`,
-`txMaxMemoryBytes`).
+`sweep_timeouts()` and `get_questions()` (see `src/lib.rs`) both take a
+caller-supplied `question_ids` `Vec` and iterate it in a single transaction.
+Neither has an **explicit batch-size cap** in the contract; the comments above
+the functions state that callers are expected to size batches sensibly. This is
+intentional: the per-transaction resource budget is enforced by the network (CPU
+instructions, ledger read/write entries, and memory), not by an in-contract
+constant, so a caller that passes a very large `question_ids` vector will simply
+have the transaction rejected by the host once it exceeds the budget in
+`bench/mainnet-soroban-settings.json` (`txMaxInstructions`,
+`txMaxReadLedgerEntries`, `txMaxWriteLedgerEntries`, `txMaxMemoryBytes`).
 
-Because the failure mode is a clean host-side rejection rather than incorrect
-state, this is **not a bug** — it is a documented caller contract. Keepers
+`get_questions()` is additionally read-only: it performs one ledger read per id
+and writes nothing, so an oversized batch can only exhaust the read-entry and
+instruction budgets — it cannot mutate state or leave partial writes behind.
+The failure mode is therefore a clean host-side rejection rather than incorrect
+state, and this is **not a bug** — it is a documented caller contract. Keepers
 should size `question_ids` batches so that the resulting read/write set stays
 within the network limits above; the resource sweep is the tool for measuring
 where that boundary sits for a given network configuration.
