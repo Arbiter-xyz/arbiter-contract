@@ -306,3 +306,6 @@ check.
 
 <!-- handsoff-issue-185 -->
 - #185: open_question()/submit*()/charge*() never check for a pending upgrade — the upgrade mechanism's core fund-safety guarantee is unenforced
+
+<!-- handsoff-issue-206 -->
+- #206: Suspected: CEI ordering — platform token transfer executes before question status flips in settle_resolution()
