@@ -192,6 +192,18 @@ lowers the storage rent every deployment (and re-deployment) pays, so the
 size is treated as a budget to defend rather than a one-off observation.
 
 Measure it with the same command CI uses:
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
 
 ```sh
 stellar contract build
