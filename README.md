@@ -303,3 +303,6 @@ check.
 
 <!-- handsoff-issue-184 -->
 - #184: dispute_resolve() permanently freezes a question's escrow and challenger bond — no recovery path exists
+
+<!-- handsoff-issue-185 -->
+- #185: open_question()/submit*()/charge*() never check for a pending upgrade — the upgrade mechanism's core fund-safety guarantee is unenforced
