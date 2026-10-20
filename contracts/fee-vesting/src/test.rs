@@ -198,3 +198,27 @@ fn only_beneficiary_can_claim() {
     let result = s.client.try_claim_vested_as(&stranger);
     assert!(result.is_err());
 }
+
+#[test]
+fn zero_total_schedule_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token, _token_admin) = create_token(&env, &admin);
+
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token.address,
+        &1_000,
+        &500,
+        &1_000,
+        &0,
+    );
+    assert!(result.is_err());
+}
