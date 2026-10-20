@@ -119,3 +119,17 @@ jobs:
         run: cargo test escrow_invariant_holds_for_every_call_sequence
         env:
           PROPTEST_CASES: "1000"
+      - name: Pre-flight gate (docs/UPGRADES.md step 2)
+        # Issue #285: the pre-flight checklist in docs/UPGRADES.md tells
+        # operators to run `scripts/build-wasm.sh && cargo test && cargo test
+        # -- --ignored` before any real upgrade. That command is only usable
+        # if it actually passes on the branch being released, so this step
+        # runs the exact same sequence as a release-readiness gate. It is
+        # intentionally a separate step from the individual `cargo test`
+        # steps above so a failure here is attributable to the documented
+        # pre-flight command rather than to a specific test target.
+        run: |
+          set -euo pipefail
+          scripts/build-wasm.sh
+          cargo test
+          cargo test -- --ignored
