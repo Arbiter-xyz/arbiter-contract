@@ -239,5 +239,5 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-240 -->
-- #240: Review: test_question_templates.rs (#88) calls missing functions
+<!-- handsoff-issue-238 -->
+- #238: Review: test_median_consensus.rs (#98) calls missing functions
