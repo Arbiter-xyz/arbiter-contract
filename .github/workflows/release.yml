@@ -15,6 +15,10 @@ env:
   # Pinned testnet deployment. Override via workflow_dispatch input or by
   # setting the CONTRACT_ID repository variable for a future mainnet deploy.
   DEFAULT_CONTRACT_ID: CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36
+  # Must match rust-toolchain.toml, ci.yml, and scripts/build-wasm.sh so the
+  # release artifact is byte-for-byte reproducible with local builds.
+  RUST_TOOLCHAIN: '1.89.0'
+  WASM_TARGET: wasm32v1-none
 
 jobs:
   build:
@@ -26,9 +30,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          targets: wasm32-unknown-unknown
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.WASM_TARGET }}
 
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli --features opt
@@ -39,7 +44,7 @@ jobs:
       - name: Compute local WASM hash
         id: hash
         run: |
-          WASM=$(find target/wasm32-unknown-unknown/release -maxdepth 1 -name '*.wasm' ! -name '*_test.wasm' | head -n1)
+          WASM=$(find target/${{ env.WASM_TARGET }}/release -maxdepth 1 -name '*.wasm' ! -name '*_test.wasm' | head -n1)
           if [ -z "$WASM" ]; then
             echo "::error::No WASM artifact produced by 'stellar contract build'"
             exit 1

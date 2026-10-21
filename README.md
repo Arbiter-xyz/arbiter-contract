@@ -206,5 +206,8 @@ number; a PR that reg
 <!-- handsoff-issue-291 -->
 - #291: Review: CannotDisableDefaultAsset has zero test coverage
 
-<!-- handsoff-issue-292 -->
-- #292: Review: migrate_pending() non-default-asset coverage unconfirmed
+<!-- handsoff-issue-43 -->
+- #43: Slashing insurance for workers
+
+<!-- handsoff-issue-225 -->
+- #225: Suspected: KYC attestor rotation doesn't revoke already-recorded attestations

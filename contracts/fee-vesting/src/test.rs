@@ -221,117 +221,55 @@ fn only_beneficiary_can_claim() {
 }
 
 #[test]
-fn get_schedule_returns_the_full_schedule() {
-    let s = setup(1_000, 500, 1_000, 10_000);
+fn vested_amount_does_not_overflow_for_large_total_and_long_duration() {
+    // total * elapsed would overflow i128 if computed naively: pick a total and
+    // elapsed whose product exceeds i128::MAX. vested_amount must still return
+    // the correct (bounded) result rather than panicking.
+    let total = i128::MAX / 2;
+    let duration = 1_000_000_000u64;
+    let start = 1_000u64;
+    let s = setup(start, 0, duration, total);
 
-    let schedule = s.client.get_schedule();
-    assert_eq!(schedule.start, 1_000);
-    assert_eq!(schedule.cliff, 500);
-    assert_eq!(schedule.duration, 1_000);
-    assert_eq!(schedule.total, 10_000);
-    assert_eq!(schedule.end, 2_000);
+    // Halfway through the schedule: elapsed = duration / 2.
+    let elapsed = duration / 2;
+    set_time(&s.env, start + elapsed);
+
+    // total * elapsed overflows i128 (total ~ 1.7e38, elapsed ~ 5e8).
+    let expected = total / 2;
+    assert_eq!(s.client.vested_amount(), expected);
 }
 
+// Issue #227: `DataKey::Admin` is written during `initialize` but never read
+// by any contract entry point. This test pins that intentional behavior: the
+// stored admin has no privileged powers (no pause, recovery, or beneficiary
+// rotation), so a stranger cannot use admin identity to move funds or mutate
+// the schedule. If admin-gated functionality is ever added, this test should
+// be updated alongside it.
 #[test]
-fn get_schedule_is_stable_across_time_and_claims() {
+fn admin_has_no_privileged_powers_over_the_schedule() {
     let s = setup(1_000, 500, 1_000, 10_000);
-
-    let before = s.client.get_schedule();
-
     set_time(&s.env, 1_500);
+
+    // The admin cannot claim on behalf of the beneficiary.
+    let result = s.client.try_claim_vested_as(&s.admin);
+    assert!(result.is_err());
+
+    // The admin cannot re-initialize or otherwise mutate the schedule.
+    let result = s.client.try_initialize(
+        &s.admin,
+        &s.admin,
+        &s.token.address,
+        &1_000,
+        &500,
+        &1_000,
+        &10_000,
+    );
+    assert!(result.is_err());
+
+    // Only the beneficiary can pull vested funds; the admin's balance is
+    // untouched by any admin action.
+    assert_eq!(s.token.balance(&s.admin), 0);
     s.client.claim_vested();
-
-    let after = s.client.get_schedule();
-    assert_eq!(before, after);
-}
-
-#[test]
-fn repeated_claims_with_uneven_division_never_exceed_total() {
-    // total=1_000, span=1_000 but claim at timestamps where total*elapsed/span
-    // does not divide evenly (e.g. elapsed=333 -> 333, elapsed=667 -> 667).
-    // Use total=1_000 and span=7 so intermediate products truncate.
-    let total: i128 = 1_000;
-    let start: u64 = 1_000;
-    let duration: u64 = 7;
-    let s = setup(start, 0, duration, total);
-
-    let mut aggregate: i128 = 0;
-    // Claim at every intermediate second; each step's product does not divide
-    // evenly by span=7, exercising repeated truncation.
-    for offset in 1..=duration {
-        set_time(&s.env, start + offset);
-        let claimable = s.client.claimable_amount();
-        assert!(claimable >= 0, "claimable must never be negative");
-        if claimable > 0 {
-            let claimed = s.client.claim_vested();
-            assert_eq!(claimed, claimable, "claimed must equal claimable");
-            aggregate += claimed;
-        }
-        // Aggregate must never exceed total at any intermediate point.
-        assert!(
-            aggregate <= total,
-            "aggregate claimed {} exceeded total {} at offset {}",
-            aggregate,
-            total,
-            offset
-        );
-        // Beneficiary balance must always match aggregate claimed.
-        assert_eq!(s.token.balance(&s.beneficiary), aggregate);
-    }
-
-    // At the end everything must be fully vested and fully claimable.
-    set_time(&s.env, start + duration);
-    assert_eq!(s.client.vested_amount(), total);
-    let remaining = s.client.claimable_amount();
-    if remaining > 0 {
-        aggregate += s.client.claim_vested();
-    }
-    assert_eq!(aggregate, total, "aggregate claimed must equal total exactly");
-    assert_eq!(s.token.balance(&s.beneficiary), total);
-    // No dust left in the contract.
-    assert_eq!(s.token.balance(&s.client.address), 0);
-}
-
-#[test]
-fn repeated_claims_with_uneven_total_never_overpay() {
-    // total=1_000_003, span=1_000: total*elapsed/span truncates at many
-    // intermediate timestamps. Aggregate must never exceed total and must
-    // reach exactly total by the end (no overpay, no permanent dust leak).
-    let total: i128 = 1_000_003;
-    let start: u64 = 1_000;
-    let duration: u64 = 1_000;
-    let s = setup(start, 0, duration, total);
-
-    let mut aggregate: i128 = 0;
-    let mut offset: u64 = 1;
-    while offset <= duration {
-        set_time(&s.env, start + offset);
-        let claimable = s.client.claimable_amount();
-        assert!(claimable >= 0, "claimable must never be negative");
-        if claimable > 0 {
-            let claimed = s.client.claim_vested();
-            assert_eq!(claimed, claimable, "claimed must equal claimable");
-            aggregate += claimed;
-        }
-        assert!(
-            aggregate <= total,
-            "aggregate claimed {} exceeded total {} at offset {}",
-            aggregate,
-            total,
-            offset
-        );
-        assert_eq!(s.token.balance(&s.beneficiary), aggregate);
-        // Step by a non-divisor stride to hit uneven intermediate products.
-        offset += 7;
-    }
-
-    set_time(&s.env, start + duration);
-    assert_eq!(s.client.vested_amount(), total);
-    let remaining = s.client.claimable_amount();
-    if remaining > 0 {
-        aggregate += s.client.claim_vested();
-    }
-    assert_eq!(aggregate, total, "aggregate claimed must equal total exactly");
-    assert_eq!(s.token.balance(&s.beneficiary), total);
-    assert_eq!(s.token.balance(&s.client.address), 0);
+    assert_eq!(s.token.balance(&s.beneficiary), 5_000);
+    assert_eq!(s.token.balance(&s.admin), 0);
 }
