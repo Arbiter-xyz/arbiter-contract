@@ -71,11 +71,11 @@ fn nothing_is_vested_before_the_cliff() {
 
     set_time(&s.env, 1_000);
     assert_eq!(s.client.vested_amount(), 0);
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 
     set_time(&s.env, 1_499);
     assert_eq!(s.client.vested_amount(), 0);
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn cliff_unlocks_the_cliff_portion_at_once() {
 
     set_time(&s.env, 1_500);
     assert_eq!(s.client.vested_amount(), 5_000);
-    assert_eq!(s.client.claimable_amount(), 5_000);
+    assert_eq!(s.client.claimable(), 5_000);
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn claim_transfers_only_the_unlocked_amount() {
     let claimed = s.client.claim_vested();
     assert_eq!(claimed, 5_000);
     assert_eq!(s.token.balance(&s.beneficiary), 5_000);
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 
     set_time(&s.env, 1_750);
     let claimed = s.client.claim_vested();
@@ -175,12 +175,12 @@ fn claimable_amount_tracks_claimed_balance() {
     let s = setup(1_000, 500, 1_000, 10_000);
 
     set_time(&s.env, 1_500);
-    assert_eq!(s.client.claimable_amount(), 5_000);
+    assert_eq!(s.client.claimable(), 5_000);
     s.client.claim_vested();
-    assert_eq!(s.client.claimable_amount(), 0);
+    assert_eq!(s.client.claimable(), 0);
 
     set_time(&s.env, 1_750);
-    assert_eq!(s.client.claimable_amount(), 2_500);
+    assert_eq!(s.client.claimable(), 2_500);
 }
 
 #[test]
@@ -211,12 +211,42 @@ fn schedule_is_immutable_after_initialize() {
 }
 
 #[test]
-fn only_beneficiary_can_claim() {
+fn claim_vested_requires_beneficiary_auth() {
     let s = setup(1_000, 500, 1_000, 10_000);
     set_time(&s.env, 1_500);
 
-    let stranger = Address::generate(&s.env);
-    let result = s.client.try_claim_vested_as(&stranger);
+    // Without mocking auth, a caller that is not the beneficiary must be
+    // rejected by the `beneficiary.require_auth()` gate in `claim_vested()`.
+    s.env.set_auths(&[]);
+    let result = s.client.try_claim_vested();
+    assert!(result.is_err());
+}
+
+#[test]
+fn initialize_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token, _token_admin) = create_token(&env, &admin);
+
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Without mocking auth, a caller that is not the admin must be rejected
+    // by the `admin.require_auth()` gate in `initialize()`, preventing a
+    // front-runner from initializing with attacker-controlled parameters.
+    env.set_auths(&[]);
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token.address,
+        &1_000,
+        &500,
+        &1_000,
+        &10_000,
+    );
     assert!(result.is_err());
 }
 

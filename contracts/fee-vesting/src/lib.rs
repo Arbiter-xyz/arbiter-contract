@@ -60,9 +60,14 @@ impl FeeVesting {
     ///
     /// `start` is the vesting start timestamp, `cliff` the timestamp at
     /// which the first tokens unlock, and `end` the timestamp at which
-    /// the entire `total` is unlocked. Requires `start <= cliff <= end`
-    /// and a strictly positive `total` (a zero-total schedule would make
-    /// `claim_vested()` permanently unclaimable, so it is rejected).
+    /// the entire `total` is unlocked. Requires `start <= cliff <= end`.
+    ///
+    /// # Authorization
+    ///
+    /// Requires the auth of `admin` (and `beneficiary`). This prevents a
+    /// front-runner from initializing a freshly deployed instance with
+    /// attacker-controlled parameters before the real deployer's call lands
+    /// (same class of bug as arbiter-contract#23/#188).
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -82,6 +87,9 @@ impl FeeVesting {
         if total <= 0 {
             panic!("invalid total");
         }
+
+        admin.require_auth();
+        beneficiary.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Beneficiary, &beneficiary);
@@ -150,8 +158,16 @@ impl FeeVesting {
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
     ///
-    /// Emits a `vested` event with topics `(vested, beneficiary)` and the
-    /// claimed `amount` as data, so indexers can track vesting claims.
+    /// # Authorization
+    ///
+    /// This entry point is intentionally permissionless: it does not call
+    /// `require_auth()` on any address. The payout destination is always the
+    /// fixed `Beneficiary` stored at `initialize()` time, never the caller, so
+    /// an arbitrary third party can only trigger a transfer that the
+    /// beneficiary is entitled to receive anyway. There is no fund-safety
+    /// issue — the worst a caller can do is accelerate a payout to the correct
+    /// address. Callers that want to prove beneficiary identity should use
+    /// `claim_vested_as`, which requires the beneficiary's auth.
     pub fn claim_vested(env: Env) -> i128 {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
