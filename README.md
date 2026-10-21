@@ -475,5 +475,8 @@ number; a PR that reg
 <!-- handsoff-issue-209 -->
 - #209: Dead-code: compute_median() underflows/panics on an empty answers vector
 
-<!-- handsoff-issue-215 -->
-- #215: 16 of ~46 test files are never compiled or run — no mod declaration in lib.rs
+<!-- handsoff-issue-234 -->
+- #234: Shared src/test.rs harness fails to compile with 55 errors
+
+<!-- handsoff-issue-235 -->
+- #235: test.rs's own resolve() helpers use the stale 3-arg signature
