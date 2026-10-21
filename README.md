@@ -239,8 +239,5 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-256 -->
-- #256: Review: track_participant() has zero test coverage
-
-<!-- handsoff-issue-260 -->
-- #260: Review: the 32-asset allowlist cap has no boundary test
+<!-- handsoff-issue-240 -->
+- #240: Review: test_question_templates.rs (#88) calls missing functions
