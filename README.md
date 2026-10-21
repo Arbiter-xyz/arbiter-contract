@@ -18,6 +18,251 @@ anything, then deploys in one call:
 ./scripts/deploy-init-wizard.sh
 ```
 
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+
 Instances deployed from an earlier WASM that were never initialized are still
 open to the old front-running path. Do not call `initialize()` on them; redeploy
 with the constructor instead.
@@ -192,6 +437,18 @@ lowers the storage rent every deployment (and re-deployment) pays, so the
 size is treated as a budget to defend rather than a one-off observation.
 
 Measure it with the same command CI uses:
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
 
 ```sh
 stellar contract build
@@ -209,5 +466,14 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-223 -->
-- #223: Suspected: escalate_resolve()'s overturned check is order-sensitive, not set-sensitive
+<!-- handsoff-issue-207 -->
+- #207: Suspected: KYC attestor signature has no domain separation
+
+<!-- handsoff-issue-208 -->
+- #208: do_withdraw_for_token()'s OwedLock check blocks withdrawal of unrelated assets entirely — no longer dead code, lock_owed() is now real
+
+<!-- handsoff-issue-209 -->
+- #209: Dead-code: compute_median() underflows/panics on an empty answers vector
+
+<!-- handsoff-issue-215 -->
+- #215: 16 of ~46 test files are never compiled or run — no mod declaration in lib.rs
