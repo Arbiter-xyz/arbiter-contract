@@ -239,11 +239,5 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-184 -->
-- #184: dispute_resolve() permanently freezes a question's escrow and challenger bond — no recovery path exists
-
-<!-- handsoff-issue-185 -->
-- #185: open_question()/submit*()/charge*() never check for a pending upgrade — the upgrade mechanism's core fund-safety guarantee is unenforced
-
-<!-- handsoff-issue-206 -->
-- #206: Suspected: CEI ordering — platform token transfer executes before question status flips in settle_resolution()
+<!-- handsoff-issue-269 -->
+- #269: Review: index_remove() could panic on inconsistent index state
