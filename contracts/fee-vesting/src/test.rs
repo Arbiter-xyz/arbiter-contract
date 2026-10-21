@@ -4,8 +4,8 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
-    token, Address, Env,
+    testutils::{Address as _, Events, Ledger, LedgerInfo},
+    token, Address, Env, IntoVal, Symbol,
 };
 
 fn create_token<'a>(env: &Env, admin: &Address) -> (token::Client<'a>, token::StellarAssetClient<'a>) {
@@ -128,6 +128,27 @@ fn claim_transfers_only_the_unlocked_amount() {
     let claimed = s.client.claim_vested();
     assert_eq!(claimed, 2_500);
     assert_eq!(s.token.balance(&s.beneficiary), 10_000);
+}
+
+#[test]
+fn claim_vested_emits_an_event() {
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    set_time(&s.env, 1_500);
+    s.client.claim_vested();
+
+    let events = s.env.events().all();
+    let expected_topics = (Symbol::new(&s.env, "vesting"), Symbol::new(&s.env, "claimed")).into_val(&s.env);
+    let expected_data = (s.beneficiary.clone(), 5_000i128).into_val(&s.env);
+
+    let mut found = false;
+    for event in events.iter() {
+        if event.1 == expected_topics && event.2 == expected_data {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "claim_vested did not emit the expected claimed event");
 }
 
 #[test]

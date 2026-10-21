@@ -2,7 +2,8 @@
 
 use crate::test::{client, setup, AMOUNT, TIMEOUT_LEDGERS};
 use crate::{ContractError, Status};
-use soroban_sdk::testutils::Ledger;
+use soroban_sdk::testutils::{Address as _, Ledger};
+use soroban_sdk::BytesN;
 
 #[test]
 fn reopened_question_starts_a_fresh_timeout_window() {

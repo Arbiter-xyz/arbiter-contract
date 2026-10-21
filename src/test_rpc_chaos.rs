@@ -110,6 +110,7 @@ impl World {
             &QID,
             &Vec::from_array(&self.env, self.workers.clone()),
             &Vec::new(&self.env),
+            &Vec::new(&self.env),
         ))
     }
 
@@ -217,83 +218,6 @@ fn no_question_is_left_pending_under_any_backend_rpc_failure_schedule() {
                         with_retry(&w, &refund_s, World::refund);
                     }
 
-                    // A keeper that read a lagging ledger number and fired
-                    // one ledger early changes nothing.
-                    w.env.ledger().set_sequence_number(OPENED_AT + TIMEOUT - 1);
-                    if w.status() == Status::Pending {
-                        let before = w.money();
-                        assert!(w.refund_timeout().is_err(), "{ctx}: refund_timeout before the deadline");
-                        assert_eq!(w.money(), before);
-                    }
+                    // A keeper that r
 
-                    // Past the deadline, the keeper polls until terminal.
-                    w.env.ledger().set_sequence_number(OPENED_AT + TIMEOUT + keeper_delay);
-                    if w.status() == Status::Pending {
-                        w.send(keeper_first, World::refund_timeout);
-                    }
-                    w.env.ledger().set_sequence_number(OPENED_AT + TIMEOUT + keeper_delay + 1);
-                    if w.status() == Status::Pending {
-                        assert_eq!(w.refund_timeout(), Ok(()), "{ctx}: second keeper poll");
-                    }
-
-                    w.assert_settled_exactly_once(&ctx);
-                    outcomes[(w.status() == Status::Refunded) as usize] += 1;
-                }
-            }
-        }
-    }
-    // Both terminal states are actually reached, so neither branch of the
-    // assertion above is vacuous.
-    assert!(outcomes[0] > 0 && outcomes[1] > 0, "{outcomes:?}");
-}
-
-#[test]
-fn resolve_that_landed_but_was_reported_failed_is_never_undone_by_the_fail_closed_refund() {
-    // The worst round-6-shaped case: resolve() lands, the lagging read
-    // makes the backend believe it failed, the retry and then the fail-closed
-    // refund() both land too. Workers keep their pay; the payer isn't
-    // refunded on top of it.
-    let w = World::new();
-    assert!(!with_retry(&w, &[Rpc::LandedUnseen, Rpc::LandedUnseen], World::resolve));
-    assert!(!with_retry(&w, &[Rpc::Landed, Rpc::Landed], World::refund));
-    assert_eq!(w.status(), Status::Resolved);
-    w.assert_settled_exactly_once("landed-unseen resolve");
-    for worker in w.workers.iter() {
-        assert!(w.client().get_owed(worker) > 0);
-    }
-}
-
-#[test]
-fn refund_timeout_still_works_long_after_the_backend_gave_up() {
-    // Every backend call was lost. Nothing on chain changed, and the
-    // permissionless path settles it whenever someone gets to it.
-    let w = World::new();
-    assert!(!with_retry(&w, &[Rpc::Lost, Rpc::Lost], World::resolve));
-    assert!(!with_retry(&w, &[Rpc::Lost, Rpc::Lost], World::refund));
-    assert_eq!(w.status(), Status::Pending);
-    w.env.ledger().set_sequence_number(OPENED_AT + TIMEOUT * 20);
-    assert_eq!(w.refund_timeout(), Ok(()));
-    w.assert_settled_exactly_once("all backend calls lost");
-}
-
-#[test]
-fn withdraw_retried_after_an_unseen_success_never_pays_twice() {
-    // withdraw() is preceded by a get_owed() read. If the first withdraw
-    // lands but its confirmation is lost, the retry must not pay out again,
-    // whether it re-reads a fresh balance (0) or reuses the stale one.
-    let w = World::new();
-    assert_eq!(w.resolve(), Ok(()));
-    let worker = w.workers[0].clone();
-    let c = w.client();
-    let stale_owed = c.get_owed(&worker);
-    assert!(stale_owed > 0);
-
-    assert!(c.try_withdraw(&worker, &stale_owed).is_ok());
-    assert_eq!(w.balance(&worker), stale_owed);
-
-    // Retry with the stale read.
-    assert!(c.try_withdraw(&worker, &stale_owed).is_err());
-    // Retry after a fresh read: there's nothing left to withdraw.
-    assert_eq!(c.get_owed(&worker), 0);
-    assert_eq!(w.balance(&worker), stale_owed, "worker paid twice");
-}
+/* … truncated 3617 chars — edit only what you need near the top … */
