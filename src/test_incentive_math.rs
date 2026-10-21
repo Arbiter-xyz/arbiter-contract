@@ -26,6 +26,7 @@ fn constants_match_lib_rs() {
     assert_eq!(sim_math::PLATFORM_FEE_BPS, PLATFORM_FEE_BPS);
     assert_eq!(sim_math::SLASH_BPS, SLASH_BPS);
     assert_eq!(sim_math::SLASH_CAP_BPS_OF_AMOUNT, SLASH_CAP_BPS_OF_AMOUNT);
+    assert_eq!(sim_math::SLASH_REDISTRIBUTE_BPS, SLASH_REDISTRIBUTE_BPS);
     assert_eq!(sim_math::BPS_DENOM, BPS_DENOM);
     assert_eq!(Params::CONTRACT.fee_bps, PLATFORM_FEE_BPS);
     assert_eq!(Params::CONTRACT.slash_bps, SLASH_BPS);
@@ -156,7 +157,11 @@ fn check_resolve(amount: i128, winners: u32, losers: &[LoserSpec]) {
     let s = sim_math::resolve(amount, winners, &mut sim_losers, Params::CONTRACT);
 
     for a in &winner_addrs {
-        assert_eq!(c.get_owed(a), s.share, "share, amount={amount} n={winners}");
+        assert_eq!(
+            c.get_owed(a),
+            s.share + s.redistribution_share,
+            "share + redistribution, amount={amount} n={winners}"
+        );
     }
     assert_eq!(
         tok.balance(&m.platform) - platform_before,
