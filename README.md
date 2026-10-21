@@ -301,5 +301,11 @@ check.
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-340 -->
-- #340: escalate() has the MAX_QUORUM_SIZE guard but not the paired check_quorum_bounds() call
+<!-- handsoff-issue-333 -->
+- #333: Duplicate load_question() definition — second compile error hiding behind #332
+
+<!-- handsoff-issue-334 -->
+- #334: BasketLegSettled event is used but never defined — third compile error behind #332
+
+<!-- handsoff-issue-335 -->
+- #335: ContractError needs 6 new variants but is already at 49/50 — the XDR cap problem is back
