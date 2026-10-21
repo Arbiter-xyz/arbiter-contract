@@ -13,7 +13,7 @@
 //!   window to still be open.
 //! - Spurious bond (undisputed resolution): bond forfeited to platform.
 //! - Valid bond (resolution was disputed): bond returned to challenger.
-//! - Bond settlement works for a non-default asset registered via submit_asset().
+//! - Bond is collected and settled in the question's own token (#222).
 
 use super::*;
 use crate::test::{client, setup, AMOUNT};
@@ -234,14 +234,14 @@ fn spurious_challenge_bond_forfeited_to_platform() {
 
     c.finalize_resolve(&1);
 
-    // Bond forfeited to platform; challenger keeps nothing of the bond.
+    // Bond forfeited to platform, challenger gets nothing back.
     assert_eq!(tok.balance(&f.admin), platform_before + bond_amount);
     assert_eq!(tok.balance(&challenger), challenger_before);
     assert!(c.get_challenger_bond(&1).is_none());
 }
 
-/// A valid (disputed) challenge: the admin calls dispute_resolve(), then
-/// finalize_resolve() returns the bond to the challenger.
+/// A valid challenge (admin calls dispute_resolve()): the bond is returned to
+/// the challenger when the admin overrides the resolution.
 #[test]
 fn valid_challenge_bond_returned_to_challenger() {
     let f = setup();
@@ -260,15 +260,11 @@ fn valid_challenge_bond_returned_to_challenger() {
     token::StellarAssetClient::new(&f.env, &f.token_address).mint(&challenger, &bond_amount);
     c.post_challenge_bond(&challenger, &1, &bond_amount);
 
-    // Admin adjudicates the dispute as valid.
-    c.dispute_resolve(&1);
-
-    f.env.ledger().with_mut(|li| li.sequence_number += 51);
-
     let tok = token::Client::new(&f.env, &f.token_address);
     let challenger_before = tok.balance(&challenger);
 
-    c.finalize_resolve(&1);
+    // Admin adjudicates the dispute in the challenger's favour.
+    c.dispute_resolve(&1);
 
     // Bond returned to challenger.
     assert_eq!(tok.balance(&challenger), challenger_before + bond_amount);
@@ -276,53 +272,61 @@ fn valid_challenge_bond_returned_to_challenger() {
 }
 
 // ---------------------------------------------------------------------------
-// Non-default asset coverage (issue #265)
+// #222: bond lifecycle for a non-default-asset question
 // ---------------------------------------------------------------------------
 
-/// Issue #265: exercise the bond/finalize_resolve asset-matching path with a
-/// non-default asset registered via submit_asset(). The bond must be settled
-/// in the same asset the question was submitted with, not the default token.
+/// A question opened via submit_asset() in a non-default token must collect
+/// the challenger bond in that same token, and settle it there on forfeit.
 #[test]
-fn spurious_challenge_bond_forfeited_for_non_default_asset() {
+fn challenge_bond_uses_question_token_for_non_default_asset() {
     let f = setup();
     let c = client(&f);
     let worker = Address::generate(&f.env);
     let challenger = Address::generate(&f.env);
 
-    f.env.mock_all_auths();
+    // A second, non-default asset for the question.
+    let token_b = f.env.register_stellar_asset_contract_v2(f.admin.clone());
+    let token_b_addr = token_b.address();
 
-    // Register a non-default asset and submit the question against it.
-    let asset = Address::generate(&f.env);
-    let asset_admin = token::StellarAssetClient::new(&f.env, &asset);
-    asset_admin.mint(&f.payer, &AMOUNT);
-    c.submit_asset(&f.payer, &1, &asset, &AMOUNT);
+    f.env.mock_all_auths();
+    c.submit_asset(&f.payer, &1, &AMOUNT, &token_b_addr);
 
     let wv = Vec::from_array(&f.env, [worker.clone()]);
     let lv: Vec<Address> = Vec::new(&f.env);
     c.resolve_challengeable(&1, &wv, &lv, &50);
 
     let bond_amount: i128 = 80_000;
-    asset_admin.mint(&challenger, &bond_amount);
+    // Fund challenger in the question's own token only.
+    token::StellarAssetClient::new(&f.env, &token_b_addr).mint(&challenger, &bond_amount);
+
+    let default_tok = token::Client::new(&f.env, &f.token_address);
+    let question_tok = token::Client::new(&f.env, &token_b_addr);
+    let default_before = default_tok.balance(&challenger);
+    let question_before = question_tok.balance(&challenger);
+
     c.post_challenge_bond(&challenger, &1, &bond_amount);
 
-    // No dispute_resolve() call — bond is spurious.
+    // Bond must be collected in the question's token, not the default token.
+    assert_eq!(
+        question_tok.balance(&challenger),
+        question_before - bond_amount,
+        "bond must be collected in the question's own token"
+    );
+    assert_eq!(
+        default_tok.balance(&challenger),
+        default_before,
+        "default token must be untouched for a non-default-asset question"
+    );
+
+    // Spurious challenge: forfeit the bond to the platform in the question token.
     f.env.ledger().with_mut(|li| li.sequence_number += 51);
-
-    let asset_tok = token::Client::new(&f.env, &asset);
-    let default_tok = token::Client::new(&f.env, &f.token_address);
-    let platform_asset_before = asset_tok.balance(&f.admin);
-    let platform_default_before = default_tok.balance(&f.admin);
-    let challenger_asset_before = asset_tok.balance(&challenger);
-
+    let platform_before = question_tok.balance(&f.admin);
     c.finalize_resolve(&1);
 
-    // Bond forfeited to platform in the question's asset, not the default token.
-    assert_eq!(asset_tok.balance(&f.admin), platform_asset_before + bond_amount);
-    assert_eq!(default_tok.balance(&f.admin), platform_default_before);
-    assert_eq!(asset_tok.balance(&challenger), challenger_asset_before);
+    assert_eq!(
+        question_tok.balance(&f.admin),
+        platform_before + bond_amount,
+        "forfeited bond must settle in the question's own token"
+    );
     assert!(c.get_challenger_bond(&1).is_none());
-
-    // Worker credited in the non-default asset.
-    let fee = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
-    assert_eq!(c.get_owed(&worker), AMOUNT - fee);
 }

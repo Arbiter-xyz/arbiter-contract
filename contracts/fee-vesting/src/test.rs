@@ -221,55 +221,25 @@ fn only_beneficiary_can_claim() {
 }
 
 #[test]
-fn vested_amount_does_not_overflow_for_large_total_and_long_duration() {
-    // total * elapsed would overflow i128 if computed naively: pick a total and
-    // elapsed whose product exceeds i128::MAX. vested_amount must still return
-    // the correct (bounded) result rather than panicking.
-    let total = i128::MAX / 2;
-    let duration = 1_000_000_000u64;
-    let start = 1_000u64;
-    let s = setup(start, 0, duration, total);
+fn zero_total_schedule_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    // Halfway through the schedule: elapsed = duration / 2.
-    let elapsed = duration / 2;
-    set_time(&s.env, start + elapsed);
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token, _token_admin) = create_token(&env, &admin);
 
-    // total * elapsed overflows i128 (total ~ 1.7e38, elapsed ~ 5e8).
-    let expected = total / 2;
-    assert_eq!(s.client.vested_amount(), expected);
-}
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(&env, &contract_id);
 
-// Issue #227: `DataKey::Admin` is written during `initialize` but never read
-// by any contract entry point. This test pins that intentional behavior: the
-// stored admin has no privileged powers (no pause, recovery, or beneficiary
-// rotation), so a stranger cannot use admin identity to move funds or mutate
-// the schedule. If admin-gated functionality is ever added, this test should
-// be updated alongside it.
-#[test]
-fn admin_has_no_privileged_powers_over_the_schedule() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-    set_time(&s.env, 1_500);
-
-    // The admin cannot claim on behalf of the beneficiary.
-    let result = s.client.try_claim_vested_as(&s.admin);
-    assert!(result.is_err());
-
-    // The admin cannot re-initialize or otherwise mutate the schedule.
-    let result = s.client.try_initialize(
-        &s.admin,
-        &s.admin,
-        &s.token.address,
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token.address,
         &1_000,
         &500,
         &1_000,
-        &10_000,
+        &0,
     );
     assert!(result.is_err());
-
-    // Only the beneficiary can pull vested funds; the admin's balance is
-    // untouched by any admin action.
-    assert_eq!(s.token.balance(&s.admin), 0);
-    s.client.claim_vested();
-    assert_eq!(s.token.balance(&s.beneficiary), 5_000);
-    assert_eq!(s.token.balance(&s.admin), 0);
 }

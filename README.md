@@ -209,5 +209,5 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-225 -->
-- #225: Suspected: KYC attestor rotation doesn't revoke already-recorded attestations
+<!-- handsoff-issue-223 -->
+- #223: Suspected: escalate_resolve()'s overturned check is order-sensitive, not set-sensitive

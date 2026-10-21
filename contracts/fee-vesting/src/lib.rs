@@ -60,7 +60,9 @@ impl FeeVesting {
     ///
     /// `start` is the vesting start timestamp, `cliff` the timestamp at
     /// which the first tokens unlock, and `end` the timestamp at which
-    /// the entire `total` is unlocked. Requires `start <= cliff <= end`.
+    /// the entire `total` is unlocked. Requires `start <= cliff <= end`
+    /// and a strictly positive `total` (a zero-total schedule would make
+    /// `claim_vested()` permanently unclaimable, so it is rejected).
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -77,7 +79,7 @@ impl FeeVesting {
         if start > cliff || cliff > end {
             panic!("invalid schedule");
         }
-        if total < 0 {
+        if total <= 0 {
             panic!("invalid total");
         }
 
