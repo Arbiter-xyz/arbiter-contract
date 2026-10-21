@@ -160,12 +160,6 @@ prediction.
 ## Filing a bottleneck
 
 The issue scopes fixes out. If a run finds a **contract-side** bottleneck,
-don't fix it in the load-testing PR. File it as a separate issue with:
+don't fix it in the load-testing 
 
-- the `bench_load_*` output table (first / mid / last instructions, growth)
-- the entry point and the storage key or loop responsible
-- the per-ledger ceiling before and after, from the "per ledger" column
-- a link back to #119
-
-Backend-side and infrastructure-side findings (such as hypothesis 2) go
-to arbiter-backend's tracker with the `load.mjs` JSON output attached.
+/* … truncated 411 chars — edit only what you need near the top … */

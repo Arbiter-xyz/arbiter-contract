@@ -341,7 +341,7 @@ pub fn run(cfg: &Config) -> Outcome {
                 let mut taken = 0;
                 if !refund {
                     if votes[s] == winners_correct {
-                        earned = settlement.share;
+                        earned = settlement.share + settlement.redistribution_share;
                     } else {
                         taken = w.stake.slashable() - loser_stakes[li].slashable();
                         w.stake = loser_stakes[li];

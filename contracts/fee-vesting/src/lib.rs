@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 /// Storage keys for the fee-vesting treasury contract.
 ///
@@ -28,6 +28,30 @@ pub enum DataKey {
     Total,
     /// Amount already claimed by the beneficiary.
     Claimed,
+}
+
+/// Full vesting schedule, returned by `get_schedule()`.
+///
+/// Mirrors the aggregate views on the main contract (e.g. `get_health()`):
+/// a single call exposes every field a caller needs to reason about the
+/// schedule without inferring it from `claimable_amount()`/`vested_amount()`.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingSchedule {
+    /// Address that receives unlocked fee revenue.
+    pub beneficiary: Address,
+    /// Token contract used to pay out vested revenue.
+    pub token: Address,
+    /// Ledger timestamp at which vesting begins.
+    pub start: u64,
+    /// Ledger timestamp before which nothing is claimable (cliff).
+    pub cliff: u64,
+    /// Ledger timestamp at which the full amount is unlocked.
+    pub end: u64,
+    /// Total amount of fee revenue subject to the schedule.
+    pub total: i128,
+    /// Amount already claimed by the beneficiary.
+    pub claimed: i128,
 }
 
 #[contract]
@@ -130,6 +154,9 @@ impl FeeVesting {
 
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
+    ///
+    /// Emits a `vested` event with topics `(vested, beneficiary)` and the
+    /// claimed `amount` as data, so indexers can track vesting claims.
     pub fn claim_vested(env: Env) -> i128 {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
@@ -157,6 +184,9 @@ impl FeeVesting {
             &beneficiary,
             &amount,
         );
+
+        env.events()
+            .publish((symbol_short!("vested"), beneficiary), amount);
 
         amount
     }
