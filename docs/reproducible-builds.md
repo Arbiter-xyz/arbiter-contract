@@ -76,11 +76,25 @@ for that commit.
 
 | Commit | Runner hash | Docker hash | Match |
 |---|---|---|---|
-| _pending first CI run on this branch_ | | | |
+| _none recorded yet_ | | | |
 
-Fill this table in from the `compare hashes` job summary once the workflow
-has run. These hashes were **not** produced locally: this change was written
-without running a build.
+This table is intentionally empty: no matching runner/Docker hash pair has
+been captured and verified yet. Do **not** fill it in from memory or from a
+single local build — the point of the table is to record a pair that the
+`compare hashes` job actually produced.
+
+To record the first entry:
+
+1. Open the `reproducible-build` workflow run for the commit you want to
+   record (any green run on `main`, or a PR run that touches the contract).
+2. Copy the runner hash and the Docker hash from the `compare hashes` job
+   summary.
+3. Confirm they are identical, then add a row with the commit SHA, both
+   hashes, and `yes` in the Match column.
+
+Until a row exists here, treat reproducibility as **unverified** for this
+repository: the workflow is wired up, but no run has been confirmed to
+produce a matching pair.
 
 ## Bumping a pinned version
 

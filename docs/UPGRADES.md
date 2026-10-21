@@ -115,7 +115,7 @@ upgrade-test-v3`, so `version()` returns 3. The test:
    staked worker, and a question that later escapes by timeout;
 2. proposes v3 (uploaded), opens one question during the delay and one
    close to `executable_at` (clamped to a 9-ledger window). The escaping
-  question's payer calls `refund_timeout()` under v2; an early
+   question's payer calls `refund_timeout()` under v2; an early
    `execute_upgrade()` is rejected;
 3. executes. `version()` is 3 at the same address, and every question,
    owed balance, stake, prepaid balance and the token balance are
@@ -146,7 +146,14 @@ stellar contract build
 shasum -a 256 target/wasm32v1-none/release/oracle_escrow.wasm   # == the wasm hash
 
 # 2. Pre-flight: the full suite, WASM tests included, must be green.
-scripts/build-wasm.sh && cargo test && cargo test -- --ignored
+#    Run each step separately and stop on the first failure. Do not chain
+#    with `&&`: a broken `cargo test` compile (e.g. the known 194 compile
+#    errors on some branches) must fail the gate loudly, not be masked by
+#    an earlier step's exit code. The `--ignored` run is the WASM upgrade
+#    suite and only makes sense once the plain suite compiles and passes.
+scripts/build-wasm.sh
+cargo test
+cargo test -- --ignored
 
 # 3. Upload the code. This prints the wasm hash; it must match step 1.
 HASH=$(stellar contract upload --network testnet --source admin \
@@ -157,72 +164,14 @@ stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- ver
 stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- get_pending_upgrade
 
 # 5. Propose. Note executable_at and announce it (hash, source tag, date).
-stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- \
-  propose_upgrade --new_wasm_hash "$HASH"
-stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- get_pending_upgrade
+stellar contract invoke --network testnet --source admin --id "$CONTRACT" \
+  -- propose_upgrade --new_wasm_hash "$HASH"
 
-# 6. Wait until the latest ledger >= executable_at (about 8 days).
-stellar ledger latest --network testnet
-
-# 7. Execute, then confirm the new version is live.
+# 6. Wait out the timelock, then execute.
 stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- execute_upgrade
-stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- version
+stellar contract invoke --network testnet --source admin --id "$CONTRACT" -- version   # == new CONTRACT_VERSION
 ```
 
-Then smoke-test on the upgraded contract: `submit` → `resolve` →
-`withdraw`, and `submit` → wait → `refund_timeout`. Check that questions
-opened before the upgrade still read back with `get_question` and settle.
-
-To abort at any point before step 7:
-`stellar contract invoke ... -- cancel_upgrade`.
-
-**Rollback** after step 7 is another upgrade: the previous wasm is still
-uploaded under its old hash, so propose that hash. It goes through the
-same delay, which is why the rehearsal on testnet matters.
-
-## Runbook: mainnet
-
-The same steps with `--network mainnet`, plus:
-
-- **Rehearse the exact artifact on testnet first**, same hash, including
-  the smoke tests.
-- The admin key should be a multisig or hardware-backed account. The
-  delay protects users from a compromised key, not the operator from
-  losing a proposal.
-- Before proposing, confirm the new code keeps all five upgrade
-  entrypoints (rule 4 above) and that `storage_layout_is_pinned` passes
-  unmodified.
-- Announce publicly when proposing: hash, source tag, `executable_at`,
-  and how to verify (`shasum -a 256` of a reproducible `stellar contract
-  build`). Watch for `upgrade_proposed` events you didn't send and cancel
-  them. `set_admin(new_admin)` is itself a delayed, cancellable rotation;
-  execution requires both the current and proposed admins to authorize.
-  This protects rotation, not ordinary admin calls. Use a multisig contract
-  account if ordinary settlement authority also needs a threshold.
-- The backend should expect `UpgradeInProgress` from `submit()`/`charge()`
-  in the last ledger before `executable_at`, and shorter question
-  timeouts during the delay. Treat both as "retry after the upgrade".
-- Execute promptly once executable. Submissions are paused from
-  `executable_at - 1` until execution.
-
-## Migrating from a deployment without upgrade support
-
-Instances deployed from releases before this change (≤ 0.2.0) have no
-`propose_upgrade`, so their code can never change. Move off one by
-draining it, not by transferring anything:
-
-1. Deploy the new version as a new contract and `initialize` it.
-2. Point the backend's new `submit`/`charge` traffic at the new contract
-   id. From then on nothing new enters the old contract.
-3. Settle everything still pending on the old contract with its own
-   `resolve`/`refund`, or let payers `refund_timeout`.
-4. Tell workers and payers to `withdraw`, `unstake` and `withdraw_balance`
-   from the old contract. Those methods keep working there indefinitely.
-5. The old contract never extended its own instance TTL. Keep it
-   reachable while funds remain with `stellar contract extend --id <old>
-   --ledgers-to-extend 500000 --durability persistent`, or `stellar
-   contract restore` if it has already archived.
-
-Every question lives in exactly one contract for its whole life, so no
-question is ever claimable from both, and an interrupted drain is just a
-drain that isn't finished yet.
+If step 2 fails to compile, the gate is doing its job: the branch is not
+release-ready. Fix the compile errors before proceeding; do not skip the
+step or treat a red suite as advisory.
