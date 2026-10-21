@@ -115,6 +115,16 @@ flags, so if they're wrong, the check is wrong too.
 default export called as `(fn, opts)`. If `retry.js`'s signature differs,
 change `loadRetry()`: it's the only place that knows the API.
 
+Because `loadRetry()` is the single coupling point to arbiter-backend's
+`retry.js`, it fails loudly rather than silently: if the module exports
+none of the expected names, or the resolved export isn't a function, it
+throws a diagnostic naming the module path and the exports it saw. That
+way a signature change in `retry.js` surfaces as a clear error at harness
+startup instead of a chaos run that quietly exercises the wrong retry
+path. There is still no version pin or contract test against the real
+`retry.js`; the loud failure is the guard, and the fix for a real
+signature change is still to update `loadRetry()` here.
+
 **Against the real backend.** This covers the real `stellarClient.js` and
 Horizon call sites.
 
