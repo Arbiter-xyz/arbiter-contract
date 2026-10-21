@@ -57,6 +57,12 @@ export async function referenceRetry(fn, { attempts = 2, timeoutMs = 8000, baseD
 /// `(fn, opts) => Promise`. retry.js's exact export isn't pinned by this
 /// repo, so this accepts the obvious shapes. If none fits, adapt it here:
 /// this function is the only place that knows about retry.js's API.
+///
+/// Because there's no version pin or contract test against the real
+/// retry.js, a signature change there would otherwise break the harness
+/// silently. So after resolving the export we probe it once with a
+/// throwaway call and fail loudly with a clear diagnostic if it doesn't
+/// behave like `(fn, opts) => Promise`.
 export async function loadRetry(modulePath) {
   if (!modulePath) return { name: "reference", retry: referenceRetry };
   const mod = await import(pathToFileURL(resolvePath(modulePath)).href);
@@ -64,7 +70,44 @@ export async function loadRetry(modulePath) {
   if (typeof f !== "function") {
     throw new Error(`${modulePath}: no withRetry/retry/default export; adapt loadRetry() in tools/chaos/retry.mjs`);
   }
-  return { name: modulePath, retry: (fn, opts) => f(fn, opts) };
+  const retry = (fn, opts) => f(fn, opts);
+  await assertRetryContract(modulePath, retry);
+  return { name: modulePath, retry };
+}
+
+/// Probes a loaded retry implementation against the contract the chaos
+/// harness relies on: `retry(fn, opts)` returns a Promise, calls `fn` at
+/// least once, and resolves with `fn`'s value. Throws a diagnostic naming
+/// the module and the observed shape if the contract is broken, so a
+/// retry.js signature change fails loudly instead of silently.
+async function assertRetryContract(modulePath, retry) {
+  let calls = 0;
+  const sentinel = Symbol("retry-contract-probe");
+  let result;
+  try {
+    result = await retry(() => {
+      calls++;
+      return sentinel;
+    }, { attempts: 1, timeoutMs: 1000, baseDelayMs: 0 });
+  } catch (e) {
+    throw new Error(
+      `${modulePath}: retry export does not satisfy the (fn, opts) => Promise contract ` +
+        `(probe threw: ${e?.message ?? e}); adapt loadRetry() in tools/chaos/retry.mjs`,
+    );
+  }
+  if (calls < 1) {
+    throw new Error(
+      `${modulePath}: retry export never invoked the wrapped fn; ` +
+        `expected (fn, opts) => Promise. Adapt loadRetry() in tools/chaos/retry.mjs`,
+    );
+  }
+  if (result !== sentinel) {
+    throw new Error(
+      `${modulePath}: retry export did not resolve with fn's return value ` +
+        `(got ${typeof result}); expected (fn, opts) => Promise. ` +
+        `Adapt loadRetry() in tools/chaos/retry.mjs`,
+    );
+  }
 }
 
 /// Wraps `fn` so every attempt is logged into `log` as
