@@ -23,6 +23,32 @@ build paths embedded in panic messages and parallel codegen. These are
 handled by path remapping and `codegen-units = 1`. Debug info is disabled
 and symbols are stripped, so neither can carry paths or timestamps.
 
+## Base image pinning
+
+The Dockerfile `FROM` line pins the base image by **tag only**
+(`rust:1.89.0-slim-bookworm`), not by digest. A tag is a mutable pointer: a
+Debian security rebuild of `slim-bookworm` republishes the same tag with
+different underlying layers, so two builds of the same commit at different
+times can pull different base images. That does not change the rustc version
+(the tag pins 1.89.0), but it can change the OS packages and toolchain
+packaging baked into the image, which is enough to shift the WASM hash.
+
+This is a known limitation, not a bug in the current setup: the
+reproducibility guarantee holds for a given base image, and the CI job
+compares the runner build against the Docker build from the same pull. To
+make the Docker build byte-for-byte reproducible across time as well, pin
+the base image by digest:
+
+```dockerfile
+# rust:1.89.0-slim-bookworm
+FROM rust:1.89.0-slim-bookworm@sha256:<digest>
+```
+
+Resolve the digest with `docker buildx imagetools inspect
+rust:1.89.0-slim-bookworm` and update it together with the tag when bumping
+rustc. Until then, treat the Docker hash as reproducible only for the base
+image that was current when it was recorded.
+
 ## Reproduce a build
 
 ```sh
@@ -72,6 +98,6 @@ produce a matching pair.
 
 ## Bumping a pinned version
 
-Change `rust-toolchain.toml`, the Dockerfile `FROM` tag and
-`EXPECTED_STELLAR_CLI` together. Expect the WASM hash to change, and record
-the new one here in the same PR.
+Change `rust-toolchain.toml`, the Dockerfile `FROM` tag (and its digest, if
+pinned) and `EXPECTED_STELLAR_CLI` together. Expect the WASM hash to change,
+and record the new one here in the same PR.

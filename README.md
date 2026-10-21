@@ -203,5 +203,41 @@ number; a PR that reg
 
 ## Handsoff notes
 
-<!-- handsoff-issue-255 -->
-- #255: Review: check_quorum_bounds() has zero direct test coverage
+<!-- handsoff-issue-28 -->
+- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
+
+<!-- handsoff-issue-76 -->
+- #76: Compliance blocklist registry
+
+<!-- handsoff-issue-77 -->
+- #77: Travel-rule metadata field
+
+<!-- handsoff-issue-78 -->
+- #78: Multi-treasury fee routing
+
+<!-- handsoff-issue-79 -->
+- #79: On-chain aggregate stats view
+
+<!-- handsoff-issue-21 -->
+- #21: touch() rewrites u
+
+<!-- handsoff-issue-44 -->
+- #44: Multisig/timelock admin
+
+<!-- handsoff-issue-45 -->
+- #45: DAO-controlled parameters
+
+<!-- handsoff-issue-53 -->
+- #53: On-chain worker category tags
+
+<!-- handsoff-issue-54 -->
+- #54: Category-specific stake minimums
+
+<!-- handsoff-issue-41 -->
+- #41: Stake-weighted voting in resolve()
+
+<!-- handsoff-issue-43 -->
+- #43: Slashing insurance for workers
+
+<!-- handsoff-issue-266 -->
+- #266: Review: confirm _asset entrypoints can't double as the default asset
