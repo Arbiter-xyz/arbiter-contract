@@ -40,11 +40,15 @@ will be pointing at different contracts.
 ## Architecture
 
 Every current integration with the contract goes through the JavaScript
-`@stellar/stellar-sdk`:
+`@stellar/stellar-sdk`. Those clients live in the separate `arbiter-backend`
+and `arbiter-app` repos, not in this one:
 
-- `backend/src/stellarClient.js` — backend service calls
-- `app/src/contractCalls.js` — frontend calls
+- `arbiter-backend` — backend service calls
+- `arbiter-app` — frontend calls
 - demo-agent's scripts — scripted demo flows
+
+This repo contains only the contract itself (`src/lib.rs`), its tests, and the
+supporting tooling (`contracts/`, `sim/`, `fuzz/`, `scripts/`, `docs/`).
 
 There is no equivalent for a Rust caller today. `soroban-sdk`'s
 `#[contractimpl]` macro already generates an `OracleEscrowClient` (the same
@@ -54,22 +58,22 @@ standalone crate would need to publish.
 ## Client bindings
 
 Integrators can talk to the contract from more than one language. The
-JavaScript reference (`backend/src/stellarClient.js`, `app/src/contractCalls.js`)
-remains the canonical example; a Python binding is also shipped under
-`bindings/python/`.
+JavaScript clients in `arbiter-backend` and `arbiter-app` remain the canonical
+example. There is no Python binding shipped in this repo today; the section
+below describes the intended shape of one, not a directory that exists here.
 
-### Python binding (`bindings/python/`)
+### Python binding (planned)
 
-A thin, dependency-light wrapper over the contract's XDR spec. It covers all
-of the contract's entry points:
+A thin, dependency-light wrapper over the contract's XDR spec. It would cover
+all of the contract's entry points:
 
 - writes: `initialize`, `submit`, `deposit`, `withdraw_balance`, `charge`,
   `resolve`, `stake`, `unstake`, `withdraw`, `withdraw_to`, `touch`,
   `refund`, `refund_timeout`, `set_admin`, `set_timeout_ledgers`
 - reads: `get_question`, `get_balance`, `get_admin`, `get_timeout_ledgers`
 
-The contract's `Question`, `Status`, and `ContractError` types are mapped to
-native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
+The contract's `Question`, `Status`, and `ContractError` types would be mapped
+to native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
 so callers never touch raw XDR.
 
 ```python
@@ -84,24 +88,20 @@ assert client.get_question(question_id).status == Status.RESOLVED
 
 ### Regenerating bindings
 
-The bindings are generated from the contract's embedded XDR spec, the same
-source `stellar contract bindings` reads. Whenever `src/lib.rs`'s public
-interface changes (a new entry point, a new `ContractError` variant, a changed
-`Question` field), regenerate them with:
+Bindings are generated from the contract's embedded XDR spec, the same source
+`stellar contract bindings` reads. Whenever `src/lib.rs`'s public interface
+changes (a new entry point, a new `ContractError` variant, a changed `Question`
+field), regenerate them with:
 
 ```sh
 stellar contract build
 stellar contract bindings typescript \
   --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --output-dir bindings/typescript
-python bindings/python/generate.py \
-  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --output bindings/python/oracle_escrow/_spec.py
+  --output-dir <output-dir>
 ```
 
-The Python generator reads the same spec entries the CLI emits, so the two
-stay in lockstep. Run it as part of the release checklist whenever the public
-interface changes.
+Run this as part of the release checklist whenever the public interface
+changes.
 
 ## Standalone Rust client crate
 
@@ -199,113 +199,9 @@ ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
 ```
 
 **Baseline: 15.5KB** (optimized). The build must stay at or below this
-number; a PR that regresses it should be visible in CI output. Note the
-tradeoff: aggressive optimization can make a failed transaction's trap
-less readable, so debugging a revert may require a separate unoptimized
-build.
-
-## Reproducible build
-
-Use the pinned build instead of a bare `stellar contract build` whenever
-the resulting hash matters (release, deployment, or verifying a deployed
-contract):
-
-```sh
-docker build -t arbiter-contract-build .
-docker run --rm -v "$PWD:/src" arbiter-contract-build   # prints the WASM sha256
-# or, on a host with rustup + stellar-cli 27.1.0:
-./scripts/reproducible-build.sh
-```
-
-rustc (`rust-toolchain.toml`), crate versions (`Cargo.lock`, `--locked`),
-stellar-cli, build paths, and timestamps are all pinned. The
-`reproducible-build` workflow builds each commit on the runner and in the
-container and fails if the two hashes differ. Details and recorded hashes are
-in [docs/reproducible-builds.md](docs/reproducible-builds.md).
-
-## Circuit breaker and health view
-
-`get_health()` returns open/opened/resolved/refunded counts, default-token
-TVL, the configured admin/token/platform, and the pause flag in one call.
-`set_paused(true)` (admin-only) stops new funds from coming in; settlement and
-withdrawals keep working. See [docs/circuit-breaker.md](docs/circuit-breaker.md).
-Storage and error-code compatibility rules for changes to `lib.rs` are in
-[docs/versioning.md](docs/versioning.md).
-
-## WASM hash verification
-
-CI proves the contract *compiles* to a valid, deployable WASM, but that alone
-doesn't prove a specific *deployed* contract id corresponds to a specific
-`lib.rs` commit. The `wasm-hash-verify` workflow closes that gap: it builds the
-WASM from the current commit with the same `stellar contract build` command CI
-already runs, fetches the deployed contract's actual on-chain WASM
-(`stellar contract fetch`), and diffs the two sha256 hashes. On a mismatch the
-check fails loudly in CI.
-
-This is only meaningful when the build is reproducible (bit-for-bit identical
-output from the same source) — otherwise a legitimate deployment can show a
-false mismatch purely from a different build environment. See the
-reproducible-build work tracked separately.
-
-The target contract id is parameterized. It defaults to the pinned testnet
-deployment (`CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36`) and can
-be overridden via the `CONTRACT_ID` repository variable or the
-`workflow_dispatch` inputs, so the same action is reusable for a future
-mainnet deployment:
-
-```sh
-gh workflow run wasm-hash-verify.yml \
-  -f contract_id=<contract-id> \
-  -f network=mainnet
-```
-
-There is no incident-alerting wiring in this repo, so the action does not
-assume a notification channel exists — a mismatch is surfaced as a failed CI
-check.
+number; a PR that reg
 
 ## Handsoff notes
 
-<!-- handsoff-issue-28 -->
-- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
-
-<!-- handsoff-issue-76 -->
-- #76: Compliance blocklist registry
-
-<!-- handsoff-issue-77 -->
-- #77: Travel-rule metadata field
-
-<!-- handsoff-issue-78 -->
-- #78: Multi-treasury fee routing
-
-<!-- handsoff-issue-79 -->
-- #79: On-chain aggregate stats view
-
-<!-- handsoff-issue-21 -->
-- #21: touch() rewrites u
-
-<!-- handsoff-issue-44 -->
-- #44: Multisig/timelock admin
-
-<!-- handsoff-issue-45 -->
-- #45: DAO-controlled parameters
-
-<!-- handsoff-issue-53 -->
-- #53: On-chain worker category tags
-
-<!-- handsoff-issue-54 -->
-- #54: Category-specific stake minimums
-
-<!-- handsoff-issue-41 -->
-- #41: Stake-weighted voting in resolve()
-
-<!-- handsoff-issue-43 -->
-- #43: Slashing insurance for workers
-
-<!-- handsoff-issue-333 -->
-- #333: Duplicate load_question() definition — second compile error hiding behind #332
-
-<!-- handsoff-issue-334 -->
-- #334: BasketLegSettled event is used but never defined — third compile error behind #332
-
-<!-- handsoff-issue-335 -->
-- #335: ContractError needs 6 new variants but is already at 49/50 — the XDR cap problem is back
+<!-- handsoff-issue-255 -->
+- #255: Review: check_quorum_bounds() has zero direct test coverage
