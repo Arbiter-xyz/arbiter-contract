@@ -34,6 +34,21 @@ fn get_claim_for_an_unknown_question_id_returns_none() {
 }
 
 #[test]
+fn get_claim_returns_none_after_resolve_until_mint_claim_is_called() {
+    // #258: confirms the getter is an intentional scaffold for #93 — a
+    // resolved question still has no ClaimRecord until mint_claim() writes it.
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let w1 = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [w1.clone()]);
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    assert_eq!(c.get_claim(&1), None);
+}
+
+#[test]
 fn resolve_then_mint_claim_records_the_question_id() {
     let f = setup();
     let c = client(&f);
