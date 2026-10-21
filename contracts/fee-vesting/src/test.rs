@@ -4,8 +4,8 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
-    token, Address, Env,
+    testutils::{Address as _, Events, Ledger, LedgerInfo},
+    token, Address, Env, IntoVal, Symbol,
 };
 
 fn create_token<'a>(env: &Env, admin: &Address) -> (token::Client<'a>, token::StellarAssetClient<'a>) {
@@ -131,6 +131,27 @@ fn claim_transfers_only_the_unlocked_amount() {
 }
 
 #[test]
+fn claim_vested_emits_an_event() {
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    set_time(&s.env, 1_500);
+    s.client.claim_vested();
+
+    let events = s.env.events().all();
+    let expected_topics = (Symbol::new(&s.env, "vesting"), Symbol::new(&s.env, "claimed")).into_val(&s.env);
+    let expected_data = (s.beneficiary.clone(), 5_000i128).into_val(&s.env);
+
+    let mut found = false;
+    for event in events.iter() {
+        if event.1 == expected_topics && event.2 == expected_data {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "claim_vested did not emit the expected claimed event");
+}
+
+#[test]
 #[should_panic]
 fn claim_reverts_when_nothing_is_claimable() {
     let s = setup(1_000, 500, 1_000, 10_000);
@@ -225,6 +246,30 @@ fn initialize_requires_admin_auth() {
         &500,
         &1_000,
         &10_000,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn zero_total_schedule_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (token, _token_admin) = create_token(&env, &admin);
+
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token.address,
+        &1_000,
+        &500,
+        &1_000,
+        &0,
     );
     assert!(result.is_err());
 }

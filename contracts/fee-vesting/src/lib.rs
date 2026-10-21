@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 /// Storage keys for the fee-vesting treasury contract.
 ///
@@ -25,6 +25,30 @@ pub enum DataKey {
     Total,
     /// Amount already claimed by the beneficiary.
     Claimed,
+}
+
+/// Full vesting schedule, returned by `get_schedule()`.
+///
+/// Mirrors the aggregate views on the main contract (e.g. `get_health()`):
+/// a single call exposes every field a caller needs to reason about the
+/// schedule without inferring it from `claimable_amount()`/`vested_amount()`.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingSchedule {
+    /// Address that receives unlocked fee revenue.
+    pub beneficiary: Address,
+    /// Token contract used to pay out vested revenue.
+    pub token: Address,
+    /// Ledger timestamp at which vesting begins.
+    pub start: u64,
+    /// Ledger timestamp before which nothing is claimable (cliff).
+    pub cliff: u64,
+    /// Ledger timestamp at which the full amount is unlocked.
+    pub end: u64,
+    /// Total amount of fee revenue subject to the schedule.
+    pub total: i128,
+    /// Amount already claimed by the beneficiary.
+    pub claimed: i128,
 }
 
 #[contract]
@@ -60,7 +84,7 @@ impl FeeVesting {
         if start > cliff || cliff > end {
             panic!("invalid schedule");
         }
-        if total < 0 {
+        if total <= 0 {
             panic!("invalid total");
         }
 
@@ -75,6 +99,15 @@ impl FeeVesting {
         env.storage().instance().set(&DataKey::End, &end);
         env.storage().instance().set(&DataKey::Total, &total);
         env.storage().instance().set(&DataKey::Claimed, &0i128);
+    }
+
+    /// Return the configured admin address.
+    ///
+    /// The admin is the deployer that configured the schedule. It is exposed
+    /// so operators and audits can verify who set up the contract; the
+    /// schedule itself is immutable and there is no admin-gated mutation.
+    pub fn admin(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
     /// Amount currently unlocked by the schedule but not yet claimed.
@@ -104,9 +137,22 @@ impl FeeVesting {
         }
         // Cliff-then-linear: nothing before the cliff, then linear from
         // `start` to `end` (the cliff only gates the first unlock).
+        //
+        // `total * elapsed` can overflow i128 for a large `total` and a long
+        // duration, so use a checked multiply and fall back to a 256-bit
+        // intermediate (via i128 widening) when it would overflow. The result
+        // is always `<= total`, so the final division fits in i128.
         let elapsed = (now - start) as i128;
         let span = (end - start) as i128;
-        total * elapsed / span
+        match total.checked_mul(elapsed) {
+            Some(product) => product / span,
+            None => {
+                // Widen to i256 by splitting into high/low 128-bit halves.
+                // total and elapsed are both non-negative here.
+                let product = mul_wide(total, elapsed);
+                div_wide_by_i128(product, span)
+            }
+        }
     }
 
     /// Transfer the currently-unlocked amount to the beneficiary.
@@ -150,6 +196,9 @@ impl FeeVesting {
             &amount,
         );
 
+        env.events()
+            .publish((symbol_short!("vested"), beneficiary), amount);
+
         amount
     }
 
@@ -168,6 +217,71 @@ impl FeeVesting {
 
         Self::claim_vested(env)
     }
+}
+
+/// Multiply two non-negative i128 values into a 256-bit result represented as
+/// `(hi, lo)` 128-bit halves. Used only when `checked_mul` overflows.
+fn mul_wide(a: i128, b: i128) -> (u128, u128) {
+    let a = a as u128;
+    let b = b as u128;
+    let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
+    let a_hi = a >> 64;
+    let b_lo = b & 0xFFFF_FFFF_FFFF_FFFF;
+    let b_hi = b >> 64;
+
+    let ll = a_lo * b_lo;
+    let lh = a_lo * b_hi;
+    let hl = a_hi * b_lo;
+    let hh = a_hi * b_hi;
+
+    let mid = (ll >> 64) + (lh & 0xFFFF_FFFF_FFFF_FFFF) + (hl & 0xFFFF_FFFF_FFFF_FFFF);
+    let lo = (ll & 0xFFFF_FFFF_FFFF_FFFF) | (mid << 64);
+    let hi = hh + (lh >> 64) + (hl >> 64) + (mid >> 64);
+    (hi, lo)
+}
+
+/// Divide a 256-bit `(hi, lo)` value by a non-zero i128 divisor, returning the
+/// quotient truncated to i128. The caller guarantees the quotient fits.
+fn div_wide_by_i128((hi, lo): (u128, u128), divisor: i128) -> i128 {
+    let d = divisor as u128;
+    // Long division over 128-bit limbs: process the high limb first, then the
+    // low limb, carrying the remainder between steps.
+    let mut rem: u128 = 0;
+    let mut quotient_hi: u128 = 0;
+    let mut quotient_lo: u128 = 0;
+
+    // Divide the high limb.
+    let mut i = 128;
+    while i > 0 {
+        i -= 1;
+        let bit = (hi >> i) & 1;
+        let cur = (rem << 1) | bit;
+        if cur >= d {
+            rem = cur - d;
+            quotient_hi |= 1u128 << i;
+        } else {
+            rem = cur;
+        }
+    }
+
+    // Divide the low limb, carrying the remainder from the high limb.
+    let mut j = 128;
+    while j > 0 {
+        j -= 1;
+        let bit = (lo >> j) & 1;
+        let cur = (rem << 1) | bit;
+        if cur >= d {
+            rem = cur - d;
+            quotient_lo |= 1u128 << j;
+        } else {
+            rem = cur;
+        }
+    }
+
+    // The quotient is `(quotient_hi, quotient_lo)`; since the true result is
+    // `<= total <= i128::MAX`, the high limb must be zero.
+    debug_assert!(quotient_hi == 0);
+    quotient_lo as i128
 }
 
 mod test;

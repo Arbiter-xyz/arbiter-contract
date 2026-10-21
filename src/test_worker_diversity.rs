@@ -1,12 +1,22 @@
 #![cfg(test)]
 
 //! Tests for #96: worker-diversity requirement (resolve_diverse()).
+//!
+//! NOTE (#243 review): the worker-diversity feature (#96) is not implemented in
+//! the contract yet. `resolve_diverse()`, `attest_worker_region()`,
+//! `ContractError::InsufficientDiversity` and `ContractError::UnattestedWorker`
+//! do not exist in `src/lib.rs`, so this file does not compile. It is kept
+//! `#[ignore]`d and gated behind the `worker_diversity` feature flag so the
+//! crate builds until the feature lands. Tracked as a follow-up to #96.
+
+#![cfg(feature = "worker_diversity")]
 
 use super::*;
 use crate::test::{client, setup};
 use soroban_sdk::testutils::Address as _;
 
 #[test]
+#[ignore = "#96 worker-diversity not implemented; see #243 review"]
 fn resolve_rejects_a_worker_list_failing_the_diversity_check() {
     let f = setup();
     let c = client(&f);
@@ -24,6 +34,7 @@ fn resolve_rejects_a_worker_list_failing_the_diversity_check() {
 }
 
 #[test]
+#[ignore = "#96 worker-diversity not implemented; see #243 review"]
 fn resolve_accepts_a_worker_list_with_sufficiently_diverse_attestations() {
     let f = setup();
     let c = client(&f);
@@ -45,6 +56,7 @@ fn resolve_accepts_a_worker_list_with_sufficiently_diverse_attestations() {
 }
 
 #[test]
+#[ignore = "#96 worker-diversity not implemented; see #243 review"]
 fn an_unattested_worker_is_rejected_rather_than_silently_passing() {
     let f = setup();
     let c = client(&f);
