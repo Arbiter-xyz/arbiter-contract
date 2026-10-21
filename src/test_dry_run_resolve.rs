@@ -68,3 +68,27 @@ fn preview_resolve_on_a_non_pending_question_returns_the_same_error_resolve_woul
     let res = c.try_preview_resolve(&1, &workers, &no_losers);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
 }
+
+#[test]
+fn preview_resolve_does_not_overflow_for_a_large_amount() {
+    let f = setup();
+    let c = client(&f);
+
+    // Beyond the safe multiply range for the bps constants involved, so a
+    // multiply-then-divide implementation would overflow here while the
+    // divide-first mul_bps() path (used by resolve()) would not.
+    let large_amount: i128 = 1_000_000_000_000_000_000_000_000_000_000_000_000;
+    c.submit(&f.payer, &1, &large_amount);
+
+    let w1 = Address::generate(&f.env);
+    let w2 = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [w1.clone(), w2.clone()]);
+    let no_losers = Vec::new(&f.env);
+
+    // Must not panic; matches resolve()'s divide-first behavior.
+    let preview = c.preview_resolve(&1, &workers, &no_losers);
+
+    assert_eq!(preview.fee, mul_bps(large_amount, FEE_BPS));
+    assert_eq!(preview.platform_take, preview.fee);
+    assert_eq!(preview.share_per_worker, (large_amount - preview.fee) / 2);
+}

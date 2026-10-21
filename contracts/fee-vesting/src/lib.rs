@@ -56,6 +56,30 @@ pub enum DataKey {
     Claimed,
 }
 
+/// Full vesting schedule, returned by `get_schedule()`.
+///
+/// Mirrors the aggregate views on the main contract (e.g. `get_health()`):
+/// a single call exposes every field a caller needs to reason about the
+/// schedule without inferring it from `claimable_amount()`/`vested_amount()`.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingSchedule {
+    /// Address that receives unlocked fee revenue.
+    pub beneficiary: Address,
+    /// Token contract used to pay out vested revenue.
+    pub token: Address,
+    /// Ledger timestamp at which vesting begins.
+    pub start: u64,
+    /// Ledger timestamp before which nothing is claimable (cliff).
+    pub cliff: u64,
+    /// Ledger timestamp at which the full amount is unlocked.
+    pub end: u64,
+    /// Total amount of fee revenue subject to the schedule.
+    pub total: i128,
+    /// Amount already claimed by the beneficiary.
+    pub claimed: i128,
+}
+
 #[contract]
 pub struct FeeVesting;
 
@@ -94,6 +118,39 @@ impl FeeVesting {
         env.storage().instance().set(&DataKey::End, &end);
         env.storage().instance().set(&DataKey::Total, &total);
         env.storage().instance().set(&DataKey::Claimed, &0i128);
+    }
+
+    /// Return the full vesting schedule in a single call.
+    ///
+    /// Exposes the beneficiary, token, start, cliff, end, total and the
+    /// amount already claimed, so callers no longer have to infer the
+    /// schedule from `claimable_amount()`/`vested_amount()` alone.
+    pub fn get_schedule(env: Env) -> VestingSchedule {
+        let beneficiary: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Beneficiary)
+            .unwrap();
+        let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let start: u64 = env.storage().instance().get(&DataKey::Start).unwrap();
+        let cliff: u64 = env.storage().instance().get(&DataKey::Cliff).unwrap();
+        let end: u64 = env.storage().instance().get(&DataKey::End).unwrap();
+        let total: i128 = env.storage().instance().get(&DataKey::Total).unwrap();
+        let claimed: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Claimed)
+            .unwrap_or(0);
+
+        VestingSchedule {
+            beneficiary,
+            token,
+            start,
+            cliff,
+            end,
+            total,
+            claimed,
+        }
     }
 
     /// Amount currently unlocked by the schedule but not yet claimed.
@@ -136,6 +193,9 @@ impl FeeVesting {
 
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
+    ///
+    /// Emits a `vested` event with topics `(vested, beneficiary)` and the
+    /// claimed `amount` as data, so indexers can track vesting claims.
     pub fn claim_vested(env: Env) -> i128 {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
@@ -163,6 +223,9 @@ impl FeeVesting {
             &beneficiary,
             &amount,
         );
+
+        env.events()
+            .publish((symbol_short!("vested"), beneficiary), amount);
 
         amount
     }

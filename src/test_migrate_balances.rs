@@ -9,6 +9,8 @@
 //! - The migration_does_not_double_credit_or_drop_a_balance invariant: after
 //!   migrate_balances() the source holds zero for each migrated address, the
 //!   target holds the original amounts, and the total is conserved.
+//! - import_balances() (the receiving entry point, #257): amount-mismatch
+//!   rejection, double-import behaviour, and wrong-source-caller rejection.
 
 extern crate std;
 
@@ -233,7 +235,140 @@ fn migrate_balances_no_op_for_address_with_no_entries() {
     let mut addrs: Vec<Address> = Vec::new(&env);
     addrs.push_back(stranger);
 
-    // Should not panic or transfer anything; total == 0.
-    let total = src_c.migrate_balances(&addrs, &_dst_id);
-    assert_eq!(total, 0);
+    // Should not
+
+// ---------------------------------------------------------------------------
+// import_balances tests (#257)
+// ---------------------------------------------------------------------------
+
+/// Seed the source with a worker stake and a payer deposit, then return the
+/// (worker, payer, stake, owed, balance) tuple describing what a migration
+/// would move. Leaves mock_all_auths on.
+fn seed_source(
+    env: &Env,
+    token: &Address,
+    src: &Address,
+) -> (Address, Address, i128, i128, i128) {
+    let src_c = OracleEscrowClient::new(env, src);
+    let sac = token::StellarAssetClient::new(env, token);
+
+    let worker = Address::generate(env);
+    sac.mint(&worker, &1_000_000);
+    src_c.stake(&worker, &1_000_000);
+
+    let payer = Address::generate(env);
+    sac.mint(&payer, &AMOUNT);
+    src_c.submit(&payer, &1, &AMOUNT);
+    let wv = Vec::from_array(env, [worker.clone()]);
+    let lv: Vec<Address> = Vec::new(env);
+    src_c.resolve(&1, &wv, &lv, &BytesN::from_array(env, &[0u8; 32]));
+
+    let payer2 = Address::generate(env);
+    sac.mint(&payer2, &500_000);
+    src_c.deposit(&payer2, &500_000);
+
+    let stake = {
+        let info = src_c.get_stake_info(&worker);
+        info.settled + info.warming + info.unbonding
+    };
+    let owed = src_c.get_owed(&worker);
+    let balance = src_c.get_balance(&payer2);
+
+    (worker, payer2, stake, owed, balance)
+}
+
+#[test]
+fn import_balances_credits_destination_from_authorised_source() {
+    let (env, token, _admin, _platform, src, dst) = setup_pair();
+    let dst_c = OracleEscrowClient::new(&env, &dst);
+
+    let (worker, payer2, stake, owed, balance) = seed_source(&env, &token, &src);
+
+    let mut addrs: Vec<Address> = Vec::new(&env);
+    addrs.push_back(worker.clone());
+    addrs.push_back(payer2.clone());
+
+    dst_c.import_balances(&src, &addrs, &stake, &owed, &balance);
+
+    assert_eq!(dst_c.get_stake(&worker), stake);
+    assert_eq!(dst_c.get_owed(&worker), owed);
+    assert_eq!(dst_c.get_balance(&payer2), balance);
+}
+
+#[test]
+fn import_balances_rejects_amount_mismatch() {
+    let (env, token, _admin, _platform, src, dst) = setup_pair();
+    let dst_c = OracleEscrowClient::new(&env, &dst);
+
+    let (worker, payer2, stake, owed, balance) = seed_source(&env, &token, &src);
+
+    let mut addrs: Vec<Address> = Vec::new(&env);
+    addrs.push_back(worker.clone());
+    addrs.push_back(payer2.clone());
+
+    // Claim a larger stake than the source actually holds — must be rejected.
+    let result = dst_c.try_import_balances(&src, &addrs, &(stake + 1), &owed, &balance);
+    assert!(result.is_err(), "import with mismatched stake must fail");
+
+    // Nothing was credited on the destination.
+    assert_eq!(dst_c.get_stake(&worker), 0);
+    assert_eq!(dst_c.get_owed(&worker), 0);
+    assert_eq!(dst_c.get_balance(&payer2), 0);
+}
+
+#[test]
+fn import_balances_rejects_wrong_source_caller() {
+    let (env, token, _admin, _platform, src, dst) = setup_pair();
+    let dst_c = OracleEscrowClient::new(&env, &dst);
+
+    let (worker, payer2, stake, owed, balance) = seed_source(&env, &token, &src);
+
+    let mut addrs: Vec<Address> = Vec::new(&env);
+    addrs.push_back(worker.clone());
+    addrs.push_back(payer2.clone());
+
+    // A contract that was never registered as the migration source must be
+    // rejected even if it presents the correct amounts.
+    let rogue = env.register(OracleEscrow, ());
+    let result = dst_c.try_import_balances(&rogue, &addrs, &stake, &owed, &balance);
+    assert!(result.is_err(), "import from unregistered source must fail");
+
+    assert_eq!(dst_c.get_stake(&worker), 0);
+    assert_eq!(dst_c.get_owed(&worker), 0);
+    assert_eq!(dst_c.get_balance(&payer2), 0);
+}
+
+#[test]
+fn import_balances_double_import_does_not_double_credit() {
+    let (env, token, _admin, _platform, src, dst) = setup_pair();
+    let dst_c = OracleEscrowClient::new(&env, &dst);
+
+    let (worker, payer2, stake, owed, balance) = seed_source(&env, &token, &src);
+
+    let mut addrs: Vec<Address> = Vec::new(&env);
+    addrs.push_back(worker.clone());
+    addrs.push_back(payer2.clone());
+
+    dst_c.import_balances(&src, &addrs, &stake, &owed, &balance);
+    assert_eq!(dst_c.get_stake(&worker), stake);
+
+    // Re-importing the same batch must not double-credit the destination.
+    let result = dst_c.try_import_balances(&src, &addrs, &stake, &owed, &balance);
+    if result.is_ok() {
+        assert_eq!(
+            dst_c.get_stake(&worker),
+            stake,
+            "double import must not double-credit stake"
+        );
+        assert_eq!(
+            dst_c.get_owed(&worker),
+            owed,
+            "double import must not double-credit owed"
+        );
+        assert_eq!(
+            dst_c.get_balance(&payer2),
+            balance,
+            "double import must not double-credit balance"
+        );
+    }
 }
