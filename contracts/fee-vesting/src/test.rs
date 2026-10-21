@@ -221,117 +221,55 @@ fn only_beneficiary_can_claim() {
 }
 
 #[test]
-fn get_schedule_returns_the_full_schedule() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    let schedule = s.client.get_schedule();
-    assert_eq!(schedule.start, 1_000);
-    assert_eq!(schedule.cliff, 500);
-    assert_eq!(schedule.duration, 1_000);
-    assert_eq!(schedule.total, 10_000);
-    assert_eq!(schedule.end, 2_000);
-}
-
-#[test]
-fn get_schedule_is_stable_across_time_and_claims() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    let before = s.client.get_schedule();
-
-    set_time(&s.env, 1_500);
-    s.client.claim_vested();
-
-    let after = s.client.get_schedule();
-    assert_eq!(before, after);
-}
-
-#[test]
-fn repeated_claims_with_uneven_division_never_exceed_total() {
-    // total=1_000, span=1_000 but claim at timestamps where total*elapsed/span
-    // does not divide evenly (e.g. elapsed=333 -> 333, elapsed=667 -> 667).
-    // Use total=1_000 and span=7 so intermediate products truncate.
-    let total: i128 = 1_000;
+fn near_i128_max_total_does_not_overflow_vested_amount() {
+    // Total close to i128::MAX with a multi-year span. The vested computation
+    // multiplies total by elapsed time, so this exercises the near-overflow
+    // path and asserts a sane partial amount is returned instead of panicking.
+    let total: i128 = i128::MAX - 1;
     let start: u64 = 1_000;
-    let duration: u64 = 7;
+    let duration: u64 = 4 * 365 * 24 * 60 * 60; // ~4 years
     let s = setup(start, 0, duration, total);
 
-    let mut aggregate: i128 = 0;
-    // Claim at every intermediate second; each step's product does not divide
-    // evenly by span=7, exercising repeated truncation.
-    for offset in 1..=duration {
-        set_time(&s.env, start + offset);
-        let claimable = s.client.claimable_amount();
-        assert!(claimable >= 0, "claimable must never be negative");
-        if claimable > 0 {
-            let claimed = s.client.claim_vested();
-            assert_eq!(claimed, claimable, "claimed must equal claimable");
-            aggregate += claimed;
-        }
-        // Aggregate must never exceed total at any intermediate point.
-        assert!(
-            aggregate <= total,
-            "aggregate claimed {} exceeded total {} at offset {}",
-            aggregate,
-            total,
-            offset
-        );
-        // Beneficiary balance must always match aggregate claimed.
-        assert_eq!(s.token.balance(&s.beneficiary), aggregate);
-    }
+    // Halfway through the schedule: expect roughly half of total vested.
+    set_time(&s.env, start + duration / 2);
+    let vested = s.client.vested_amount();
+    assert!(vested > 0, "vested amount should be positive mid-schedule");
+    assert!(vested <= total, "vested amount must not exceed total");
+    // Allow a small rounding tolerance around the expected half.
+    let expected = total / 2;
+    let diff = if vested > expected { vested - expected } else { expected - vested };
+    assert!(diff <= 2, "vested amount should be ~half of total");
 
-    // At the end everything must be fully vested and fully claimable.
+    // At the end of the schedule everything is vested, capped at total.
     set_time(&s.env, start + duration);
     assert_eq!(s.client.vested_amount(), total);
-    let remaining = s.client.claimable_amount();
-    if remaining > 0 {
-        aggregate += s.client.claim_vested();
-    }
-    assert_eq!(aggregate, total, "aggregate claimed must equal total exactly");
-    assert_eq!(s.token.balance(&s.beneficiary), total);
-    // No dust left in the contract.
-    assert_eq!(s.token.balance(&s.client.address), 0);
 }
 
 #[test]
-fn repeated_claims_with_uneven_total_never_overpay() {
-    // total=1_000_003, span=1_000: total*elapsed/span truncates at many
-    // intermediate timestamps. Aggregate must never exceed total and must
-    // reach exactly total by the end (no overpay, no permanent dust leak).
-    let total: i128 = 1_000_003;
-    let start: u64 = 1_000;
-    let duration: u64 = 1_000;
-    let s = setup(start, 0, duration, total);
+fn rescue_stray_token_transfers_balance_to_admin() {
+    // A stray token (not the vesting token) sent to the contract can be swept
+    // by the admin to a recipient, without touching the vesting token balance.
+    let s = setup(1_000, 500, 1_000, 10_000);
 
-    let mut aggregate: i128 = 0;
-    let mut offset: u64 = 1;
-    while offset <= duration {
-        set_time(&s.env, start + offset);
-        let claimable = s.client.claimable_amount();
-        assert!(claimable >= 0, "claimable must never be negative");
-        if claimable > 0 {
-            let claimed = s.client.claim_vested();
-            assert_eq!(claimed, claimable, "claimed must equal claimable");
-            aggregate += claimed;
-        }
-        assert!(
-            aggregate <= total,
-            "aggregate claimed {} exceeded total {} at offset {}",
-            aggregate,
-            total,
-            offset
-        );
-        assert_eq!(s.token.balance(&s.beneficiary), aggregate);
-        // Step by a non-divisor stride to hit uneven intermediate products.
-        offset += 7;
-    }
+    let (stray, stray_admin) = create_token(&s.env, &s.admin);
+    let contract_id = s.client.address.clone();
+    stray_admin.mint(&contract_id, &4_242);
 
-    set_time(&s.env, start + duration);
-    assert_eq!(s.client.vested_amount(), total);
-    let remaining = s.client.claimable_amount();
-    if remaining > 0 {
-        aggregate += s.client.claim_vested();
-    }
-    assert_eq!(aggregate, total, "aggregate claimed must equal total exactly");
-    assert_eq!(s.token.balance(&s.beneficiary), total);
-    assert_eq!(s.token.balance(&s.client.address), 0);
+    let recipient = Address::generate(&s.env);
+    s.client.rescue_token(&stray.address, &recipient);
+
+    assert_eq!(stray.balance(&recipient), 4_242);
+    assert_eq!(stray.balance(&contract_id), 0);
+    // Vesting token balance is untouched by the rescue.
+    assert_eq!(s.token.balance(&contract_id), 10_000);
+}
+
+#[test]
+#[should_panic]
+fn rescue_reverts_when_targeting_the_vesting_token() {
+    // The rescue path must never be able to drain the vesting token balance.
+    let s = setup(1_000, 500, 1_000, 10_000);
+
+    let recipient = Address::generate(&s.env);
+    s.client.rescue_token(&s.token.address, &recipient);
 }

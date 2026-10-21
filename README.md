@@ -148,6 +148,30 @@ assert_eq!(client.status(&question_id), Status::Refunded);
 Building a Rust backend to actually consume this crate — that's a separate,
 much larger effort.
 
+## Fee vesting (`contracts/fee-vesting/`)
+
+The `fee-vesting` contract is a separate Soroban contract that holds platform
+fees and releases them to a beneficiary on a linear vesting schedule. It is
+**not** deployed by the OracleEscrow constructor and is not wired into
+`src/lib.rs`; it is a standalone crate under `contracts/fee-vesting/`.
+
+### Who deploys and funds it
+
+The platform operator deploys `fee-vesting` independently (its own
+`__constructor` takes the beneficiary, token, and vesting parameters) and is
+responsible for funding it. Platform fees reach the contract by a plain
+`token::Client::transfer` from the platform address into the fee-vesting
+contract's balance — the same token the escrow contract uses. OracleEscrow
+itself does not push fees to it; the operator (or an off-chain settlement job)
+moves accrued fees across.
+
+### How fees are released
+
+The beneficiary calls the contract's release entry point; the contract pays
+out only the portion that has vested by the current ledger, leaving the rest
+locked until later. See `contracts/fee-vesting/src/lib.rs` for the exact
+schedule math and entry points.
+
 ## Economics, operations and pre-deployment testing
 
 - [docs/economics/incentive-alignment.md](docs/economics/incentive-alignment.md) —
@@ -200,44 +224,3 @@ ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
 
 **Baseline: 15.5KB** (optimized). The build must stay at or below this
 number; a PR that reg
-
-## Handsoff notes
-
-<!-- handsoff-issue-28 -->
-- #28: touch() never extends Balance's TTL, and every balance-decreasing function (unstake/withdraw/withdraw_balance) skips extend_ttl entirely
-
-<!-- handsoff-issue-76 -->
-- #76: Compliance blocklist registry
-
-<!-- handsoff-issue-77 -->
-- #77: Travel-rule metadata field
-
-<!-- handsoff-issue-78 -->
-- #78: Multi-treasury fee routing
-
-<!-- handsoff-issue-79 -->
-- #79: On-chain aggregate stats view
-
-<!-- handsoff-issue-21 -->
-- #21: touch() rewrites u
-
-<!-- handsoff-issue-44 -->
-- #44: Multisig/timelock admin
-
-<!-- handsoff-issue-45 -->
-- #45: DAO-controlled parameters
-
-<!-- handsoff-issue-53 -->
-- #53: On-chain worker category tags
-
-<!-- handsoff-issue-54 -->
-- #54: Category-specific stake minimums
-
-<!-- handsoff-issue-41 -->
-- #41: Stake-weighted voting in resolve()
-
-<!-- handsoff-issue-43 -->
-- #43: Slashing insurance for workers
-
-<!-- handsoff-issue-240 -->
-- #240: Review: test_question_templates.rs (#88) calls missing functions
