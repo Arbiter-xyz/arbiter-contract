@@ -2,6 +2,10 @@
 
 //! Tests for issue #93 (proof-of-verified-claim record): an opt-in,
 //! non-transferable ClaimRecord minted after a question resolves.
+//!
+//! Review note for #258: `get_claim()` is a real getter that always returns
+//! `None` until `mint_claim()` (#93) writes a record. These tests pin down
+//! that scaffold behavior so the getter is not mistaken for dead code.
 
 use super::test::{client, setup, AMOUNT};
 use super::*;
@@ -23,6 +27,21 @@ fn get_claim_for_an_unknown_question_id_returns_none() {
     let f = setup();
     let c = client(&f);
     assert_eq!(c.get_claim(&999), None);
+}
+
+#[test]
+fn get_claim_returns_none_after_resolve_until_mint_claim_is_called() {
+    // #258: confirms the getter is an intentional scaffold for #93 — a
+    // resolved question still has no ClaimRecord until mint_claim() writes it.
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let w1 = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [w1.clone()]);
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    assert_eq!(c.get_claim(&1), None);
 }
 
 #[test]

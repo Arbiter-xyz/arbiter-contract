@@ -12,7 +12,7 @@
 
 use super::*;
 use crate::test::{client, setup, token_client};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 
 #[test]
 fn registered_underwriter_can_front_an_instant_refund_before_the_timeout_deadline() {

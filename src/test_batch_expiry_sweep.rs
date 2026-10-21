@@ -5,6 +5,12 @@
 //!
 //! Issue #39: batch_submit() opens many Pending questions from one payer
 //! signature and one aggregate token transfer, all-or-nothing.
+//!
+//! Issue #287: sweep_timeouts() has no explicit batch-size cap (callers are
+//! expected to size batches sensibly). These tests pin the reviewed
+//! conclusion: a large batch is processed per-question with no aggregate
+//! resource blow-up beyond the documented per-transaction budget, and each
+//! entry is independently refunded or skipped without reverting the batch.
 
 use super::*;
 use crate::test::{client, setup, token_client, AMOUNT, TIMEOUT_LEDGERS};
@@ -86,6 +92,38 @@ fn sweep_timeouts_skips_an_already_resolved_question_without_reverting_the_batch
     );
     assert_eq!(c.get_question(&1).status, Status::Refunded);
     assert_eq!(c.get_question(&2).status, Status::Resolved);
+}
+
+/// Issue #287: a large batch is processed per-question with no aggregate
+/// resource blow-up beyond the documented per-transaction budget. Each entry
+/// is independently refunded or skipped, and the batch never reverts as a
+/// whole because of one ineligible entry.
+#[test]
+fn sweep_timeouts_handles_a_large_batch_without_reverting() {
+    let f = setup();
+    let c = client(&f);
+
+    // Open a batch of questions, then fast-forward past the timeout window.
+    let mut ids = Vec::new(&f.env);
+    for id in 1u64..=20u64 {
+        c.submit(&f.payer, &id, &AMOUNT);
+        ids.push_back(id);
+    }
+
+    f.env.ledger().with_mut(|li| {
+        li.sequence_number += TIMEOUT_LEDGERS + 1;
+    });
+
+    let results = c.sweep_timeouts(&ids);
+
+    assert_eq!(results.len(), 20);
+    for i in 0..20u32 {
+        assert!(results.get(i).unwrap().is_ok());
+    }
+    for id in 1u64..=20u64 {
+        assert_eq!(c.get_question(&id).status, Status::Refunded);
+    }
+    assert_eq!(token_client(&f).balance(&f.payer), AMOUNT * 100);
 }
 
 #[test]
