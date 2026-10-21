@@ -300,3 +300,6 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-340 -->
+- #340: escalate() has the MAX_QUORUM_SIZE guard but not the paired check_quorum_bounds() call
