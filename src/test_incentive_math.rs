@@ -231,6 +231,25 @@ fn resolve_matches_for_unstaked_losers() {
     check_resolve(2_500_000, 4, &[none, none]);
 }
 
+/// Issue #205: preview_resolve() must not overflow on amounts whose
+/// multiply-then-divide form would exceed i128, matching resolve()'s
+/// divide-first mul_bps() path.
+#[test]
+fn preview_resolve_does_not_overflow_on_large_amounts() {
+    let m = Market::new();
+    let c = m.client();
+
+    // Beyond i128::MAX / BPS_DENOM, so amount * bps would overflow.
+    let amount = i128::MAX / 2;
+    c.submit(&m.payer, &1, &amount);
+
+    let preview = c.preview_resolve(&1);
+    let expected_fee = OracleEscrow::mul_bps(amount, PLATFORM_FEE_BPS);
+    let expected_cap = OracleEscrow::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+    assert_eq!(preview.fee, expected_fee);
+    assert_eq!(preview.slash_cap, expected_cap);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
     #[test]
