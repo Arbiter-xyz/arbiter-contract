@@ -300,3 +300,12 @@ check.
 
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
+
+<!-- handsoff-issue-333 -->
+- #333: Duplicate load_question() definition — second compile error hiding behind #332
+
+<!-- handsoff-issue-334 -->
+- #334: BasketLegSettled event is used but never defined — third compile error behind #332
+
+<!-- handsoff-issue-335 -->
+- #335: ContractError needs 6 new variants but is already at 49/50 — the XDR cap problem is back
