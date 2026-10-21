@@ -239,5 +239,5 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-266 -->
-- #266: Review: confirm _asset entrypoints can't double as the default asset
+<!-- handsoff-issue-264 -->
+- #264: Review: begin_unstake_asset()/complete_unstake_asset() untested alone
