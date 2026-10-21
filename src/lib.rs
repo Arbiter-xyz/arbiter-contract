@@ -3812,7 +3812,21 @@ impl OracleEscrow {
             .get(&key)
             .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
-            return Err(ContractError::QuestionNotPending);
+            let can_refund_disputed = !via_timeout
+                && question.status == Status::ResolvedPending
+                && env
+                    .storage()
+                    .persistent()
+                    .get::<_, PendingResolution>(&DataKey::PendingResolution(question_id))
+                    .map(|pr| pr.disputed)
+                    .unwrap_or(false);
+            if !can_refund_disputed {
+                return Err(ContractError::QuestionNotPending);
+            }
+            Self::settle_disputed_bond(env, question_id)?;
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PendingResolution(question_id));
         }
 
         // #30: a basket refunds every leg in its own asset.
@@ -5534,6 +5548,221 @@ impl OracleEscrow {
         Self::bump_instance(&env);
 
         ResolutionDisputed { question_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Settles any ChallengerBond on a disputed question by returning the bond
+    /// to the challenger and emitting `ChallengeBondSettled { returned: true }`.
+    fn settle_disputed_bond(env: &Env, question_id: u64) -> Result<(), ContractError> {
+        let bond_key = DataKey::ChallengerBond(question_id);
+        if let Some(bond) = env
+            .storage()
+            .persistent()
+            .get::<_, ChallengerBondEntry>(&bond_key)
+        {
+            let token_addr = Self::token(env)?;
+            token::Client::new(env, &token_addr).transfer(
+                &env.current_contract_address(),
+                &bond.challenger,
+                &bond.amount,
+            );
+            env.storage().persistent().remove(&bond_key);
+            ChallengeBondSettled {
+                question_id,
+                challenger: bond.challenger,
+                amount: bond.amount,
+                returned: true,
+            }
+            .publish(env);
+        }
+        Ok(())
+    }
+
+    /// Admin-only (#184): unblocks and settles a question whose PendingResolution
+    /// was flagged via dispute_resolve().
+    ///
+    /// - If `workers` is non-empty, resolves the question (`Status::Resolved`)
+    ///   using the admin-supplied `workers` and `losing_workers` with the same
+    ///   fee, slash-redistribution, and public-goods routing rules as resolve().
+    /// - If `workers` is empty (and `losing_workers` is empty), refunds the
+    ///   question (`Status::Refunded`) back to the payer.
+    ///
+    /// Any ChallengerBond posted on the question is returned to the challenger
+    /// with `ChallengeBondSettled { returned: true }`, and `PendingResolution`
+    /// is cleaned up.
+    pub fn admin_override_resolution(
+        env: Env,
+        question_id: u64,
+        workers: Vec<Address>,
+        losing_workers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+
+        let pending_res: PendingResolution = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingResolution(question_id))
+            .ok_or(ContractError::NoPendingResolution)?;
+        if !pending_res.disputed {
+            return Err(ContractError::QuestionNotDisputed);
+        }
+
+        let key = DataKey::Question(question_id);
+        let mut question = Self::load_question(&env, question_id)?;
+        if question.status != Status::ResolvedPending {
+            return Err(ContractError::NoPendingResolution);
+        }
+
+        if workers.is_empty() {
+            if !losing_workers.is_empty() {
+                return Err(ContractError::NoWorkers);
+            }
+            let question_token = Self::question_token(&env, question_id)?;
+            token::Client::new(&env, &question_token).transfer(
+                &env.current_contract_address(),
+                &question.payer,
+                &question.amount,
+            );
+            Self::settle_disputed_bond(&env, question_id)?;
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PendingResolution(question_id));
+            Self::settle_question(&env, question_id, &key, &mut question, Status::Refunded);
+            QuestionRefunded {
+                question_id,
+                payer: question.payer,
+                amount: question.amount,
+                via_timeout: false,
+            }
+            .publish(&env);
+            return Ok(());
+        }
+
+        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
+        Self::validate_worker_lists(&workers, &losing_workers)?;
+
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Platform)
+            .ok_or(ContractError::NotInitialized)?;
+        let question_token = Self::question_token(&env, question_id)?;
+        let token_client = token::Client::new(&env, &question_token);
+
+        let amount = question.amount;
+        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+        let mut platform_take = fee + dust;
+        let mut total_slashed: i128 = 0;
+        let mut slash_redist_per_worker: i128 = 0;
+        for loser in losing_workers.iter() {
+            let slashed = Self::slash(&env, &question_token, &loser, slash_cap);
+            if slashed > 0 {
+                let worker_portion = Self::mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
+                let platform_portion = slashed - worker_portion;
+                let redist_share = worker_portion / n;
+                let redist_dust = worker_portion - redist_share * n;
+                slash_redist_per_worker = slash_redist_per_worker
+                    .checked_add(redist_share)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(platform_portion)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                platform_take = platform_take
+                    .checked_add(redist_dust)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                total_slashed = total_slashed
+                    .checked_add(slashed)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                WorkerSlashed {
+                    question_id,
+                    worker: loser,
+                    amount: slashed,
+                }
+                .publish(&env);
+            }
+        }
+        let worker_credit = share
+            .checked_add(slash_redist_per_worker)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        for worker in workers.iter() {
+            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
+            WorkerCredited {
+                question_id,
+                worker: worker.clone(),
+                amount: worker_credit,
+            }
+            .publish(&env);
+            Self::record_resolved_credit(&env, &worker);
+        }
+
+        Self::settle_disputed_bond(&env, question_id)?;
+
+        if platform_take > 0 {
+            let public_goods_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsBps)
+                .unwrap_or(0);
+            let maybe_pg_addr: Option<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PublicGoodsAddress);
+            if public_goods_bps > 0 {
+                if let Some(pg_addr) = maybe_pg_addr {
+                    let public_goods_share =
+                        Self::mul_bps(platform_take, public_goods_bps as i128);
+                    let platform_remainder = platform_take - public_goods_share;
+                    if public_goods_share > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &pg_addr,
+                            &public_goods_share,
+                        );
+                    }
+                    if platform_remainder > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &platform,
+                            &platform_remainder,
+                        );
+                    }
+                } else {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &platform,
+                        &platform_take,
+                    );
+                }
+            } else {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &platform,
+                    &platform_take,
+                );
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingResolution(question_id));
+
+        Self::settle_question(&env, question_id, &key, &mut question, Status::Resolved);
+        QuestionResolved {
+            question_id,
+            worker_count: workers.len(),
+            fee,
+            total_slashed,
+        }
+        .publish(&env);
         Ok(())
     }
 
