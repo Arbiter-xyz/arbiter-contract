@@ -239,5 +239,8 @@ number; a PR that reg
 <!-- handsoff-issue-43 -->
 - #43: Slashing insurance for workers
 
-<!-- handsoff-issue-269 -->
-- #269: Review: index_remove() could panic on inconsistent index state
+<!-- handsoff-issue-256 -->
+- #256: Review: track_participant() has zero test coverage
+
+<!-- handsoff-issue-260 -->
+- #260: Review: the 32-asset allowlist cap has no boundary test
