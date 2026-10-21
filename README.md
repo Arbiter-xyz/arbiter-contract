@@ -40,11 +40,15 @@ will be pointing at different contracts.
 ## Architecture
 
 Every current integration with the contract goes through the JavaScript
-`@stellar/stellar-sdk`:
+`@stellar/stellar-sdk`. Those clients live in the separate `arbiter-backend`
+and `arbiter-app` repos, not in this one:
 
-- `backend/src/stellarClient.js` — backend service calls
-- `app/src/contractCalls.js` — frontend calls
+- `arbiter-backend` — backend service calls
+- `arbiter-app` — frontend calls
 - demo-agent's scripts — scripted demo flows
+
+This repo contains only the contract itself (`src/lib.rs`), its tests, and the
+supporting tooling (`contracts/`, `sim/`, `fuzz/`, `scripts/`, `docs/`).
 
 There is no equivalent for a Rust caller today. `soroban-sdk`'s
 `#[contractimpl]` macro already generates an `OracleEscrowClient` (the same
@@ -54,22 +58,22 @@ standalone crate would need to publish.
 ## Client bindings
 
 Integrators can talk to the contract from more than one language. The
-JavaScript reference (`backend/src/stellarClient.js`, `app/src/contractCalls.js`)
-remains the canonical example; a Python binding is also shipped under
-`bindings/python/`.
+JavaScript clients in `arbiter-backend` and `arbiter-app` remain the canonical
+example. There is no Python binding shipped in this repo today; the section
+below describes the intended shape of one, not a directory that exists here.
 
-### Python binding (`bindings/python/`)
+### Python binding (planned)
 
-A thin, dependency-light wrapper over the contract's XDR spec. It covers all
-of the contract's entry points:
+A thin, dependency-light wrapper over the contract's XDR spec. It would cover
+all of the contract's entry points:
 
 - writes: `initialize`, `submit`, `deposit`, `withdraw_balance`, `charge`,
   `resolve`, `stake`, `unstake`, `withdraw`, `withdraw_to`, `touch`,
   `refund`, `refund_timeout`, `set_admin`, `set_timeout_ledgers`
 - reads: `get_question`, `get_balance`, `get_admin`, `get_timeout_ledgers`
 
-The contract's `Question`, `Status`, and `ContractError` types are mapped to
-native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
+The contract's `Question`, `Status`, and `ContractError` types would be mapped
+to native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
 so callers never touch raw XDR.
 
 ```python
@@ -84,24 +88,20 @@ assert client.get_question(question_id).status == Status.RESOLVED
 
 ### Regenerating bindings
 
-The bindings are generated from the contract's embedded XDR spec, the same
-source `stellar contract bindings` reads. Whenever `src/lib.rs`'s public
-interface changes (a new entry point, a new `ContractError` variant, a changed
-`Question` field), regenerate them with:
+Bindings are generated from the contract's embedded XDR spec, the same source
+`stellar contract bindings` reads. Whenever `src/lib.rs`'s public interface
+changes (a new entry point, a new `ContractError` variant, a changed `Question`
+field), regenerate them with:
 
 ```sh
 stellar contract build
 stellar contract bindings typescript \
   --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --output-dir bindings/typescript
-python bindings/python/generate.py \
-  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
-  --output bindings/python/oracle_escrow/_spec.py
+  --output-dir <output-dir>
 ```
 
-The Python generator reads the same spec entries the CLI emits, so the two
-stay in lockstep. Run it as part of the release checklist whenever the public
-interface changes.
+Run this as part of the release checklist whenever the public interface
+changes.
 
 ## Standalone Rust client crate
 
