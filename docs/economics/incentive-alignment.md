@@ -196,7 +196,7 @@ contract that no longer exists.
 
 `src/test_incentive_math.rs`:
 
-- `constants_match_lib_rs`: the fee, slash, cap and denominator constants
+- `constants_match_lib_rs`: the fee, slash, cap, redistribution and denominator constants
   match lib.rs.
 - `mul_bps_matches`: a proptest over values up to 10³⁰ and every bps value
   from 0 to 10,000, compared with `OracleEscrow::mul_bps`.
@@ -204,8 +204,10 @@ contract that no longer exists.
   Soroban `Env`, with losers' stakes built up bucket by bucket (settled,
   then unbonding through `begin_unstake`, then fresh warming). It then
   asserts three things against `sim_math::resolve()`:
-  - every winner's `get_owed()` equals `share`
-  - the platform's token balance changed by `fee + dust + Σ slash`
+  - every winner's `get_owed()` equals `share + redistribution_share`
+  - the platform's token balance changed by `fee + dust + slash_platform_take`
+    (where `slash_platform_take` is the platform's portion of slashes plus
+    redistribution dust)
   - every loser's `(settled, warming, unbonding)` matches the simulation's
     buckets after the slash, which also covers the draining order
 
