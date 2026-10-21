@@ -53,6 +53,18 @@ should size `question_ids` batches so that the resulting read/write set stays
 within the network limits above; the resource sweep is the tool for measuring
 where that boundary sits for a given network configuration.
 
+## Review status
+
+- **Load-testing harness (#248)** — reviewed. The `bench_load_*` tests in
+  `src/test_load.rs` are `#[ignore]`d and have never been recorded as a run in
+  the repo; the Results table and the three throughput hypotheses in
+  `docs/LOAD_TESTING.md` (flat contract cost, admin-source `resolve()`
+  serialization, network-side ceiling) remain explicitly unconfirmed. This is
+  expected for an opt-in harness, not a defect: no committed run data exists to
+  contradict the documented claims, and the hypotheses are already labelled
+  unconfirmed. Closing #248 as not-a-bug; actually running the harness to close
+  out #119 is tracked there, not here.
+
 ## Not yet built
 
 Review the resulting diff to `bench/mainnet-soroban-settings.json` and, if the

@@ -29,7 +29,7 @@ injects RPC faults under the real question lifecycle and checks two claims:
 
 | layer | file | what it proves |
 |---|---|---|
-| contract | `src/test_rpc_chaos.rs` | For **every** combination of RPC outcomes on the backend's resolve/refund attempts and the keeper's `refund_timeout()`, the question ends terminal. Money moves exactly once, and late duplicates change nothing. No network is involved; this runs in `cargo test`. |
+| contract | `src/test_rpc_chaos.rs` | For **every** combination of RPC outcomes on the backend's resolve/refund attempts and the keeper's `refund_timeout()`, the question ends terminal. Money moves exactly once, and late duplicates change nothing. No network is involved; this is intended to run in `cargo test` (see §1.3 for its current status). |
 | network | `tools/chaos/proxy.mjs` | A seeded, fault-injecting HTTP proxy for Soroban JSON-RPC and Horizon. |
 | network | `tools/chaos/chaos.mjs lifecycle` | Drives submit, then payment verification, then dispatch, then `resolve()`/`refund()`, then `withdraw()`, then the keeper's `refund_timeout()`. All of it goes through the proxy, using the real `retry.js` (`--retry-module`). It checks both claims against the chain directly. |
 | backend | `tools/chaos/chaos.mjs proxy` + `verify` | The proxy in front of a **running arbiter-backend**, so faults hit the real `stellarClient.js` call sites. `verify` then checks that nothing is overdue. |
@@ -73,6 +73,16 @@ else.
 | `round6-lag.json` | only round 6's lag, no errors | shows whether 2 attempts inside the attempt timeout outlast the lag (see §4) |
 | `storm.json` | far beyond what 2 attempts absorb | many calls exhausted, and **still** nothing stuck: the stronger claim |
 | `blackout-sends.json` | nothing the backend sends lands | every question settled by the keeper's `refund_timeout()` |
+
+### 1.3 Contract test status
+
+The contract-level test in `src/test_rpc_chaos.rs` is **not** currently
+part of a green `cargo test` run on this branch: it has a compile error
+(`resolve()` is called with 3 arguments instead of 4), so it does not
+build until that call site is fixed. Treat the "runs in `cargo test`"
+claim above as the intended end state, not the current one. Once the
+`resolve()` call is corrected, the test compiles and runs as part of
+`cargo test` with no network access.
 
 ## 2. Running it
 
@@ -139,19 +149,6 @@ during the test, `--sweep --keeper-secret S...` acts as one. It still
 reports how many questions were overdue before the sweep: that number is
 what the backend and keeper left behind.
 
-**Testnet.** Point `--rpc`, `--friendbot` and `--passphrase` at testnet,
-using a contract initialized with a short `timeout_ledgers`. This is the
-only way to see the real lag on top of the injected faults (see §3.1).
+**Testnet.**
 
-## 3. The issue's open questions
-
-### 3.1 Real testnet or a local mock?
-
-**Both, on the same harness, for different jobs.** The proxy is agnostic
-about its upstream.
-
-- **Local quickstart behind the proxy (the default).** Every fault is
-  controlled and reproducible from a seed. That's what makes a regression
-  test possible. The 
-
-/* … truncated 6234 chars — edit only what you need near the top … */
+/* … truncated 539 chars — edit only what you need near the top … */
