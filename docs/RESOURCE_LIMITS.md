@@ -22,14 +22,22 @@ or flags when it has drifted from the live network. A protocol vote that
 tightens limits would therefore not be caught automatically until someone
 manually re-runs `scripts/fetch-network-settings.sh` and reviews the diff.
 
-This is a known, accepted limitation rather than a bug: the snapshot is only
-used to derive a conservative safety margin, and the margin is sized to absorb
-moderate tightening of the live limits. When limits are tightened beyond that
-margin, the failure surfaces as a test failure in the resource-limit checks,
-which is the intended signal to re-run the fetch script and re-derive the
-margin.
+  Note: `src/test_resources.rs` is not currently wired into the crate's module
+  tree, so the sweep is not compiled by a plain `cargo test` run. It is kept as
+  the reference harness for the limits below.
 
-To refresh the snapshot manually:
+- **Load tests** — `bench_load_*` in `src/test_load.rs`, documented in
+  `docs/LOAD_TESTING.md`.
+
+- **Network settings snapshot** — `bench/mainnet-soroban-settings.json`, refreshed
+  by `scripts/fetch-network-settings.sh`. That script writes
+  `bench/<network>-soroban-settings.json` (e.g. `bench/mainnet-soroban-settings.json`)
+  and is the source of the limits that `bench_resolve_resource_sweep` in
+  `src/test_resources.rs` re-prices measured cost against. To refresh the snapshot:
+
+  ```sh
+  scripts/fetch-network-settings.sh mainnet
+  ```
 
 ## Batch-view entry points
 

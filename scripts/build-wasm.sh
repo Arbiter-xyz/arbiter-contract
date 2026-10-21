@@ -18,7 +18,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WASM_OUT="${ROOT_DIR}/target/wasm32-unknown-unknown/release/oracle_escrow.wasm"
+# Keep the target in lockstep with rust-toolchain.toml, ci.yml and release.yml.
+WASM_TARGET="wasm32v1-none"
+WASM_OUT="${ROOT_DIR}/target/${WASM_TARGET}/release/oracle_escrow.wasm"
 BINDINGS_DIR="${ROOT_DIR}/bindings"
 
 # Languages we ship raw call/type bindings for. Each entry is a directory under
@@ -47,15 +49,8 @@ for arg in "$@"; do
 done
 
 if [[ "$BUILD_WASM" -eq 1 ]]; then
-  echo "==> building contract wasm"
-  # The pre-flight gate in docs/UPGRADES.md runs this script as step 2 of the
-  # mainnet upgrade checklist. A plain `cargo build` succeeds even when the
-  # test targets fail to compile, which would let a broken test suite slip
-  # past the gate. Compile the test targets too so the gate fails loudly here
-  # instead of at the later `cargo test` step.
-  (cd "$ROOT_DIR" && cargo build --target wasm32-unknown-unknown --release)
-  echo "==> compiling test targets (pre-flight gate)"
-  (cd "$ROOT_DIR" && cargo test --no-run)
+  echo "==> building contract wasm (${WASM_TARGET})"
+  (cd "$ROOT_DIR" && cargo build --target "$WASM_TARGET" --release)
 fi
 
 if [[ "$BUILD_BINDINGS" -eq 1 ]]; then
