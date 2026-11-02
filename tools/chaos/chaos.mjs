@@ -154,7 +154,7 @@ class Client {
 
   call(label, fn) {
     const callId = `${label}#${this.nextCall++}`;
-    return this.retry(instrument(this.attempts, { callId, label }, fn), {
+    return this.retry(instrument(this.attempts, { callId, label }, fn, { nonRetryable }), {
       attempts: this.o.attempts,
       timeoutMs: this.o.attemptTimeoutMs,
       baseDelayMs: this.o.baseDelayMs,

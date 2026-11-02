@@ -45,6 +45,17 @@ jobs:
       hash: ${{ steps.build.outputs.hash }}
     steps:
       - uses: actions/checkout@v4
+      # #268: the Dockerfile pins its base image by tag only, so a Debian
+      # security rebuild of that tag can silently change the underlying layers
+      # and break byte-for-byte reproducibility. Resolve the tag to its current
+      # digest here and record it in the job summary so the exact base image
+      # used for this build is captured as evidence alongside the hashes.
+      - name: Record resolved base image digest
+        run: |
+          base_image="$(awk '/^FROM /{print $2; exit}' Dockerfile)"
+          digest="$(docker buildx imagetools inspect "$base_image" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "### Base image (${GITHUB_SHA})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${base_image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
       - run: docker build -t arbiter-contract-build .
       - id: build
         run: |

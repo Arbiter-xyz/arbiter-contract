@@ -57,6 +57,12 @@ export async function referenceRetry(fn, { attempts = 2, timeoutMs = 8000, baseD
 /// `(fn, opts) => Promise`. retry.js's exact export isn't pinned by this
 /// repo, so this accepts the obvious shapes. If none fits, adapt it here:
 /// this function is the only place that knows about retry.js's API.
+///
+/// Because there's no version pin or contract test against the real
+/// retry.js, a signature change there would otherwise break the harness
+/// silently. So after resolving the export we probe it once with a
+/// throwaway call and fail loudly with a clear diagnostic if it doesn't
+/// behave like `(fn, opts) => Promise`.
 export async function loadRetry(modulePath) {
   if (!modulePath) return { name: "reference", retry: referenceRetry };
   const mod = await import(pathToFileURL(resolvePath(modulePath)).href);
@@ -64,17 +70,57 @@ export async function loadRetry(modulePath) {
   if (typeof f !== "function") {
     throw new Error(`${modulePath}: no withRetry/retry/default export; adapt loadRetry() in tools/chaos/retry.mjs`);
   }
-  return { name: modulePath, retry: (fn, opts) => f(fn, opts) };
+  const retry = (fn, opts) => f(fn, opts);
+  await assertRetryContract(modulePath, retry);
+  return { name: modulePath, retry };
+}
+
+/// Probes a loaded retry implementation against the contract the chaos
+/// harness relies on: `retry(fn, opts)` returns a Promise, calls `fn` at
+/// least once, and resolves with `fn`'s value. Throws a diagnostic naming
+/// the module and the observed shape if the contract is broken, so a
+/// retry.js signature change fails loudly instead of silently.
+async function assertRetryContract(modulePath, retry) {
+  let calls = 0;
+  const sentinel = Symbol("retry-contract-probe");
+  let result;
+  try {
+    result = await retry(() => {
+      calls++;
+      return sentinel;
+    }, { attempts: 1, timeoutMs: 1000, baseDelayMs: 0 });
+  } catch (e) {
+    throw new Error(
+      `${modulePath}: retry export does not satisfy the (fn, opts) => Promise contract ` +
+        `(probe threw: ${e?.message ?? e}); adapt loadRetry() in tools/chaos/retry.mjs`,
+    );
+  }
+  if (calls < 1) {
+    throw new Error(
+      `${modulePath}: retry export never invoked the wrapped fn; ` +
+        `expected (fn, opts) => Promise. Adapt loadRetry() in tools/chaos/retry.mjs`,
+    );
+  }
+  if (result !== sentinel) {
+    throw new Error(
+      `${modulePath}: retry export did not resolve with fn's return value ` +
+        `(got ${typeof result}); expected (fn, opts) => Promise. ` +
+        `Adapt loadRetry() in tools/chaos/retry.mjs`,
+    );
+  }
 }
 
 /// Wraps `fn` so every attempt is logged into `log` as
-/// { callId, label, attempt, start, end, ok, error }. All attempts of one
-/// retry() call share `callId`. `end` is when fn itself settled, which for
-/// a timed-out attempt can be after the retry layer gave up on it.
-export function instrument(log, { callId, label }, fn) {
+/// { callId, label, attempt, start, end, ok, error, nonRetryable }. All attempts
+/// of one retry() call share `callId`. `end` is when fn itself settled, which
+/// for a timed-out attempt can be after the retry layer gave up on it.
+///
+/// When `nonRetryable` is provided, each caught error is tested against it and
+/// the result is recorded on the attempt record.
+export function instrument(log, { callId, label }, fn, { nonRetryable = () => false } = {}) {
   let n = 0;
   return async (...args) => {
-    const rec = { callId, label, attempt: n++, start: Date.now(), end: null, ok: false, error: null };
+    const rec = { callId, label, attempt: n++, start: Date.now(), end: null, ok: false, error: null, nonRetryable: false };
     log.push(rec);
     try {
       const v = await fn(...args);
@@ -82,6 +128,7 @@ export function instrument(log, { callId, label }, fn) {
       return v;
     } catch (e) {
       rec.error = String(e?.message ?? e).slice(0, 120);
+      rec.nonRetryable = nonRetryable(e);
       throw e;
     } finally {
       rec.end = Date.now();
@@ -124,6 +171,11 @@ export function checkRetrySpec(log, { attempts, baseDelayMs, timeoutMs, jitterMs
     }
     if (recs.some((r, i) => r.ok && i < recs.length - 1)) {
       violations.push({ call: id, label, kind: "retried-after-success" });
+    }
+    // The first attempt's error was classified nonRetryable — the retry layer
+    // must throw immediately without further attempts.
+    if (recs.length > 1 && recs[0].nonRetryable) {
+      violations.push({ call: id, label, kind: "retried-after-nonRetryable", attempts: recs.length });
     }
   }
   return { calls: byCall.size, violations };

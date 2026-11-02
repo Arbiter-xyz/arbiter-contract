@@ -1205,14 +1205,19 @@ pub struct AdminRotationExecuted {
     pub new_admin: Address,
 }
 
-/// #48: emitted by migrate_balances() for each address whose Stake/Owed/Balance
-/// is moved to the target contract. Allows an off-chain orchestrator to confirm
-/// each address migrated and reconstruct a full audit trail.
+/// #48: emitted by migrate_balances() for each (address, token) whose
+/// Stake/Owed/Balance is moved to the target contract — one event per asset,
+/// so a non-default-asset balance is reported with its own token instead of
+/// being silently lumped into the default token's event. Allows an off-chain
+/// orchestrator to confirm each address migrated and reconstruct a full audit
+/// trail.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BalanceMigrated {
     #[topic]
     pub address: Address,
+    #[topic]
+    pub token: Address,
     pub stake: i128,
     pub owed: i128,
     pub balance: i128,
@@ -4923,17 +4928,23 @@ impl OracleEscrow {
             .get(&DataKey::ParticipantAt(index))
     }
 
-    /// Admin-only: moves a batch of addresses' default-asset Stake, Owed, and
-    /// Balance to `target` in one transaction. For each address:
-    /// 1. reads its Stake/Owed/Balance from this contract;
+    /// Admin-only: moves a batch of addresses' Stake, Owed, and Balance for
+    /// one or more assets to `target` in one transaction. `tokens` should
+    /// contain every admin-allowlisted asset the source may hold balances in
+    /// (the default token is always migrated automatically).  The target must
+    /// independently allowlist every non-default token being moved — the same
+    /// requirement [`migrate_pending()` / `import_question()`] impose.
+    /// For each (token, address):
+    /// 1. reads its scoped Stake/Owed/Balance from this contract;
     /// 2. pre-authorizes a token transfer to `target` for the sum;
     /// 3. calls target.import_balances() to record and receive the funds;
     /// 4. zeroes out the entries here;
     /// 5. emits a BalanceMigrated event.
     ///
     /// Any failure (unknown address, arithmetic overflow, target refusing the
-    /// import) reverts the ENTIRE batch — no partial moves. Returns the total
-    /// token amount transferred.
+    /// import or rejecting a non-allowlisted token) reverts the ENTIRE batch
+    /// — no partial moves. Returns the total amount transferred across all
+    /// tokens (unit-incoherent, but useful as a non-zero indicator).
     ///
     /// Prerequisite on `target`: target.set_migration_source(this_contract)
     /// must have been called before this, so target.import_balances() accepts
@@ -4942,6 +4953,7 @@ impl OracleEscrow {
     pub fn migrate_balances(
         env: Env,
         addresses: Vec<Address>,
+        tokens: Vec<Address>,
         target: Address,
     ) -> Result<i128, ContractError> {
         Self::require_admin(&env)?;
@@ -4950,92 +4962,116 @@ impl OracleEscrow {
             return Err(ContractError::InvalidBalanceMigrationTarget);
         }
 
-        let token_addr = Self::token(&env)?;
+        // Always migrate the default token first; then prepend every
+        // caller-supplied token that isn't the default (deduplicated).
+        let default_token = Self::token(&env)?;
+        let mut tokens_to_migrate: Vec<Address> = Vec::new(&env);
+        tokens_to_migrate.push_back(default_token.clone());
+        for token in tokens.iter() {
+            if *token == default_token {
+                continue;
+            }
+            let mut already = false;
+            for t in tokens_to_migrate.iter() {
+                if t == token {
+                    already = true;
+                    break;
+                }
+            }
+            if !already {
+                tokens_to_migrate.push_back(token);
+            }
+        }
+
         let transfer_fn = Symbol::new(&env, "transfer");
         let target_client = OracleEscrowClient::new(&env, &target);
         let mut total: i128 = 0;
 
-        for address in addresses.iter() {
-            let stake_key = DataKey::Stake(address.clone());
-            let owed_key = DataKey::Owed(address.clone());
-            let balance_key = DataKey::Balance(address.clone());
+        for token in tokens_to_migrate.iter() {
+            for address in addresses.iter() {
+                let stake_key = Self::stake_key(&env, &token, &address)?;
+                let owed_key = Self::owed_key(&env, &token, &address)?;
+                let balance_key = Self::balance_key(&env, &token, &address)?;
 
-            let stake_info: StakeInfo = env
-                .storage()
-                .persistent()
-                .get(&stake_key)
-                .unwrap_or_default();
-            let stake_amount = stake_info.settled
-                + stake_info.warming
-                + stake_info.unbonding;
+                let stake_info: StakeInfo = env
+                    .storage()
+                    .persistent()
+                    .get(&stake_key)
+                    .unwrap_or_default();
+                let stake_amount = stake_info.settled
+                    + stake_info.warming
+                    + stake_info.unbonding;
 
-            let owed_amount: i128 = env
-                .storage()
-                .persistent()
-                .get(&owed_key)
-                .unwrap_or(0);
+                let owed_amount: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&owed_key)
+                    .unwrap_or(0);
 
-            let balance_amount: i128 = env
-                .storage()
-                .persistent()
-                .get(&balance_key)
-                .unwrap_or(0);
+                let balance_amount: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&balance_key)
+                    .unwrap_or(0);
 
-            let sum = stake_amount
-                .checked_add(owed_amount)
-                .and_then(|s| s.checked_add(balance_amount))
-                .ok_or(ContractError::ArithmeticOverflow)?;
-
-            if sum > 0 {
-                // #200: zero out local entries BEFORE the external call
-                // below — checks-effects-interactions. A malicious or
-                // buggy target that reenters refund_timeout()/
-                // sweep_timeouts() mid-call must see these entries already
-                // cleared, not still holding the stale amounts.
-                if stake_amount > 0 {
-                    env.storage().persistent().remove(&stake_key);
-                }
-                if owed_amount > 0 {
-                    env.storage().persistent().remove(&owed_key);
-                }
-                if balance_amount > 0 {
-                    env.storage().persistent().remove(&balance_key);
-                }
-
-                // Pre-authorize exactly this amount so target.import_balances()
-                // can pull it from this contract's token balance.
-                env.authorize_as_current_contract(vec![
-                    &env,
-                    InvokerContractAuthEntry::Contract(SubContractInvocation {
-                        context: ContractContext {
-                            contract: token_addr.clone(),
-                            fn_name: transfer_fn.clone(),
-                            args: (this.clone(), target.clone(), sum).into_val(&env),
-                        },
-                        sub_invocations: Vec::new(&env),
-                    }),
-                ]);
-                target_client.import_balances(
-                    &this,
-                    &token_addr,
-                    &address,
-                    &stake_amount,
-                    &owed_amount,
-                    &balance_amount,
-                );
-                total = total
-                    .checked_add(sum)
+                let sum = stake_amount
+                    .checked_add(owed_amount)
+                    .and_then(|s| s.checked_add(balance_amount))
                     .ok_or(ContractError::ArithmeticOverflow)?;
-            }
 
-            BalanceMigrated {
-                address,
-                stake: stake_amount,
-                owed: owed_amount,
-                balance: balance_amount,
-                target: target.clone(),
+                if sum > 0 {
+                    // #200: zero out local entries BEFORE the external call
+                    // below — checks-effects-interactions. A malicious or
+                    // buggy target that reenters refund_timeout()/
+                    // sweep_timeouts() mid-call must see these entries already
+                    // cleared, not still holding the stale amounts.
+                    if stake_amount > 0 {
+                        env.storage().persistent().remove(&stake_key);
+                    }
+                    if owed_amount > 0 {
+                        env.storage().persistent().remove(&owed_key);
+                    }
+                    if balance_amount > 0 {
+                        env.storage().persistent().remove(&balance_key);
+                    }
+
+                    // Pre-authorize exactly this amount so
+                    // target.import_balances() can pull it from this
+                    // contract's token balance.
+                    env.authorize_as_current_contract(vec![
+                        &env,
+                        InvokerContractAuthEntry::Contract(SubContractInvocation {
+                            context: ContractContext {
+                                contract: token.clone(),
+                                fn_name: transfer_fn.clone(),
+                                args: (this.clone(), target.clone(), sum).into_val(&env),
+                            },
+                            sub_invocations: Vec::new(&env),
+                        }),
+                    ]);
+                    target_client.import_balances(
+                        &this,
+                        &token,
+                        &address,
+                        &stake_amount,
+                        &owed_amount,
+                        &balance_amount,
+                    );
+                    total = total
+                        .checked_add(sum)
+                        .ok_or(ContractError::ArithmeticOverflow)?;
+                }
+
+                BalanceMigrated {
+                    address,
+                    token: token.clone(),
+                    stake: stake_amount,
+                    owed: owed_amount,
+                    balance: balance_amount,
+                    target: target.clone(),
+                }
+                .publish(&env);
             }
-            .publish(&env);
         }
 
         Self::bump_instance(&env);
@@ -5044,10 +5080,15 @@ impl OracleEscrow {
 
     /// Called BY a source contract's migrate_balances(), never directly by a
     /// person. Mirrors import_question(): only the contract named as
-    /// MigrationSource may call it. For each address it credits the given
-    /// Stake (as settled stake, no warmup), Owed, and Balance amounts, then
-    /// pulls the corresponding token transfer from the source. Any failure
-    /// reverts the whole import.
+    /// MigrationSource may call it. `token` must be this contract's default
+    /// token or an independently admin-allowlisted asset — the same per-token
+    /// requirement migrate_pending()/import_question() impose — so the target
+    /// must allowlist every asset whose balances are being moved. For each
+    /// address it credits the given Stake (as settled stake, no warmup),
+    /// Owed, and Balance amounts in that token's scoped storage (the default
+    /// token keeps its original DataKey::* slots), then pulls the
+    /// corresponding token transfer from the source. Any failure reverts the
+    /// whole import.
     #[allow(clippy::too_many_arguments)]
     pub fn import_balances(
         env: Env,
@@ -5067,13 +5108,16 @@ impl OracleEscrow {
             return Err(ContractError::MigrationNotAuthorized);
         }
         source.require_auth();
-        let default_token = Self::token(&env)?;
-        if token != default_token {
-            return Err(ContractError::TokenMismatch);
-        }
         if stake_amount < 0 || owed_amount < 0 || balance_amount < 0 {
             return Err(ContractError::InvalidAmount);
         }
+        // #352: previously this hard-rejected every token except the target's
+        // own default, so a non-default-asset balance could never be migrated
+        // without reverting. Requiring it to be the default OR admin-allowlisted
+        // here mirrors import_question() and keeps the fail-loud guarantee: a
+        // token the target never allowed makes the whole batch revert instead
+        // of dropping the balance silently.
+        Self::require_allowed_token(&env, &token)?;
         let sum = stake_amount
             .checked_add(owed_amount)
             .and_then(|s| s.checked_add(balance_amount))
@@ -5090,7 +5134,7 @@ impl OracleEscrow {
 
         // Credit stake (as settled — no warmup reset on migrated stake).
         if stake_amount > 0 {
-            let stake_key = DataKey::Stake(address.clone());
+            let stake_key = Self::stake_key(&env, &token, &address)?;
             let mut info: StakeInfo = env
                 .storage()
                 .persistent()
@@ -5105,7 +5149,7 @@ impl OracleEscrow {
         }
         // Credit owed.
         if owed_amount > 0 {
-            let owed_key = DataKey::Owed(address.clone());
+            let owed_key = Self::owed_key(&env, &token, &address)?;
             let existing: i128 = env.storage().persistent().get(&owed_key).unwrap_or(0);
             let updated = existing
                 .checked_add(owed_amount)
@@ -5115,7 +5159,7 @@ impl OracleEscrow {
         }
         // Credit balance.
         if balance_amount > 0 {
-            let bal_key = DataKey::Balance(address.clone());
+            let bal_key = Self::balance_key(&env, &token, &address)?;
             let existing: i128 = env.storage().persistent().get(&bal_key).unwrap_or(0);
             let updated = existing
                 .checked_add(balance_amount)

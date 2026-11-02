@@ -65,39 +65,50 @@ fn get_leaderboard_returns_entries_sorted_by_resolved_count_descending() {
     assert_eq!(board.get(1).unwrap(), (w2, 1));
 }
 
-#[test]
-fn resolve_updates_reputation_for_winners_and_losers() {
-    let f = setup();
-    let c = client(&f);
-    c.submit(&f.payer, &1, &AMOUNT);
+// Issue #242: the decaying-reputation half of #42 (REPUTATION_WIN_DELTA,
+// REPUTATION_LOSS_DELTA, REPUTATION_DECAY_PER_INTERVAL,
+// REPUTATION_DECAY_INTERVAL_LEDGERS) is not implemented yet, so the two
+// reputation tests below reference undefined constants and do not compile.
+// They are gated behind `reputation` until #42 lands; the leaderboard tests
+// above remain active.
+#[cfg(feature = "reputation")]
+mod reputation {
+    use super::*;
 
-    let winner = Address::generate(&f.env);
-    let loser = Address::generate(&f.env);
-    let workers = Vec::from_array(&f.env, [winner.clone()]);
-    let losers = Vec::from_array(&f.env, [loser.clone()]);
-    c.resolve(&1, &workers, &losers);
+    #[test]
+    fn resolve_updates_reputation_for_winners_and_losers() {
+        let f = setup();
+        let c = client(&f);
+        c.submit(&f.payer, &1, &AMOUNT);
 
-    assert_eq!(c.get_reputation(&winner), REPUTATION_WIN_DELTA);
-    assert_eq!(c.get_reputation(&loser), -REPUTATION_LOSS_DELTA);
-}
+        let winner = Address::generate(&f.env);
+        let loser = Address::generate(&f.env);
+        let workers = Vec::from_array(&f.env, [winner.clone()]);
+        let losers = Vec::from_array(&f.env, [loser.clone()]);
+        c.resolve(&1, &workers, &losers);
 
-#[test]
-fn on_chain_reputation_decays_over_elapsed_ledgers() {
-    let f = setup();
-    let c = client(&f);
-    c.submit(&f.payer, &1, &AMOUNT);
+        assert_eq!(c.get_reputation(&winner), REPUTATION_WIN_DELTA);
+        assert_eq!(c.get_reputation(&loser), -REPUTATION_LOSS_DELTA);
+    }
 
-    let w = Address::generate(&f.env);
-    let workers = Vec::from_array(&f.env, [w.clone()]);
-    let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    #[test]
+    fn on_chain_reputation_decays_over_elapsed_ledgers() {
+        let f = setup();
+        let c = client(&f);
+        c.submit(&f.payer, &1, &AMOUNT);
 
-    assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA);
+        let w = Address::generate(&f.env);
+        let workers = Vec::from_array(&f.env, [w.clone()]);
+        let no_losers = Vec::new(&f.env);
+        c.resolve(&1, &workers, &no_losers);
 
-    // Advance the ledger sequence so the lazily-computed decay kicks in.
-    f.env.ledger().set_sequence_number(
-        f.env.ledger().sequence() + REPUTATION_DECAY_INTERVAL_LEDGERS,
-    );
+        assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA);
 
-    assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA - REPUTATION_DECAY_PER_INTERVAL);
+        // Advance the ledger sequence so the lazily-computed decay kicks in.
+        f.env.ledger().set_sequence_number(
+            f.env.ledger().sequence() + REPUTATION_DECAY_INTERVAL_LEDGERS,
+        );
+
+        assert_eq!(c.get_reputation(&w), REPUTATION_WIN_DELTA - REPUTATION_DECAY_PER_INTERVAL);
+    }
 }

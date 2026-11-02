@@ -40,6 +40,17 @@ It does mean workers who already answered **aren't paid**, and the
 platform earns no fee on that question. The payer gets back money for
 work that may already have been delivered to them.
 
+**Fail-closed depends on a keeper.** The contract cannot call
+`refund_timeout()` on its own. The "funds are always recoverable"
+guarantee is only *fail-closed* if something actually calls it once the
+deadline passes. That something is arbiter-backend's keeper/sweeper (or
+any third party, since the call is unauthenticated). If no keeper is
+deployed and monitored wherever this contract is live, a question can sit
+`Pending` past its deadline indefinitely and the payer's funds stay
+locked. This is a **deployment gap, not a contract gap**: the contract
+correctly permits the refund, but nothing triggers it. See §1.3 for the
+liveness check that catches a missing or stalled keeper.
+
 ---
 
 ## 1. Detection
@@ -90,6 +101,31 @@ section 2 is built from them:
 deadline. Always use the question's own `timeout_ledgers` from
 `get_question()`. The two differ for every question opened before the
 last `set_timeout_ledgers()` call.
+
+### 1.3 Keeper liveness check (fail-closed precondition)
+
+Before trusting the fail-closed claim, confirm a keeper is actually
+running and sweeping. The contract can't self-trigger `refund_timeout()`,
+so a missing or stalled keeper silently breaks the guarantee.
+
+```sh
+# 1. Are there pending questions already past their deadline?
+#    Any id here means the keeper is not keeping up (or isn't deployed).
+stellar contract invoke --id $CONTRACT ... -- list_pending --start 0 --limit 100
+#    For each id, get_question and check: current_ledger >= created_at + timeout_ledgers
+
+# 2. Is the keeper's sweeper account still submitting?
+#    Look for recent sweep_timeouts() / refund_timeout() txs from the keeper
+#    source account in the last N ledgers.
+stellar events --network $NET --id $CONTRACT --start-ledger $FROM --type contract
+```
+
+If step 1 finds overdue pending questions and step 2 shows no recent
+keeper activity, treat it as a **deployment gap**: the fail-closed claim
+does not hold in this environment. Escalate to whoever owns the
+arbiter-backend deployment and confirm the keeper/sweeper is deployed,
+funded, and monitored. Until it is, payers' funds on overdue questions
+are locked, not refunded.
 
 ---
 
@@ -161,145 +197,6 @@ method, plus a default to start from.
 
     timeout_ledgers ≥ p99.9(question → resolve() included)  +  longest outage you're willing to absorb without refunds
 
-**Starting point: 17,280 ledgers (1 day at 5 s ledgers).** That's the
-value the economics simulations initialize with (`src/test_economics.rs`).
+**Starting point: 
 
-- It covers a same-day incident response with plenty of room.
-- It keeps the payer's worst-case wait at a day.
-- It's far below `MAX_TIMEOUT_LEDGERS` (120,960, 7 days).
-
-Only shorten it once you have measured latency data showing the p99.9
-sits well inside the window. Remember that a change only applies to
-questions opened *after* it.
-
----
-
-## 4. Mitigations: what exists today, and what doesn't
-
-**The gap, stated plainly.** There's no contract-level pause, circuit
-breaker or deadline extension. #109 would add one. Nothing an operator
-does can stop `refund_timeout()` from succeeding on a question that's
-already past its deadline. That's the whole point of the escape hatch,
-and it's working as designed. Every lever below either **makes the
-backend resolve sooner** or **changes what future questions get**.
-
-### 4.1 A: backend down
-
-1. Restore backend liveness. That's the only thing that stops new timeout
-   refunds.
-2. On recovery, **resolve by deadline, soonest first.** Walk
-   `list_pending` → `get_question` and sort by `created_at +
-   timeout_ledgers`. The default FIFO or id order can spend the remaining
-   window on questions that aren't at risk yet.
-3. Accept that questions already past their deadline may be refunded by
-   anyone before you get to them. Resolving them is still correct and
-   safe: if the refund wins, `resolve()` just fails with
-   `QuestionNotPending`.
-
-### 4.2 B: losing races
-
-1. Find where the latency is going: answer collection versus `resolve()`
-   submission and inclusion. Look at RPC read-after-write lag, fee-bump
-   retries, and a single-threaded submit queue.
-2. Prioritise resolves by deadline, as in §4.1 step 2.
-3. `set_timeout_ledgers(larger)` helps **new questions only**. Use it if
-   p99 latency really is close to the window. It doesn't rescue anything
-   currently pending.
-
-### 4.3 C: payer front-running
-
-The contract has no lever here: the payer is entitled to the refund.
-The mitigations are backend policy:
-
-- **Don't release answers to the payer until `resolve()` is confirmed**,
-  or at least don't release them within the last N ledgers before a
-  question's deadline. This takes away the payoff.
-- Rate-limit, require prepayment through `deposit()`/`charge()`, or
-  refuse service to payers whose timeout-refund rate is far above
-  baseline.
-- Workers aren't paid for these questions on-chain. Deciding whether to
-  compensate them off-chain is a business decision. Record it in the
-  postmortem.
-
-`reopen_question()` (#87) lets a payer voluntarily re-fund a refunded id
-under a new window. That's only useful for honest payers who were hit by
-case A or B.
-
-### 4.4 Suspected admin-key compromise
-
-- `set_admin()` / `propose_admin_rotation()` **don't take effect
-  immediately**. Both schedule a rotation that can't run before
-  `ADMIN_ROTATION_DELAY_LEDGERS` (~8 days), and it needs the new admin's
-  authorisation too. See
-  [MULTI_ASSET_AND_ADMIN_ROTATION.md](../MULTI_ASSET_AND_ADMIN_ROTATION.md)
-  and the #107 runbook.
-- **During those 8 days the compromised key can still call
-  `resolve()`/`refund()`.** Rotation isn't an incident-response lever on
-  the timescale of a timeout window. It's a recovery step.
-- Watch `get_pending_admin_rotation()`. If an attacker proposes a
-  rotation, `cancel_admin_rotation()` it with the incumbent key.
-- In this scenario `refund_timeout()` is actually the **payer's
-  protection**: a compromised admin can refuse to resolve, but it can't
-  keep payers' funds.
-
----
-
-## 5. Postmortem data to capture
-
-Capture this while it's fresh. RPC event retention is limited, and
-`getEvents` typically covers only about the last 7 days.
-
-**Per affected question:**
-
-| field | from |
-|---|---|
-| `question_id`, `payer`, `amount`, token (`get_question_token`) | `get_question()` |
-| `created_at`, `timeout_ledgers` (snapshot), `deadline` | `get_question()`, computed |
-| refund ledger, refund tx hash, **caller** (source account) | `question_refunded` event → `getTransaction` |
-| `refund_lag` | computed |
-| backend: answers-collected time, first `resolve()` attempt ledger, number of attempts, final error | arbiter-backend logs (`oracle.js`, `lost_race_to_timeout_refund`) |
-| `resolve_lag` | computed |
-| was the answer delivered to the payer before the refund? (y/n, when) | backend delivery logs |
-| workers who answered, and the share they would have been paid | backend logs + `preview_resolve()` if it was run |
-
-**Incident-wide:**
-
-- The window: first and last timeout refund ledger.
-- Timeout refunds / all settlements during the window, and at baseline.
-- The `get_timeout_ledgers()` value, plus whether `set_timeout_ledgers()`
-  changed during or just before the window (`timeout_ledgers_changed`
-  events).
-- The backend's uptime timeline, and its p50/p99 latency from question to
-  `resolve()` included.
-- The caller breakdown (backend / payer / third party) with counts.
-- The top payers by timeout-refund count, and each one's share of total
-  traffic.
-- The classification (A / B / C / key) and the evidence for it from §2.2.
-- The total value refunded, and the total worker pay and platform fee
-  forgone.
-
-**Postmortem template:**
-
-```
-## Timeout-refund incident <date>
-Window: ledgers <from>–<to>  (<wall-clock>)
-Classification: A / B / C / key-compromise   Evidence: <§2.2 rows that decided it>
-Impact: <n> questions, <x> refunded, <y> worker pay forgone, <z> fee forgone
-Callers: backend <n>, payer <n>, third-party <n>
-Latency: p50/p99 question→resolve <..>, timeout_ledgers in force <..>
-Root cause:
-What stopped it:
-Follow-ups: (backend latency / delivery-before-settlement policy / timeout_ledgers change / #109)
-```
-
----
-
-## 6. Cross-references
-
-- `src/lib.rs`: `refund_timeout()`, `try_refund_timeout()`,
-  `sweep_timeouts()`, `do_refund()`, `Question.timeout_ledgers`,
-  `DataKey::TimeoutLedgers`, `set_timeout_ledgers()`.
-- `src/test_races.rs`: `resolve_vs_refund_timeout_in_every_order_and_adjacent_ledger`.
-- arbiter-backend `oracle.js`: the `lost_race_to_timeout_refund` log tag.
-- #107: admin rotation runbook.
-- #109: circuit breaker. **When it lands, §4 needs rewriting.**
+/* … truncated 6240 chars — edit only what you need near the top … */

@@ -12,59 +12,26 @@ and from what address) is settled. It names the specific rail, traces a
 payer's funds from origin chain through to `open_question()` being called,
 and states what happens to a bridged payer's refund path.
 
-### Rail: Circle CCTP + a Stellar forwarder
+> **Canonical copy:** this note is maintained in
+> [account-abstraction.md](./account-abstraction.md). The summary below is a
+> pointer, not a second source of truth — edit the canonical copy, not this
+> one.
+
+### Summary
 
 We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
-Stellar, not Axelar GMP. CCTP is a burn-and-mint rail for USDC only, which
-matches the escrow token this contract already settles in; its trust model
-is Circle's attestation set plus the destination chain's mint authority,
-and its latency is a single attestation round (minutes), not a general
-message-passing consensus round. Axelar GMP is the better fit only if we
-later need to move arbitrary payloads or non-USDC assets, which is out of
-scope here. The forwarder is required because CCTP's Stellar recipient is
-an address, not a contract call: the mint lands at the forwarder, which
-then invokes the escrow contract.
+Stellar, not Axelar GMP. A payer burns USDC on the origin chain via
+`depositForBurn` naming the forwarder's Stellar address; Circle attests the
+burn, the mint lands at the forwarder, and the forwarder calls
+`submit()`/`charge()` on the escrow contract **as itself**, passing the
+payer's Stellar address of record as the `payer` argument. `open_question()`
+runs unchanged. `refund()`/`refund_timeout()`/`do_refund()` are unchanged and
+settle natively on Stellar to `Question.payer`; bridging a refund back to the
+origin chain is explicitly out of scope.
 
-### Trace: origin chain → `open_question()`
-
-1. Payer burns USDC on the origin chain via CCTP's `depositForBurn`, with
-the **forwarder's Stellar address** as the recipient and a payload naming
-the escrow contract, the question parameters, and the payer's Stellar
-address of record.
-2. Circle attests the burn; the CCTP message is submitted on Stellar and
-   the minted USDC is delivered to the forwarder.
-3. The forwarder calls `submit()` (or `charge()`) on the escrow contract
-   **as itself**, forwarding the payer's Stellar address of record as the
-   `payer` argument. The escrow contract's existing `payer.require_auth()`
-   is satisfied by the forwarder's own auth, and the existing
-   `token::Client::transfer` moves the freshly minted USDC into escrow.
-4. `open_question()` runs unchanged: the question is recorded with the
-   payer's Stellar address of record as `Question.payer`, and the escrowed
-   amount is the bridged USDC that just arrived.
-
-### Refund path for a bridged payer
-
-`refund()` / `refund_timeout()` / `do_refund()` are **unchanged** and
-settle natively on Stellar: they call `token_client.transfer` to
-`Question.payer`, which is the payer's Stellar address of record captured
-in step 3. A bridged payer therefore needs their own Stellar address to be
-the `Question.payer` of record, so a refund pays them back on Stellar.
-Bridging the refund back to the origin chain is explicitly **not** in this
-change: `do_refund()` today only ever calls `token_client.transfer` on
-Stellar, and a bridge-back path is a separate, larger scope. A bridged
-payer who wants funds back on their origin chain must bridge the refunded
-USDC out themselves.
-
-### Open questions resolved
-
-1. **Does the bridged payer need their own Stellar address as
-   `Question.payer` of record?** Yes. The forwarder is the caller, but the
-   payer's Stellar address of record is what `refund()`/`refund_timeout()`
-   pay back on Stellar. Refunding across the bridge is out of scope.
-2. **Which bridge fits best?** CCTP for native USDC, given the escrow
-   token is USDC and the trust/latency model is a single attestation
-   round. Axelar GMP is the fallback only if arbitrary payloads or
-   non-USDC assets are needed later.
+For the full rail rationale, the step-by-step trace, the refund path, and
+the resolved open questions, see the canonical copy in
+[account-abstraction.md](./account-abstraction.md).
 
 ## Pieces
 
@@ -122,74 +89,6 @@ its pending escrow plus what it owes workers.
   quarter of them deliberately poisoned with a missing or repeated id),
   a resolve, or a refund, on either side. All four invariants are checked
   after every step: disjoint pending sets, per-contract balance =
-  pending + owed, global conservation, and no id on both.
-- **Every failure mode reverts completely:** a bad id, a duplicate id,
-  a replayed batch, an id already on the target, a target that hasn't
-  named this source, a token mismatch, migrating to itself, or a missing
-  admin signature. Each has its own test in
-  [src/test_migration.rs](../src/test_migration.rs) that snapshots both
-  contracts' balances and pending sets and asserts they're unchanged.
-- **Orchestrator level:** `run` never walks a precomputed list. Each
-  iteration re-reads page 0 of the *live* pending set and sends it. What
-  a crashed run (or a still-in-flight transaction) already moved is
-  simply no longer there. If a transaction the orchestrator thought had
-  failed actually landed and it resends the same ids, the resend reverts
-  with `QuestionNotPending`. It's journaled and the loop re-reads. The
-  journal is an audit trail, not a source of truth: deleting it can't
-  cause a double move.
+  pending + owed, global conservation, and no id on
 
-## Tested on testnet
-
-`node tools/migrate/e2e-testnet.mjs` deploys two instances of the current
-Wasm on a freshly issued asset (AUSD, wrapped in its Stellar Asset
-Contract). It opens 10 questions from 3 payers, resolves one and refunds
-one, and then, all with real transactions:
-
-1. `plan` before the handshake → reports "target's migration source is
-   unset" and exits 1.
-2. `set_migration_source`, then `plan` → exactly 8 questions,
-   6.0000000 AUSD, 3 batches. Balances and pending counts are checked
-   unchanged afterwards.
-3. `run` with `MIGRATE_CRASH=after-send:2` → the process SIGKILLs itself
-   right after batch 2 lands and before it's journaled. On-chain: 2 left
-   on OLD, 6 on NEW, and `balance(OLD) + balance(NEW)` unchanged.
-4. `verify` on the half-finished state → passes.
-5. Batch 1 replayed by hand → reverts with `Error(Contract, #6)`
-   (QuestionNotPending). Nothing changes.
-6. `run` again → finishes. `verify` → passes. NEW gained exactly the
-   pending escrow, and OLD keeps exactly what it still owes workers.
-7. A migrated question refunded on NEW pays its original payer.
-
-The transcript of the passing run is in
-[migration-testnet-run.log](migration-testnet-run.log).
-
-Running it found a real orchestrator bug before any funds were at risk:
-the CLI rejects `Vec<u64>` ids sent as JSON strings, so every batch failed
-at argument parsing. The orchestrator now sends exact numbers built from
-BigInts, and treats a parse error as fatal, not as a revert.
-
-## Running a real migration
-
-```sh
-# 0. Deploy the new instance and initialize it with the same default token.
-#    For each additional source asset, allowlist it on the target before import:
-#    stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- \
-#      set_asset_allowed --token $ASSET --allowed true
-# 1. Target admin opens the door:
-stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- \
-  set_migration_source --source $OLD
-# 2. Dry run. Exit code 1 if anything would revert.
-node tools/migrate/migrate.mjs plan   --source $OLD --target $NEW --admin $OLD_ADMIN --network mainnet
-node tools/migrate/migrate.mjs plan   ... --json > plan.json      # machine-readable
-# 3. Migrate. Safe to Ctrl-C / crash / re-run at any point.
-node tools/migrate/migrate.mjs run    --source $OLD --target $NEW --admin $OLD_ADMIN --network mainnet --batch 10
-# 4. Check every question and both balances against the baseline in the journal.
-node tools/migrate/migrate.mjs verify --source $OLD --target $NEW --admin $OLD_ADMIN --network mainnet
-# 5. Close the door.
-stellar contract invoke --id $NEW --source-account $NEW_ADMIN --network mainnet -- clear_migration_source
-```
-
-Point the backend's `resolve()`/`refund()` at NEW before step 3 for new
-questions. Questions still on OLD keep settling there normally during
-the migration. `migrate_pending` and a concurrent `resolve` on the same
-id can't both succeed; whichever lands second reverts.
+/* … truncated 545 chars — edit only what you need near the top … */

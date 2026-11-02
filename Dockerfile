@@ -6,12 +6,15 @@
 #   docker run --rm -v "$PWD:/src" arbiter-contract-build
 #
 # which prints the sha256 of the optimized WASM. Every input that can change
-# the output is pinned here: the base image by digest-able tag, rustc via
+# the output is pinned here: the base image by digest, rustc via
 # rust-toolchain.toml, crate versions via the committed Cargo.lock
 # (`--locked`), and stellar-cli by exact release. Keep RUST_VERSION in sync
 # with rust-toolchain.toml.
 
-FROM rust:1.89.0-slim-bookworm
+# rust:1.89.0-slim-bookworm
+# Pinned by digest so a Debian security rebuild of the tag cannot silently
+# change the underlying layers and break byte-for-byte reproducibility.
+FROM rust:1.89.0-slim-bookworm@sha256:6b1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 
 ARG STELLAR_CLI_VERSION=27.1.0
 

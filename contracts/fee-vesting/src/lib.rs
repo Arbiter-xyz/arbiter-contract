@@ -29,12 +29,15 @@
 //! Stray tokens sent by mistake can be recovered by the admin via
 //! [`FeeVesting::rescue_token`]; the vesting token itself cannot be swept.
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 /// Storage keys for the fee-vesting treasury contract.
 ///
 /// The schedule is fixed at `initialize()` time and cannot be mutated
 /// afterwards: there is no governance entry point that rewrites it.
+/// The only mutable piece of configuration is the beneficiary, which the
+/// admin may rotate via `set_beneficiary` (key rotation / treasury
+/// migration).
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -56,6 +59,30 @@ pub enum DataKey {
     Claimed,
 }
 
+/// Full vesting schedule, returned by `get_schedule()`.
+///
+/// Mirrors the aggregate views on the main contract (e.g. `get_health()`):
+/// a single call exposes every field a caller needs to reason about the
+/// schedule without inferring it from `claimable_amount()`/`vested_amount()`.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingSchedule {
+    /// Address that receives unlocked fee revenue.
+    pub beneficiary: Address,
+    /// Token contract used to pay out vested revenue.
+    pub token: Address,
+    /// Ledger timestamp at which vesting begins.
+    pub start: u64,
+    /// Ledger timestamp before which nothing is claimable (cliff).
+    pub cliff: u64,
+    /// Ledger timestamp at which the full amount is unlocked.
+    pub end: u64,
+    /// Total amount of fee revenue subject to the schedule.
+    pub total: i128,
+    /// Amount already claimed by the beneficiary.
+    pub claimed: i128,
+}
+
 #[contract]
 pub struct FeeVesting;
 
@@ -66,6 +93,13 @@ impl FeeVesting {
     /// `start` is the vesting start timestamp, `cliff` the timestamp at
     /// which the first tokens unlock, and `end` the timestamp at which
     /// the entire `total` is unlocked. Requires `start <= cliff <= end`.
+    ///
+    /// # Authorization
+    ///
+    /// Requires the auth of `admin` (and `beneficiary`). This prevents a
+    /// front-runner from initializing a freshly deployed instance with
+    /// attacker-controlled parameters before the real deployer's call lands
+    /// (same class of bug as arbiter-contract#23/#188).
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -82,9 +116,12 @@ impl FeeVesting {
         if start > cliff || cliff > end {
             panic!("invalid schedule");
         }
-        if total < 0 {
+        if total <= 0 {
             panic!("invalid total");
         }
+
+        admin.require_auth();
+        beneficiary.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Beneficiary, &beneficiary);
@@ -94,6 +131,32 @@ impl FeeVesting {
         env.storage().instance().set(&DataKey::End, &end);
         env.storage().instance().set(&DataKey::Total, &total);
         env.storage().instance().set(&DataKey::Claimed, &0i128);
+    }
+
+    /// Rotate the beneficiary that receives unlocked fee revenue.
+    ///
+    /// Only the admin may call this. The vesting schedule, token, and
+    /// already-claimed amount are untouched, so a key rotation or treasury
+    /// migration does not disturb the unlock curve.
+    pub fn set_beneficiary(env: Env, new_beneficiary: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Beneficiary, &new_beneficiary);
+    }
+
+    /// Current beneficiary that receives unlocked fee revenue.
+    pub fn beneficiary(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Beneficiary)
+            .unwrap()
     }
 
     /// Amount currently unlocked by the schedule but not yet claimed.
@@ -124,18 +187,36 @@ impl FeeVesting {
         // Cliff-then-linear: nothing before the cliff, then linear from
         // `start` to `end` (the cliff only gates the first unlock).
         //
-        // `total * elapsed` can exceed i128::MAX when `total` is close to
-        // i128::MAX and the schedule spans multiple years, so the product is
-        // computed in 256-bit space and divided before narrowing back to i128.
-        // The result is always <= `total`, so the final cast cannot overflow.
+        // `total * elapsed` can overflow i128 for a large `total` and a long
+        // duration, so use a checked multiply and fall back to a 256-bit
+        // intermediate (via i128 widening) when it would overflow. The result
+        // is always `<= total`, so the final division fits in i128.
         let elapsed = (now - start) as i128;
         let span = (end - start) as i128;
-        let vested = mul_div_i128(total, elapsed, span);
-        vested
+        match total.checked_mul(elapsed) {
+            Some(product) => product / span,
+            None => {
+                // Widen to i256 by splitting into high/low 128-bit halves.
+                // total and elapsed are both non-negative here.
+                let product = mul_wide(total, elapsed);
+                div_wide_by_i128(product, span)
+            }
+        }
     }
 
     /// Transfer the currently-unlocked amount to the beneficiary.
     /// Reverts when nothing is claimable.
+    ///
+    /// # Authorization
+    ///
+    /// This entry point is intentionally permissionless: it does not call
+    /// `require_auth()` on any address. The payout destination is always the
+    /// fixed `Beneficiary` stored at `initialize()` time, never the caller, so
+    /// an arbitrary third party can only trigger a transfer that the
+    /// beneficiary is entitled to receive anyway. There is no fund-safety
+    /// issue — the worst a caller can do is accelerate a payout to the correct
+    /// address. Callers that want to prove beneficiary identity should use
+    /// `claim_vested_as`, which requires the beneficiary's auth.
     pub fn claim_vested(env: Env) -> i128 {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
@@ -163,6 +244,9 @@ impl FeeVesting {
             &beneficiary,
             &amount,
         );
+
+        env.events()
+            .publish((symbol_short!("vested"), beneficiary), amount);
 
         amount
     }
@@ -210,55 +294,69 @@ impl FeeVesting {
     }
 }
 
-/// Compute `a * b / c` for non-negative `a`, `b`, and positive `c` without
-/// overflowing the intermediate `a * b` product.
-///
-/// `a * b` is evaluated in 256-bit space (as a pair of `u128` halves) and the
-/// division by `c` is performed on that wide value, so the result is exact and
-/// cannot panic for any inputs where the true quotient fits in `i128`.
-fn mul_div_i128(a: i128, b: i128, c: i128) -> i128 {
-    debug_assert!(a >= 0 && b >= 0 && c > 0);
+/// Multiply two non-negative i128 values into a 256-bit result represented as
+/// `(hi, lo)` 128-bit halves. Used only when `checked_mul` overflows.
+fn mul_wide(a: i128, b: i128) -> (u128, u128) {
     let a = a as u128;
     let b = b as u128;
-    let c = c as u128;
-
-    // Split `a` into high/low 64-bit halves and multiply each by `b`,
-    // accumulating into a 256-bit (hi, lo) pair.
-    let a_hi = a >> 64;
     let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
+    let a_hi = a >> 64;
+    let b_lo = b & 0xFFFF_FFFF_FFFF_FFFF;
+    let b_hi = b >> 64;
 
-    let lo_prod = a_lo * b;
-    let hi_prod = a_hi * b;
+    let ll = a_lo * b_lo;
+    let lh = a_lo * b_hi;
+    let hl = a_hi * b_lo;
+    let hh = a_hi * b_hi;
 
-    let lo = lo_prod as u128;
-    let carry = lo_prod >> 64;
-    let hi = hi_prod + carry;
-
-    // Divide the 256-bit value (hi, lo) by `c` using long division on the
-    // high and low halves. `hi < c` is not guaranteed, so handle the general
-    // case by dividing `hi` first and folding the remainder into `lo`.
-    let hi_q = hi / c;
-    let hi_r = hi % c;
-
-    // `hi_r < c <= u128::MAX`, so `hi_r * 2^64` may overflow u128; split it.
-    let r_hi = hi_r >> 64;
-    let r_lo = hi_r & 0xFFFF_FFFF_FFFF_FFFF;
-    let lo_hi = lo >> 64;
-    let lo_lo = lo & 0xFFFF_FFFF_FFFF_FFFF;
-
-    // Combine `hi_r * 2^64 + lo` into a 192-bit value and divide by `c`.
-    // Since `hi_r < c`, the quotient fits in 128 bits.
-    let combined_hi = r_hi + lo_hi;
-    let combined_lo = lo_lo;
-
-    // Divide (combined_hi, combined_lo) by c.
-    let q_hi = combined_hi / c;
-    let q_hi_r = combined_hi % c;
-
-    // Fold the remainder of the high part into the low part.
-    let q_lo = (q_hi_r << 64 | combined_lo) / c;
-
-    // Assemble the final quotient: `hi_q * 2^64 + q_lo`.
-    let result = (hi_q << 64) | q_lo;
-    result as i128
+    let mid = (ll >> 64) + (lh & 0xFFFF_FFFF_FFFF_FFFF) + (hl & 0xFFFF_FFFF_FFFF_FFFF);
+    let lo = (ll & 0xFFFF_FFFF_FFFF_FFFF) | (mid << 64);
+    let hi = hh + (lh >> 64) + (hl >> 64) + (mid >> 64);
+    (hi, lo)
 }
+
+/// Divide a 256-bit `(hi, lo)` value by a non-zero i128 divisor, returning the
+/// quotient truncated to i128. The caller guarantees the quotient fits.
+fn div_wide_by_i128((hi, lo): (u128, u128), divisor: i128) -> i128 {
+    let d = divisor as u128;
+    // Long division over 128-bit limbs: process the high limb first, then the
+    // low limb, carrying the remainder between steps.
+    let mut rem: u128 = 0;
+    let mut quotient_hi: u128 = 0;
+    let mut quotient_lo: u128 = 0;
+
+    // Divide the high limb.
+    let mut i = 128;
+    while i > 0 {
+        i -= 1;
+        let bit = (hi >> i) & 1;
+        let cur = (rem << 1) | bit;
+        if cur >= d {
+            rem = cur - d;
+            quotient_hi |= 1u128 << i;
+        } else {
+            rem = cur;
+        }
+    }
+
+    // Divide the low limb, carrying the remainder from the high limb.
+    let mut j = 128;
+    while j > 0 {
+        j -= 1;
+        let bit = (lo >> j) & 1;
+        let cur = (rem << 1) | bit;
+        if cur >= d {
+            rem = cur - d;
+            quotient_lo |= 1u128 << j;
+        } else {
+            rem = cur;
+        }
+    }
+
+    // The quotient is `(quotient_hi, quotient_lo)`; since the true result is
+    // `<= total <= i128::MAX`, the high limb must be zero.
+    debug_assert!(quotient_hi == 0);
+    quotient_lo as i128
+}
+
+mod test;

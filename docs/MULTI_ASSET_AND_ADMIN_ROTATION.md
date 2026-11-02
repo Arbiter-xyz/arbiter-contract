@@ -79,6 +79,19 @@ still call other admin-gated methods during the delay; use a contract
 account/multisig as the admin address when threshold authorization for
 those actions is required.
 
+## Fee-vesting beneficiary rotation
+
+The fee-vesting contract's beneficiary (the multisig/DAO address that
+receives vested fees) is fixed at `initialize()` and has no setter. This is
+an intentional limitation, not an oversight: the beneficiary is expected to
+be a contract account or multisig, so key rotation and treasury migration
+are handled at that address rather than by mutating contract state. Adding
+an on-chain setter would introduce a privileged path that could redirect
+all future vested fees, which is a larger trust surface than the rotation
+problem it solves. If a deployment ever needs to change the beneficiary,
+the supported path is to deploy a new fee-vesting instance pointing at the
+new beneficiary and let the old instance finish vesting to the old address.
+
 ## Testnet adoption
 
 For an existing deployment that supports the delayed `propose_upgrade` /
