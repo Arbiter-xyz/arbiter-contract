@@ -1,5 +1,34 @@
 #![no_std]
 
+//! # Fee Vesting Treasury
+//!
+//! This contract holds platform fee revenue and releases it to a
+//! beneficiary (DAO treasury / multisig) on a fixed cliff-then-linear
+//! schedule. It is the on-chain half of the fee-distribution flow; the
+//! off-chain half is described below so operators know how fees are meant
+//! to reach this contract.
+//!
+//! ## Who deploys and funds it
+//!
+//! - **Deployer / admin**: the protocol deployer deploys the contract and
+//!   calls [`FeeVesting::initialize`] exactly once, passing the `admin`
+//!   (allowed to `rescue_token`), the `beneficiary` (receives unlocked
+//!   revenue), the `token` used for payouts, and the `start`/`cliff`/`end`
+//!   schedule plus the `total` amount subject to vesting.
+//! - **Funder**: the fee-collecting component (or the deployer acting on
+//!   its behalf) transfers the vesting `token` to the contract address so
+//!   its balance backs the outstanding vesting obligation. This contract
+//!   does not pull fees itself; it only pays out what it already holds.
+//!
+//! ## How platform fees reach this contract
+//!
+//! Platform fees accrue elsewhere in the protocol and are forwarded to
+//! this contract's address as ordinary token transfers. Once the balance
+//! is in place, the beneficiary calls [`FeeVesting::claim_vested`] (or
+//! [`FeeVesting::claim_vested_as`]) to withdraw the unlocked portion.
+//! Stray tokens sent by mistake can be recovered by the admin via
+//! [`FeeVesting::rescue_token`]; the vesting token itself cannot be swept.
+
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 /// Storage keys for the fee-vesting treasury contract.
@@ -236,6 +265,32 @@ impl FeeVesting {
         }
 
         Self::claim_vested(env)
+    }
+
+    /// Admin-only rescue of stray tokens sent to the contract address.
+    ///
+    /// Transfers the full balance of `token` held by this contract to `to`.
+    /// The vesting token itself cannot be swept: its balance backs the
+    /// outstanding (unclaimed) vesting obligation, so rescuing it would
+    /// strand the beneficiary. Use `claim_vested` for the vesting token.
+    pub fn rescue_token(env: Env, token: Address, to: Address) -> i128 {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let vesting_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        if token == vesting_token {
+            panic!("cannot rescue vesting token");
+        }
+
+        let client = token::Client::new(&env, &token);
+        let balance = client.balance(&env.current_contract_address());
+        if balance <= 0 {
+            panic!("nothing to rescue");
+        }
+
+        client.transfer(&env.current_contract_address(), &to, &balance);
+
+        balance
     }
 }
 

@@ -126,7 +126,9 @@ fn initialize_requires_admin_auth() {
 
     let admin = Address::generate(&env);
     let beneficiary = Address::generate(&env);
-    let (token, _token_admin) = create_token(&env, &admin);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let contract_id = env.register(FeeVesting, ());
     let client = FeeVestingClient::new(&env, &contract_id);
@@ -138,7 +140,7 @@ fn initialize_requires_admin_auth() {
     let result = client.try_initialize(
         &admin,
         &beneficiary,
-        &token.address,
+        &token,
         &1_000,
         &500,
         &1_000,
@@ -154,7 +156,9 @@ fn zero_total_schedule_is_rejected() {
 
     let admin = Address::generate(&env);
     let beneficiary = Address::generate(&env);
-    let (token, _token_admin) = create_token(&env, &admin);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let contract_id = env.register(FeeVesting, ());
     let client = FeeVestingClient::new(&env, &contract_id);
@@ -162,11 +166,75 @@ fn zero_total_schedule_is_rejected() {
     let result = client.try_initialize(
         &admin,
         &beneficiary,
-        &token.address,
+        &token,
         &1_000,
         &500,
         &1_000,
         &0,
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn near_i128_max_total_does_not_overflow_vested_amount() {
+    // Total close to i128::MAX with a multi-year span. The vested computation
+    // multiplies total by elapsed time, so this exercises the near-overflow
+    // path and asserts a sane partial amount is returned instead of panicking.
+    let env = Env::default();
+    let total: i128 = i128::MAX - 1;
+    let start: u64 = 1_000;
+    let duration: u64 = 4 * 365 * 24 * 60 * 60; // ~4 years
+    let end = start + duration;
+    let (contract_id, _beneficiary, _token) = setup(&env, start, start, end, total);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Halfway through the schedule: expect roughly half of total vested.
+    env.ledger().set_timestamp(start + duration / 2);
+    let vested = client.vested_amount();
+    assert!(vested > 0, "vested amount should be positive mid-schedule");
+    assert!(vested <= total, "vested amount must not exceed total");
+    // Allow a small rounding tolerance around the expected half.
+    let expected = total / 2;
+    let diff = if vested > expected { vested - expected } else { expected - vested };
+    assert!(diff <= 2, "vested amount should be ~half of total");
+
+    // At the end of the schedule everything is vested, capped at total.
+    env.ledger().set_timestamp(end);
+    assert_eq!(client.vested_amount(), total);
+}
+
+#[test]
+fn rescue_stray_token_transfers_balance_to_admin() {
+    // A stray token (not the vesting token) sent to the contract can be swept
+    // by the admin to a recipient, without touching the vesting token balance.
+    let env = Env::default();
+    let (contract_id, _beneficiary, token) = setup(&env, 500, 1_000, 1_000, 10_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let stray_admin = Address::generate(&env);
+    let stray = env
+        .register_stellar_asset_contract_v2(stray_admin.clone())
+        .address();
+    StellarAssetClient::new(&env, &stray).mint(&contract_id, &4_242);
+    let stray_client = TokenClient::new(&env, &stray);
+
+    let recipient = Address::generate(&env);
+    client.rescue_token(&stray, &recipient);
+
+    assert_eq!(stray_client.balance(&recipient), 4_242);
+    assert_eq!(stray_client.balance(&contract_id), 0);
+    // Vesting token balance is untouched by the rescue.
+    assert_eq!(TokenClient::new(&env, &token).balance(&contract_id), 10_000);
+}
+
+#[test]
+#[should_panic]
+fn rescue_reverts_when_targeting_the_vesting_token() {
+    // The rescue path must never be able to drain the vesting token balance.
+    let env = Env::default();
+    let (contract_id, _beneficiary, token) = setup(&env, 500, 1_000, 1_000, 10_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let recipient = Address::generate(&env);
+    client.rescue_token(&token, &recipient);
 }

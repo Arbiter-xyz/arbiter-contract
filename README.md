@@ -393,6 +393,30 @@ assert_eq!(client.status(&question_id), Status::Refunded);
 Building a Rust backend to actually consume this crate — that's a separate,
 much larger effort.
 
+## Fee vesting (`contracts/fee-vesting/`)
+
+The `fee-vesting` contract is a separate Soroban contract that holds platform
+fees and releases them to a beneficiary on a linear vesting schedule. It is
+**not** deployed by the OracleEscrow constructor and is not wired into
+`src/lib.rs`; it is a standalone crate under `contracts/fee-vesting/`.
+
+### Who deploys and funds it
+
+The platform operator deploys `fee-vesting` independently (its own
+`__constructor` takes the beneficiary, token, and vesting parameters) and is
+responsible for funding it. Platform fees reach the contract by a plain
+`token::Client::transfer` from the platform address into the fee-vesting
+contract's balance — the same token the escrow contract uses. OracleEscrow
+itself does not push fees to it; the operator (or an off-chain settlement job)
+moves accrued fees across.
+
+### How fees are released
+
+The beneficiary calls the contract's release entry point; the contract pays
+out only the portion that has vested by the current ledger, leaving the rest
+locked until later. See `contracts/fee-vesting/src/lib.rs` for the exact
+schedule math and entry points.
+
 ## Economics, operations and pre-deployment testing
 
 - [docs/economics/incentive-alignment.md](docs/economics/incentive-alignment.md) —

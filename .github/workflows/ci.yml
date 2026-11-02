@@ -25,6 +25,11 @@ jobs:
         run: cargo audit
       - name: cargo test
         run: cargo test
+      - name: fee-vesting tests
+        # fee-vesting is a separate workspace member; run its tests
+        # explicitly so coverage is not silently dependent on the root
+        # `cargo test` picking the crate up (issue #231).
+        run: cargo test -p fee-vesting
       - name: Doc-comment coverage lint
         # Enforces rustdoc's missing-docs lint on the crate so undocumented
         # public items (e.g. get_balance, get_stake, get_owed) are caught in
