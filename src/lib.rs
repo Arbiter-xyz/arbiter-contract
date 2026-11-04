@@ -635,6 +635,23 @@ pub struct QuestionResolved {
     pub bond_forfeited: i128,
 }
 
+/// `basket_leg_settled` topics: question_id; data: token, amount, fee,
+/// total_slashed. #30: emitted once per leg of a basket question, in
+/// addition to (not instead of) the top-level QuestionResolved/
+/// QuestionRefunded event, since a basket's per-leg fee/slash figures
+/// can't be collapsed into QuestionResolved's single fee/total_slashed
+/// fields without losing which asset they came from.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BasketLegSettled {
+    #[topic]
+    pub question_id: u64,
+    pub token: Address,
+    pub amount: i128,
+    pub fee: i128,
+    pub total_slashed: i128,
+}
+
 /// `worker_credited` topics: question_id, worker; data: amount. Emitted by
 /// resolve()/resolve_by_consensus() for each matching worker's base share
 /// plus redistributed-slash cut, alongside the credit_owed() call itself.
@@ -1791,16 +1808,6 @@ impl OracleEscrow {
         Ok(())
     }
 
-    /// The stored Question for `question_id` (any status), or
-    /// QuestionNotFound. Shared by the read-only getters and the settlement
-    /// entry points.
-    fn load_question(env: &Env, question_id: u64) -> Result<Question, ContractError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Question(question_id))
-            .ok_or(ContractError::QuestionNotFound)
-    }
-
     /// Stores a brand-new Pending question, indexes it, and emits
     /// QuestionOpened. The one place a question comes into existence, so
     /// submit(), charge() and import_question() can't drift apart.
@@ -1994,6 +2001,54 @@ impl OracleEscrow {
     /// per leg for a basket, so every leg keeps the same rounding and dust
     /// rules. Returns (fee, total_slashed) for this leg.
     fn settle_asset(
+        env: &Env,
+        question_id: u64,
+        token: &Address,
+        amount: i128,
+        workers: &Vec<Address>,
+        losing_workers: &Vec<Address>,
+        platform: &Address,
+    ) -> Result<(i128, i128), ContractError> {
+        let env = env.clone();
+        let token_client = token::Client::new(&env, token);
+
+        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
+        let pool = amount - fee;
+        let n = workers.len() as i128;
+        // If workers.len() exceeds the after-fee pool, integer division
+        // makes every share zero and the platform absorbs the entire pool
+        // as dust. Callers (including backend pricing tiers) must keep the
+        // amount large enough for the chosen quorum to avoid this outcome.
+        let share = pool / n;
+        let dust = pool - share * n;
+
+        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
+            Self::distribute_slashes(&env, question_id, token, losing_workers, slash_cap, n)?;
+        let platform_take = (fee + dust)
+            .checked_add(slash_platform_take)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        // Each matching worker earns their base share plus their cut of the
+        // redistributed slash. Both go through credit_owed() so the worker
+        // collects everything in one withdraw() call.
+        let worker_credit = share
+            .checked_add(slash_redist_per_worker)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        for worker in workers.iter() {
+            Self::credit_owed(&env, token, &worker, worker_credit)?;
+            WorkerCredited {
+                question_id,
+                worker: worker.clone(),
+                amount: worker_credit,
+            }
+            .publish(&env);
+        }
+
+        Self::route_platform_take(&env, &token_client, platform, platform_take);
+
+        Ok((fee, total_slashed))
+    }
+
     /// Sends platform_take to the platform, routing the admin-configured
     /// public-goods share (#128) to the public-goods address first. Shared by
     /// every settlement path (resolve(), escalate_resolve(), finalize_resolve())
@@ -2056,115 +2111,6 @@ impl OracleEscrow {
                 );
             }
         }
-    }
-
-    /// Shared settlement body of resolve() and resolve_by_consensus(). The
-    /// caller has already checked admin auth.
-    fn settle_resolution(
-        env: &Env,
-        question_id: u64,
-        token: &Address,
-        amount: i128,
-        workers: &Vec<Address>,
-        losing_workers: &Vec<Address>,
-        platform: &Address,
-    ) -> Result<(i128, i128), ContractError> {
-        let env = env.clone();
-        let token_client = token::Client::new(&env, token);
-
-        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
-        let pool = amount - fee;
-        let n = workers.len() as i128;
-        // If workers.len() exceeds the after-fee pool, integer division
-        // makes every share zero and the platform absorbs the entire pool
-        // as dust. Callers (including backend pricing tiers) must keep the
-        // amount large enough for the chosen quorum to avoid this outcome.
-        let share = pool / n;
-        let dust = pool - share * n;
-
-        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
-            Self::distribute_slashes(
-                &env,
-                question_id,
-                &question_token,
-                &losing_workers,
-                slash_cap,
-                n,
-            )?;
-        let platform_take = (fee + dust)
-            .checked_add(slash_platform_take)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        // Each matching worker earns their base share plus their cut of the
-        // redistributed slash. Both go through credit_owed() so the worker
-        // collects everything in one withdraw() call.
-        let worker_credit = share
-            .checked_add(slash_redist_per_worker)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        for worker in workers.iter() {
-            Self::credit_owed(&env, token, &worker, worker_credit)?;
-            WorkerCredited {
-                question_id,
-                worker: worker.clone(),
-                amount: worker_credit,
-            }
-            .publish(&env);
-        }
-
-        if platform_take > 0 {
-            // #128: if a public-goods address + bps have been configured,
-            // split platform_take into two transfers:
-            //   public_goods_share = platform_take * public_goods_bps / BPS_DENOM
-            //   platform_remainder = platform_take - public_goods_share
-            // Any dust from the integer division stays with the platform
-            // (same dust-rounding discipline resolve() already uses for the
-            // worker pool split). If unconfigured (0 bps or absent address)
-            // the behaviour is identical to the current single transfer.
-            let public_goods_bps: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::PublicGoodsBps)
-                .unwrap_or(0);
-            let maybe_pg_addr: Option<Address> = env
-                .storage()
-                .instance()
-                .get(&DataKey::PublicGoodsAddress);
-            if public_goods_bps > 0 {
-                if let Some(pg_addr) = maybe_pg_addr {
-                    let public_goods_share =
-                        Self::mul_bps(platform_take, public_goods_bps as i128);
-                    let platform_remainder = platform_take - public_goods_share;
-                    if public_goods_share > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &pg_addr,
-                            &public_goods_share,
-                        );
-                    }
-                    if platform_remainder > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            platform,
-                            &platform_remainder,
-                        );
-                    }
-                } else {
-                    token_client.transfer(
-                        &env.current_contract_address(),
-                        platform,
-                        &platform_take,
-                    );
-                }
-            } else {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    platform,
-                    &platform_take,
-                );
-            }
-        }
-
-        Ok((fee, total_slashed))
     }
 
     /// Shared settlement body of resolve() and resolve_by_consensus(). The
