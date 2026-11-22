@@ -586,6 +586,9 @@ pub enum ContractError {
     ContractPaused = 403,
     /// #128: set_public_goods_config() received a bps > BPS_DENOM (100%).
     InvalidPublicGoodsBps = 404,
+    /// submit()/charge() while an upgrade is pending and the question could
+    /// not settle before it executes.
+    UpgradeInProgress = 405,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
