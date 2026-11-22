@@ -25,7 +25,7 @@ fn resolve_below_min_quorum_fails_with_quorum_out_of_bounds() {
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1]);
     let no_losers = Vec::new(&f.env);
-    let res = c.try_resolve(&1, &workers, &no_losers);
+    let res = c.try_resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuorumOutOfBounds)));
 }
 
@@ -41,7 +41,7 @@ fn resolve_above_max_quorum_fails() {
     let w3 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1, w2, w3]);
     let no_losers = Vec::new(&f.env);
-    let res = c.try_resolve(&1, &workers, &no_losers);
+    let res = c.try_resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuorumOutOfBounds)));
 }
 
@@ -56,7 +56,7 @@ fn resolve_at_exactly_the_bounds_succeeds() {
     let w2 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1, w2]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let tc = token_client(&f);
     assert_eq!(tc.balance(&f.platform), 500_000);

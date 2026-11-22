@@ -250,7 +250,7 @@ fn measure(wasm: &[u8], n: &Network, workers: u32, losers: u32, kind: Workers) -
     }
     token_admin.mint(&contract_id, &(stake * losers as i128));
 
-    client.resolve(&1, &worker_list, &loser_list);
+    client.resolve(&1, &worker_list, &loser_list, &BytesN::from_array(&env, &[0u8; 32]));
 
     let res = env.cost_estimate().resources();
     let host_instructions = res.instructions as u64;
@@ -487,7 +487,7 @@ fn resolve_accepts_exactly_max_quorum_size() {
     let (env, client, _, _) = native_setup();
     let workers = addresses(&env, MAX_QUORUM_SIZE / 2);
     let losers = addresses(&env, MAX_QUORUM_SIZE - MAX_QUORUM_SIZE / 2);
-    client.resolve(&1, &workers, &losers);
+    client.resolve(&1, &workers, &losers, &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(client.get_question(&1).status, Status::Resolved);
 }
 
@@ -498,7 +498,7 @@ fn resolve_rejects_one_over_max_quorum_size_cleanly() {
     let before = tc.balance(&contract_id);
 
     for (w, l) in [(MAX_QUORUM_SIZE + 1, 0), (1, MAX_QUORUM_SIZE), (MAX_QUORUM_SIZE, 1)] {
-        let res = client.try_resolve(&1, &addresses(&env, w), &addresses(&env, l));
+        let res = client.try_resolve(&1, &addresses(&env, w), &addresses(&env, l), &BytesN::from_array(&env, &[0u8; 32]));
         assert_eq!(res, Err(Ok(ContractError::QuorumTooLarge)), "{w} + {l}");
     }
 
@@ -506,7 +506,7 @@ fn resolve_rejects_one_over_max_quorum_size_cleanly() {
     // a correctly sized retry settles it.
     assert_eq!(client.get_question(&1).status, Status::Pending);
     assert_eq!(tc.balance(&contract_id), before);
-    client.resolve(&1, &addresses(&env, 3), &Vec::new(&env));
+    client.resolve(&1, &addresses(&env, 3), &Vec::new(&env), &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(client.get_question(&1).status, Status::Resolved);
 }
 
@@ -520,6 +520,6 @@ fn oversized_quorum_is_rejected_before_the_quadratic_duplicate_check() {
     for _ in 0..=MAX_QUORUM_SIZE {
         workers.push_back(w.clone());
     }
-    let res = client.try_resolve(&1, &workers, &Vec::new(&env));
+    let res = client.try_resolve(&1, &workers, &Vec::new(&env), &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuorumTooLarge)));
 }

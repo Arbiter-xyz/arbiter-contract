@@ -141,7 +141,7 @@ fn setup_large_values() -> Fixture {
     }
 }
 
-fn contract_events(
+pub(crate) fn contract_events(
     f: &Fixture,
 ) -> std::vec::Vec<(
     soroban_sdk::Vec<soroban_sdk::Val>,
@@ -166,7 +166,7 @@ fn last_contract_event(
     contract_events(f).pop().unwrap()
 }
 
-fn event_name(f: &Fixture, topics: &soroban_sdk::Vec<soroban_sdk::Val>) -> Symbol {
+pub(crate) fn event_name(f: &Fixture, topics: &soroban_sdk::Vec<soroban_sdk::Val>) -> Symbol {
     topics.get(0).unwrap().into_val(&f.env)
 }
 
@@ -192,6 +192,7 @@ fn submit_locks_funds() {
     let q = c.get_question(&1);
     assert_eq!(q.amount, AMOUNT);
     assert_eq!(q.status, Status::Pending);
+    assert_eq!(q.token, f.token_address);
 
     let (topics, data) = last_contract_event(&f);
     assert_eq!(event_name(&f, &topics), Symbol::new(&f.env, "question_opened"));
@@ -224,6 +225,7 @@ fn submit_zero_or_negative_amount_fails() {
 fn charge_zero_or_negative_amount_fails() {
     let f = setup();
     let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
     assert_eq!(
         c.try_charge(&f.payer, &1, &0),
         Err(Ok(ContractError::InvalidAmount))
@@ -244,7 +246,7 @@ fn resolve_splits_pool_and_pays_fee() {
     let w2 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1.clone(), w2.clone()]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     // fee = 2_500_000 * 2000 / 10000 = 500_000; pool = 2_000_000; share = 1_000_000 each, no dust.
     // Matching workers are CREDITED (get_owed), not transferred directly —
@@ -278,7 +280,7 @@ fn resolve_sends_dust_to_platform_when_pool_does_not_divide_evenly() {
     let w2 = Address::generate(&f.env);
     let w3 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1.clone(), w2.clone(), w3.clone()]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     // fee = 500_000, pool = 2_000_000, share = 666_666, dust = 2
     assert_eq!(c.get_owed(&w1), 666_666);
@@ -304,7 +306,7 @@ fn resolve_with_worker_count_exceeding_pool_leaves_each_worker_credited_zero() {
             Address::generate(&f.env),
         ],
     );
-    c.resolve(&1, &worker_list, &Vec::new(&f.env));
+    c.resolve(&1, &worker_list, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     for worker in worker_list.iter() {
         assert_eq!(c.get_owed(&worker), 0);
@@ -331,6 +333,7 @@ fn resolve_fee_computation_does_not_silently_overflow_near_i128_max() {
         &1,
         &Vec::from_array(&f.env, [worker.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_owed(&worker), amount - fee);
@@ -344,7 +347,7 @@ fn resolve_with_zero_workers_fails() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let workers = Vec::new(&f.env);
-    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env));
+    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::NoWorkers)));
 }
 
@@ -355,8 +358,8 @@ fn resolve_twice_fails() {
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1]);
-    c.resolve(&1, &workers, &Vec::new(&f.env));
-    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env));
+    c.resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+    let res = c.try_resolve(&1, &workers, &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
 }
 
@@ -391,7 +394,7 @@ fn refund_after_resolve_is_rejected() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let res = c.try_refund(&1);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotPending)));
@@ -402,7 +405,7 @@ fn resolve_and_refund_on_unknown_id_fails() {
     let f = setup();
     let c = client(&f);
     let w1 = Address::generate(&f.env);
-    let res = c.try_resolve(&99, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    let res = c.try_resolve(&99, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::QuestionNotFound)));
 
     let res = c.try_refund(&99);
@@ -457,6 +460,7 @@ fn question_settlement_never_substitutes_another_asset() {
         &101,
         &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
         &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(token_client(&f).balance(&f.contract_id), AMOUNT - AMOUNT / 5);
@@ -469,6 +473,7 @@ fn question_settlement_never_substitutes_another_asset() {
         &103,
         &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
         &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(token_client(&f).balance(&f.contract_id), default_escrow_after);
     assert_eq!(
@@ -504,6 +509,7 @@ fn six_decimal_asset_uses_native_units_without_seven_decimal_scaling() {
         &103,
         &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
         &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(asset_client.balance(&f.platform), 250_000);
     assert_eq!(c.get_owed_asset(&worker, &asset), 1_000_000);
@@ -604,7 +610,7 @@ fn timeout_refund_after_resolve_is_rejected() {
     let c = client(&f);
     c.submit(&f.payer, &1, &AMOUNT);
     let w1 = Address::generate(&f.env);
-    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [w1]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     f.env.ledger().with_mut(|li| {
         li.sequence_number += TIMEOUT_LEDGERS + 1;
@@ -763,18 +769,21 @@ fn resolve_slashes_losing_workers_stake_to_the_platform() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     // slash = 5% of 200_000 = 10_000
+    // SLASH_REDISTRIBUTE_BPS = 5000 (50%): 5_000 to winner, 5_000 to platform
     assert_eq!(c.get_stake(&loser), 190_000);
-    // fee(500_000) + slash(10_000) both land on the platform in the same call
+    // fee(500_000) + platform half of slash(5_000) land on the platform
     assert_eq!(
         token_client(&f).balance(&f.platform),
-        platform_before + 500_000 + 10_000
+        platform_before + 500_000 + 5_000
     );
     // The loser was never in `workers`, so they accrue nothing.
     assert_eq!(c.get_owed(&loser), 0);
-    assert_eq!(c.get_owed(&winner), 2_000_000);
+    // Winner gets pool share(2_000_000) + redistributed slash half(5_000)
+    assert_eq!(c.get_owed(&winner), 2_000_000 + 5_000);
 }
 
 #[test]
@@ -795,11 +804,15 @@ fn resolve_slashes_multiple_losing_workers_independently() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser_one.clone(), loser_two.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&loser_one), 190_000);
     assert_eq!(c.get_stake(&loser_two), 475_000);
-    assert_eq!(token_client(&f).balance(&f.platform), platform_before + 535_000);
+    // loser_one slash = 10_000: 5_000 to platform, 5_000 redistributed to winner
+    // loser_two slash = 25_000: 12_500 to platform, 12_500 redistributed to winner
+    // platform gets fee(500_000) + 5_000 + 12_500 = 517_500
+    assert_eq!(token_client(&f).balance(&f.platform), platform_before + 517_500);
     let events = contract_events(&f);
     let resolved = events
         .iter()
@@ -809,6 +822,7 @@ fn resolve_slashes_multiple_losing_workers_independently() {
     let resolved_data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = resolved.1.clone().into_val(&f.env);
     assert_eq!(resolved_data.get(Symbol::new(&f.env, "worker_count")).unwrap().into_val(&f.env), 1u32);
     assert_eq!(resolved_data.get(Symbol::new(&f.env, "fee")).unwrap().into_val(&f.env), 500_000i128);
+    // total_slashed is the sum of all actual slash amounts, regardless of where they end up
     assert_eq!(resolved_data.get(Symbol::new(&f.env, "total_slashed")).unwrap().into_val(&f.env), 35_000i128);
 
     let slash_events = events
@@ -850,16 +864,21 @@ fn stake_slash_computation_does_not_silently_overflow_near_i128_max() {
         + (stake % BPS_DENOM) * SLASH_BPS / BPS_DENOM;
     let fee = (amount / BPS_DENOM) * PLATFORM_FEE_BPS
         + (amount % BPS_DENOM) * PLATFORM_FEE_BPS / BPS_DENOM;
+    // With SLASH_REDISTRIBUTE_BPS = 5_000 (50%), half goes to winners, half to platform.
+    let worker_portion = (expected_slash / BPS_DENOM) * SLASH_REDISTRIBUTE_BPS
+        + (expected_slash % BPS_DENOM) * SLASH_REDISTRIBUTE_BPS / BPS_DENOM;
+    let platform_portion = expected_slash - worker_portion;
     let winner = Address::generate(&f.env);
     c.resolve(
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&loser), stake - expected_slash);
-    assert_eq!(token.balance(&f.platform), fee + expected_slash);
-    assert_eq!(c.get_owed(&winner), amount - fee);
+    assert_eq!(token.balance(&f.platform), fee + platform_portion);
+    assert_eq!(c.get_owed(&winner), amount - fee + worker_portion);
 }
 
 #[test]
@@ -877,12 +896,149 @@ fn resolve_slashing_an_unstaked_losing_worker_is_a_harmless_no_op() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [unstaked_loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_stake(&unstaked_loser), 0);
     assert_eq!(
         token_client(&f).balance(&f.platform),
         platform_before + 500_000
+    );
+}
+
+// --- Issue #19: slash redistribution ---
+// These three tests cover the new SLASH_REDISTRIBUTE_BPS behaviour directly.
+
+/// SLASH_REDISTRIBUTE_BPS = 5_000 (50%): half of each slashed amount goes to
+/// the matching workers, half to the platform. With n=1 winner the split is
+/// exact (no redistribution dust).
+#[test]
+fn slash_redistribution_splits_half_to_workers_and_half_to_platform() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    let loser = Address::generate(&f.env);
+    fund_worker(&f, &loser, 500_000);
+    c.stake(&loser, &500_000);
+
+    let winner_owed_before = c.get_owed(&winner);    // 0
+    let platform_before = token_client(&f).balance(&f.platform);
+
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [winner.clone()]),
+        &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+
+    // slash = 5% of 500_000 = 25_000
+    let slash: i128 = 25_000;
+    // SLASH_REDISTRIBUTE_BPS = 5_000 / 10_000 = 50%
+    let worker_portion: i128 = slash / 2;      // 12_500
+    let platform_portion: i128 = slash - worker_portion; // 12_500
+    // n=1 worker: redist_share = 12_500, redist_dust = 0
+    let redist_share: i128 = worker_portion; // 12_500
+
+    // Loser's stake reduced by the slash.
+    assert_eq!(c.get_stake(&loser), 500_000 - slash);
+    // Loser was not in workers, earns nothing.
+    assert_eq!(c.get_owed(&loser), 0);
+    // Winner: pool share(2_000_000) + redistribution(12_500).
+    let expected_winner_owed = winner_owed_before + (AMOUNT * 8000 / BPS_DENOM) + redist_share;
+    assert_eq!(c.get_owed(&winner), expected_winner_owed);
+    // Platform: fee(500_000) + platform half of slash(12_500).
+    assert_eq!(
+        token_client(&f).balance(&f.platform),
+        platform_before + 500_000 + platform_portion,
+    );
+}
+
+/// A losing worker with no stake at all slashes for zero. The redistribution
+/// path must be skipped entirely: no divide-by-zero, no spurious credit
+/// to winning workers, no change to the platform beyond the base fee.
+#[test]
+fn slash_redistribution_zero_slash_is_a_no_op_no_spurious_credit() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    let zero_staker = Address::generate(&f.env); // never called stake()
+    let platform_before = token_client(&f).balance(&f.platform);
+
+    // Must not panic, must not emit a spurious credit to winner.
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [winner.clone()]),
+        &Vec::from_array(&f.env, [zero_staker.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+
+    assert_eq!(c.get_stake(&zero_staker), 0);
+    // Winner gets only the pool share; no redistribution bonus because slash = 0.
+    assert_eq!(c.get_owed(&winner), AMOUNT * 8000 / BPS_DENOM);
+    // Platform gets only the fee; no slash contribution.
+    assert_eq!(
+        token_client(&f).balance(&f.platform),
+        platform_before + 500_000,
+    );
+}
+
+/// Funds conservation: for 3 workers and 2 staked losers (non-evenly-
+/// divisible redistribution), platform_take + sum(worker credits) ==
+/// question_amount + total_slashed, to the last stroop.
+#[test]
+fn slash_redistribution_funds_are_conserved_multi_worker_multi_loser() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    // 3 matching workers; the pool doesn't divide evenly: dust = 2.
+    let w1 = Address::generate(&f.env);
+    let w2 = Address::generate(&f.env);
+    let w3 = Address::generate(&f.env);
+    let loser_a = Address::generate(&f.env);
+    let loser_b = Address::generate(&f.env);
+
+    // loser_a: stake 300_000, slash = 5% = 15_000
+    // loser_b: stake 700_000, slash = 5% = 35_000
+    fund_worker(&f, &loser_a, 300_000);
+    fund_worker(&f, &loser_b, 700_000);
+    c.stake(&loser_a, &300_000);
+    c.stake(&loser_b, &700_000);
+
+    let w1_owed_before = c.get_owed(&w1);
+    let w2_owed_before = c.get_owed(&w2);
+    let w3_owed_before = c.get_owed(&w3);
+    let platform_before = token_client(&f).balance(&f.platform);
+
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone(), w2.clone(), w3.clone()]),
+        &Vec::from_array(&f.env, [loser_a.clone(), loser_b.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+
+    let total_slashed: i128 = 15_000 + 35_000; // 50_000
+
+    let w1_delta = c.get_owed(&w1) - w1_owed_before;
+    let w2_delta = c.get_owed(&w2) - w2_owed_before;
+    let w3_delta = c.get_owed(&w3) - w3_owed_before;
+    let platform_delta = token_client(&f).balance(&f.platform) - platform_before;
+
+    // Every worker gets the same credit (same n, same slashes, same dust logic).
+    assert_eq!(w1_delta, w2_delta);
+    assert_eq!(w2_delta, w3_delta);
+
+    // Total funds out == question amount + slashed stakes in.
+    let sum_out = platform_delta + w1_delta + w2_delta + w3_delta;
+    assert_eq!(
+        sum_out,
+        AMOUNT + total_slashed,
+        "funds not conserved: out={sum_out}, in={}",
+        AMOUNT + total_slashed,
     );
 }
 
@@ -900,6 +1056,7 @@ fn withdraw_pays_out_full_accrued_balance_and_zeroes_it() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
@@ -927,12 +1084,14 @@ fn withdraw_accumulates_across_multiple_resolved_questions_before_a_single_payou
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     c.submit(&f.payer, &2, &AMOUNT);
     c.resolve(
         &2,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     // Two questions' worth of 80% share (2_000_000 each) credited before any transfer happened.
@@ -963,6 +1122,7 @@ fn withdraw_twice_in_a_row_fails_the_second_time() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     c.withdraw(&w1, &2_000_000);
@@ -980,6 +1140,7 @@ fn withdraw_zero_or_negative_amount_fails() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let res = c.try_withdraw(&w1, &0);
@@ -996,6 +1157,7 @@ fn withdraw_more_than_owed_fails_without_touching_the_balance() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let res = c.try_withdraw(&w1, &2_000_001);
@@ -1013,6 +1175,7 @@ fn partial_withdrawal_leaves_the_remainder_claimable_later() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 
@@ -1038,6 +1201,7 @@ fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let withdrawn = c.withdraw_to(&w1, &beneficiary, &2_000_000);
@@ -1083,6 +1247,7 @@ fn touch_does_not_change_owed_or_stake_amounts() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     fund_worker(&f, &w1, 1_000_000);
     c.stake(&w1, &1_000_000);
@@ -1103,6 +1268,7 @@ fn touch_requires_no_authorization_from_anyone() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     c.touch(&w1);
@@ -1144,6 +1310,7 @@ fn set_admin_rotates_authority_to_a_new_key() {
         &1,
         &Vec::from_array(&f.env, [w1.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_owed(&w1), 2_000_000);
 }
@@ -1225,6 +1392,7 @@ fn resolve_rejects_a_worker_appearing_in_both_matching_and_losing_lists() {
         &1,
         &Vec::from_array(&f.env, [ambiguous.clone()]),
         &Vec::from_array(&f.env, [ambiguous]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
@@ -1240,6 +1408,7 @@ fn resolve_rejects_duplicate_addresses_within_the_matching_list() {
         &1,
         &Vec::from_array(&f.env, [w1.clone(), w1]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
@@ -1256,6 +1425,7 @@ fn resolve_rejects_duplicate_addresses_within_the_losing_list() {
         &1,
         &Vec::from_array(&f.env, [winner]),
         &Vec::from_array(&f.env, [loser.clone(), loser]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
@@ -1274,9 +1444,11 @@ fn resolve_with_disjoint_valid_lists_still_succeeds() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::from_array(&f.env, [loser.clone()]),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
-    assert_eq!(c.get_owed(&winner), 2_000_000);
+    // slash = 10_000; 50% (5_000) redistributed to winner
+    assert_eq!(c.get_owed(&winner), 2_000_000 + 5_000);
     assert_eq!(c.get_stake(&loser), 190_000);
 }
 
@@ -1418,6 +1590,7 @@ fn charged_question_settles_through_resolve_exactly_like_submit() {
         &1,
         &Vec::from_array(&f.env, [winner.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     assert_eq!(c.get_question(&1).status, Status::Resolved);
@@ -1456,6 +1629,47 @@ fn charge_same_question_id_twice_fails_like_duplicate_submit() {
     assert_eq!(c.get_balance(&f.payer), AMOUNT);
 }
 
+#[test]
+fn per_question_asset_selection_settles_two_questions_in_different_assets_independently() {
+    let f = setup();
+    let c = client(&f);
+
+    let other_issuer = Address::generate(&f.env);
+    let other_sac = f.env.register_stellar_asset_contract_v2(other_issuer);
+    let other_token = other_sac.address();
+    c.set_asset_allowed(&other_token, &true);
+
+    let amount_a = 2_500_000i128;
+    let amount_b = 5_000_000i128;
+    token::StellarAssetClient::new(&f.env, &other_token).mint(&f.payer, &amount_b);
+
+    c.submit(&f.payer, &1, &amount_a);
+    c.submit_asset(&f.payer, &other_token, &2, &amount_b);
+
+    let q1 = c.get_question(&1);
+    assert_eq!(q1.token, f.token_address);
+    assert_eq!(q1.amount, amount_a);
+
+    let q2 = c.get_question(&2);
+    assert_eq!(q2.token, other_token);
+    assert_eq!(q2.amount, amount_b);
+
+    let worker1 = Address::generate(&f.env);
+    let worker2 = Address::generate(&f.env);
+
+    c.resolve(&1, &Vec::from_array(&f.env, [worker1.clone()]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+    c.resolve(&2, &Vec::from_array(&f.env, [worker2.clone()]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    assert_eq!(c.get_question(&1).status, Status::Resolved);
+    assert_eq!(c.get_question(&2).status, Status::Resolved);
+
+    assert_eq!(token_client(&f).balance(&f.contract_id), amount_a - amount_a / 5);
+    assert_eq!(token::Client::new(&f.env, &other_token).balance(&f.contract_id), amount_b - amount_b / 5);
+
+    assert_eq!(c.get_owed_asset(&worker1, &f.token_address), amount_a * 4 / 5);
+    assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
+}
+
 /// Verifies that admin-gated settlement requires administrator authorization.
 #[test]
 fn security_invariant_admin_authorization_enforced() {
@@ -1466,7 +1680,7 @@ fn security_invariant_admin_authorization_enforced() {
     let winner = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [winner]);
     let losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &losers);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     assert_eq!(f.env.auths().get(0).unwrap().0, f.admin);
 }
@@ -1481,9 +1695,9 @@ fn security_invariant_escrow_terminal_states_reject_double_settlement() {
     let winner = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [winner]);
     let losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &losers);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
-    assert_eq!(c.try_resolve(&1, &workers, &losers), Err(Ok(ContractError::QuestionNotPending)));
+    assert_eq!(c.try_resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32])), Err(Ok(ContractError::QuestionNotPending)));
     assert_eq!(c.try_refund(&1), Err(Ok(ContractError::QuestionNotPending)));
     assert_eq!(c.try_refund_timeout(&1), Err(Ok(ContractError::QuestionNotPending)));
 }
@@ -1499,7 +1713,7 @@ fn security_invariant_worker_and_losing_worker_disjoint_lists() {
     let workers = Vec::from_array(&f.env, [worker.clone()]);
     let losers = Vec::from_array(&f.env, [worker]);
 
-    let res = c.try_resolve(&1, &workers, &losers);
+    let res = c.try_resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
 }
 
@@ -1513,7 +1727,7 @@ fn security_invariant_withdraw_cannot_exceed_accrued_owed() {
     let winner = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [winner.clone()]);
     let losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &losers);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let owed = c.get_owed(&winner);
     let res = c.try_withdraw(&winner, &(owed + 1));

@@ -1,52 +1,510 @@
-# arbiter-contract
+# Oracle Escrow
 
-The Soroban/Rust escrow contract for **Arbiter**, a pay-per-question
-human-intelligence oracle settled on Stellar. Custodies USDC per question
-and is the only component allowed to move funds — the backend
-([arbiter-backend](https://github.com/Arbiter-xyz/arbiter-backend)) is the
-sole caller of its admin-gated methods.
+A Soroban smart contract implementing an oracle-based escrow with dispute
+resolution, plus the JavaScript integrations that talk to it.
 
-Split out of the original `arbiter` monorepo as a standalone crate (no
-longer a Cargo workspace member) so it has its own build/release lifecycle,
-independent of the Node services around it. This is a fresh single commit,
-not a history-preserving split — full history lives in the original
-[`arbiter`](https://github.com/rudeus112266/arbiter) repo.
+## Deployment and the constructor
 
-## Design
+OracleEscrow has no public `initialize()` function. Its setup arguments
+(`admin`, `token`, `platform`, `timeout_ledgers`) are taken by `__constructor`,
+which the network runs inside the same transaction that creates the contract.
+There is no window between the WASM upload and setup for a third party to
+claim the contract, so nobody can front-run the deployer's `admin` assignment.
 
-- **Fail closed**: every path ends in a real `resolve()` or `refund()` —
-  never a stuck or partially-settled state.
-- **Permissionless timeout refund**: if the backend goes dark, *anyone* can
-  force a refund on a still-pending question after a configurable ledger
-  window (`refund_timeout()`, no `require_auth()` at all) — the contract
-  itself guarantees payers are never permanently stranded by v1's
-  single-admin settlement authority.
-- **On-chain worker staking + slashing**: workers may post an optional USDC
-  bond; losing a quorum vote forfeits a slice of it.
-- **Accrued-balance settlement**: matching workers are credited, not paid
-  directly — `withdraw()` collects everything in one transaction whenever
-  they choose, instead of one payout per question.
-
-## Methods
-
-`initialize` · `submit` · `deposit` · `withdraw_balance` · `charge` · `resolve` · `refund` · `refund_timeout` ·
-`stake` · `unstake` · `withdraw` · `withdraw_to` · `touch` ·
-`set_admin` · `set_timeout_ledgers` ·
-`get_question` · `get_owed` · `get_stake` · `get_balance` · `get_timeout_ledgers`
-
-## Running it
+The guided wizard collects and validates those arguments before it submits
+anything, then deploys in one call:
 
 ```sh
-cargo test        # 61 tests, no chain needed
-stellar contract build   # produces a real deployable WASM binary
+./scripts/deploy-init-wizard.sh
 ```
 
-Verified deployed and exercised end to end on Stellar testnet — see the
-"Round 6" section of the original monorepo's README for the live run
-(real `submit()`/`resolve()`/`withdraw()` calls, fee math confirmed
-on-chain down to the dust stroop).
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+
+Instances deployed from an earlier WASM that were never initialized are still
+open to the old front-running path. Do not call `initialize()` on them; redeploy
+with the constructor instead.
+
+### After deploying
+
+The wizard only updates this repo's world, not the downstream ones. A new
+contract id has to be propagated by hand to every consumer that pins it:
+
+| Repo | Variable | Where |
+| --- | --- | --- |
+| arbiter-backend | `ORACLE_CONTRACT_ID` | backend env / deployment config |
+| arbiter-app | `VITE_ORACLE_CONTRACT_ID` | app env / build config |
+| arbiter-contract | `DEFAULT_CONTRACT_ID` | `.github/workflows/release.yml` (testnet pin, used by the WASM hash verification) |
+
+The wizard prints the new contract id and these variable names at the end of
+a run. Until all three agree, release verification and the live backend/app
+will be pointing at different contracts.
+
+## Architecture
+
+Every current integration with the contract goes through the JavaScript
+`@stellar/stellar-sdk`. Those clients live in the separate `arbiter-backend`
+and `arbiter-app` repos, not in this one:
+
+- `arbiter-backend` — backend service calls
+- `arbiter-app` — frontend calls
+- demo-agent's scripts — scripted demo flows
+
+This repo contains only the contract itself (`src/lib.rs`), its tests, and the
+supporting tooling (`contracts/`, `sim/`, `fuzz/`, `scripts/`, `docs/`).
+
+There is no equivalent for a Rust caller today. `soroban-sdk`'s
+`#[contractimpl]` macro already generates an `OracleEscrowClient` (the same
+type `test.rs`'s `client(f)` helper returns), which is most of what a
+standalone crate would need to publish.
+
+## Client bindings
+
+Integrators can talk to the contract from more than one language. The
+JavaScript clients in `arbiter-backend` and `arbiter-app` remain the canonical
+example. There is no Python binding shipped in this repo today; the section
+below describes the intended shape of one, not a directory that exists here.
+
+### Python binding (planned)
+
+A thin, dependency-light wrapper over the contract's XDR spec. It would cover
+all of the contract's entry points:
+
+- writes: `initialize`, `submit`, `deposit`, `withdraw_balance`, `charge`,
+  `resolve`, `stake`, `unstake`, `withdraw`, `withdraw_to`, `touch`,
+  `refund`, `refund_timeout`, `set_admin`, `set_timeout_ledgers`
+- reads: `get_question`, `get_balance`, `get_admin`, `get_timeout_ledgers`
+
+The contract's `Question`, `Status`, and `ContractError` types would be mapped
+to native Python shapes (`Question` dataclass, `Status`/`ContractError` enums)
+so callers never touch raw XDR.
+
+```python
+from oracle_escrow import Client, Status
+
+client = Client(rpc_url, contract_id, network_passphrase)
+
+question_id = client.submit(asker, question, reward)
+client.resolve(oracle, question_id, answer)
+assert client.get_question(question_id).status == Status.RESOLVED
+```
+
+### Regenerating bindings
+
+Bindings are generated from the contract's embedded XDR spec, the same source
+`stellar contract bindings` reads. Whenever `src/lib.rs`'s public interface
+changes (a new entry point, a new `ContractError` variant, a changed `Question`
+field), regenerate them with:
+
+```sh
+stellar contract build
+stellar contract bindings typescript \
+  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --output-dir <output-dir>
+```
+
+Run this as part of the release checklist whenever the public interface
+changes.
+
+## Standalone Rust client crate
+
+A thin crate wrapping the generated `OracleEscrowClient` with a stable public
+API and its own versioning, independent of the contract crate's own release
+cycle. Useful for a future Rust-based backend or CLI tool that wants typed
+calls instead of hand-built XDR the way the JS side currently must.
+
+### Type coupling
+
+The crate's public types are **independent of the contract's own type
+versions**. Rather than re-exporting the contract's `Question`, `Status`,
+`ContractError`, and `DataKey` directly (which would couple the client
+crate's version to the contract's and force a breaking client-crate release
+on every contract redeploy — already done twice), the crate wraps them in its
+own stable types. This survives a contract redeploy without a breaking
+client-crate release each time.
+
+### Usage
+
+A minimal example equivalent to `test.rs`'s `setup()`/`client()` pattern,
+demonstrating `submit`/`resolve`/`refund` against a running contract:
+
+```rust
+use oracle_escrow_client::{Client, Status};
+
+// Equivalent to test.rs's setup(): deploy the contract and build a client.
+let client = Client::new(&env, &contract_id);
+
+// submit
+let question_id = client.submit(&asker, &question, &reward);
+
+// resolve
+client.resolve(&oracle, &question_id, &answer);
+assert_eq!(client.status(&question_id), Status::Resolved);
+
+// refund
+client.refund(&asker, &question_id);
+assert_eq!(client.status(&question_id), Status::Refunded);
+```
+
+### Out of scope
+
+Building a Rust backend to actually consume this crate — that's a separate,
+much larger effort.
+
+## Fee vesting (`contracts/fee-vesting/`)
+
+The `fee-vesting` contract is a separate Soroban contract that holds platform
+fees and releases them to a beneficiary on a linear vesting schedule. It is
+**not** deployed by the OracleEscrow constructor and is not wired into
+`src/lib.rs`; it is a standalone crate under `contracts/fee-vesting/`.
+
+### Who deploys and funds it
+
+The platform operator deploys `fee-vesting` independently (its own
+`__constructor` takes the beneficiary, token, and vesting parameters) and is
+responsible for funding it. Platform fees reach the contract by a plain
+`token::Client::transfer` from the platform address into the fee-vesting
+contract's balance — the same token the escrow contract uses. OracleEscrow
+itself does not push fees to it; the operator (or an off-chain settlement job)
+moves accrued fees across.
+
+### How fees are released
+
+The beneficiary calls the contract's release entry point; the contract pays
+out only the portion that has vested by the current ledger, leaving the rest
+locked until later. See `contracts/fee-vesting/src/lib.rs` for the exact
+schedule math and entry points.
 
 ## Security and Bug Bounty
 
-The contract operates under a defined bug bounty scope and severity/reward table. See [SECURITY.md](SECURITY.md) for target asset boundaries, severity classifications, economic reward tiers, reproduction criteria, and coordinated disclosure procedures.
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and for the bug bounty scope, severity rubric and reward table.
 
+## Economics, operations and pre-deployment testing
+
+- [docs/economics/incentive-alignment.md](docs/economics/incentive-alignment.md) —
+  agent-based simulation of fee/slash/quorum tuning (`sim/incentive/`), with
+  settlement math proven identical to `lib.rs` by `src/test_incentive_math.rs` (#117)
+- [docs/runbooks/refund-timeout-postmortem.md](docs/runbooks/refund-timeout-postmortem.md) —
+  what to do when `refund_timeout()` activity spikes (#118)
+- [docs/LOAD_TESTING.md](docs/LOAD_TESTING.md) — contract, network and backend
+  load harness (`src/test_load.rs`, `tools/load/`) (#119)
+- [docs/SHADOW_TESTING.md](docs/SHADOW_TESTING.md) — mirror production traffic
+  onto a candidate deployment and diff state (`tools/shadow/`) (#120)
+- [docs/RPC_CHAOS_TESTING.md](docs/RPC_CHAOS_TESTING.md) — inject RPC faults under
+  the real question lifecycle and prove nothing is left stuck Pending
+  (`tools/chaos/`, `src/test_rpc_chaos.rs`) (#121)
+
+## Cross-chain settlement bridge (design note)
+
+This is a **design note only**. No contract code changes land until the
+bridge-to-contract interface (what actually calls `submit()`/`charge()`, and
+from what address) is settled. `src/lib.rs` and the tests are intentionally
+untouched.
+
+### Problem
+
+`submit()` and `deposit()` both require `payer.require_auth()` and a direct
+`token::Client::transfer` from an address the contract can authenticate on
+Stellar. There is no path today for a payer whose funds originate on another
+chain to reach escrow without first bridging to a Stellar-native balance
+themselves.
+
+### Chosen rail: Circle CCTP + a Stellar forwarder
+
+We pick **Circle CCTP** (native USDC) with a **forwarder contract** on
+Stellar, rather than Axelar GMP.
+
+## WASM binary size
+
+The release profile in `Cargo.toml` is tuned for size (`opt-level = "z"`,
+`lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`), and
+`stellar contract build` runs `wasm-opt` on the result. Smaller bytecode
+lowers the storage rent every deployment (and re-deployment) pays, so the
+size is treated as a budget to defend rather than a one-off observation.
+
+Measure it with the same command CI uses:
+Summary
+compute_median() computes an index via n/2 - 1 where n is the length of the answers vector. With n=0, this underflows and panics given overflow-checks = true, rather than returning a clean error. Currently unreachable dead code — zero call sites exist today (no resolve_median() or similar entry point has been built yet, tracked separately) — but will panic instead of erroring cleanly once that feature set is actually wired up.
+
+Steps to reproduce / failure scenario
+Not reachable today (no caller exists). To confirm once a caller exists: call compute_median() with an empty answers vector and observe the panic instead of a clean ContractError.
+
+Proposed approach
+Add an empty-vector guard at the top of compute_median() returning a clean error (e.g. EmptyAnswerSet, which already exists in ContractError) instead of panicking.
+
+Acceptance criteria
+ compute_median() returns a clean error on an empty vector instead of panicking.
+ New test covering this, to be exercised once a real caller is wired up.
+
+```sh
+stellar contract build
+ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
+```
+
+**Baseline: 15.5KB** (optimized). The build must stay at or below this
+number; a PR that reg
+
+## Handsoff notes
+
+<!-- handsoff-issue-291 -->
+- #291: Review: CannotDisableDefaultAsset has zero test coverage
+
+<!-- handsoff-issue-43 -->
+- #43: Slashing insurance for workers
+
+<!-- handsoff-issue-207 -->
+- #207: Suspected: KYC attestor signature has no domain separation
+
+<!-- handsoff-issue-208 -->
+- #208: do_withdraw_for_token()'s OwedLock check blocks withdrawal of unrelated assets entirely — no longer dead code, lock_owed() is now real
+
+<!-- handsoff-issue-209 -->
+- #209: Dead-code: compute_median() underflows/panics on an empty answers vector
+
+<!-- handsoff-issue-234 -->
+- #234: Shared src/test.rs harness fails to compile with 55 errors
+
+<!-- handsoff-issue-235 -->
+- #235: test.rs's own resolve() helpers use the stale 3-arg signature

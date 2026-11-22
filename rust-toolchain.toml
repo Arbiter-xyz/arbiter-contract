@@ -1,0 +1,10 @@
+# #115: pinned toolchain for reproducible contract builds. rustc's version
+# changes codegen, so an unpinned `stable` would silently change the WASM
+# hash whenever a new Rust release ships. Bump deliberately, together with
+# the Dockerfile's RUST_VERSION and the recorded hash in
+# docs/reproducible-builds.md.
+[toolchain]
+channel = "1.89.0"
+targets = ["wasm32v1-none"]
+components = ["rustfmt", "clippy"]
+profile = "minimal"

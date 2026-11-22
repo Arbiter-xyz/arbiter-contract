@@ -1,0 +1,7 @@
+{
+  "_comment": "Every transaction submission fails for the backend: nothing it sends lands. Run with --submit-profile profiles/none.json --keeper-profile profiles/none.json, so payments still land and the keeper can reach the chain. The only path to settlement is refund_timeout() after the deadline.",
+  "default": { "p": {} },
+  "methods": {
+    "sendTransaction": { "p": { "httpError": 1 } }
+  }
+}

@@ -116,3 +116,48 @@ which is a much larger change than the forwarder pattern above.
   match what `refund()`/`refund_timeout()` will pay?
 
 No contract code changes land until these are settled.
+
+# Stealth-address worker identity (issue #58)
+
+## Verdict
+
+Documentation only. No storage schema, `resolve()`, or `credit_owed()`
+changes land until the consolidation tension below has an actual
+resolution. This note states the tension, picks a resolution, and answers
+the three open questions from the issue.
+
+## The tension with the existing `Owed`/`Stake` accrual model
+
+Every worker-facing balance in `src/lib.rs` is deliberately persistent and
+linkable per `Address`:
+
+- `get_owed()` accumulates across `resolve()` calls, so a worker can answer
+  many questions and `withdraw()` once (see
+  `withdraw_accumulates_across_multiple_resolved_questions_before_a_single_payout`).
+- `get_stake()` is a single running total, not a per-question figure.
+
+A stealth address is, by definition, a fresh `Address` per question. It
+cannot be the same `Address` that accumulated `Owed`/`Stake` from a prior
+question. So passing a per-question stealth address into `resolve()`'s
+`workers` list forces one of two bad outcomes:
+
+1. **Abandon the accrual model per stealth identity** — each stealth
+   address holds its own `Owed`, and the worker is back to N discrete
+   payouts, exactly what round 2's "streaming settlement" was built to
+   avoid.
+2. **Require the worker to later prove control of many stealth addresses
+   to consolidate** — which is the consolidation problem this note must
+   solve without deanonymizing the worker in the act of consolidating.
+
+## Resolution: consolidate via a worker-controlled accumulator, not by
+linking stealth addresses on-chain
+
+The resolution is to keep `Owed`/`Stake` keyed by the **persistent worker
+address** and never let a stealth address hold a balance at all. A stealth
+address is used only as the *authorization* for a `resolve()` answer; the
+credit is routed to the worker's persistent accumulator in the same call.
+
+Concretely, the design (not implemented here) is:
+
+- The worker publishes a **scan key** and a **spend/accumulator address**
+  (the persi

@@ -1,9 +1,64 @@
-# Security Policy and Bug Bounty Scope
+# Security Policy
 
-## Overview
-Arbiter Escrow (`oracle-escrow`) is a Soroban smart contract custodying USDC for human-intelligence oracle questions settled on Stellar. This document establishes the formal bug bounty scope, severity classification rubric, reward tiers, reproduction criteria, and coordinated disclosure process.
+## Reporting a vulnerability
 
-## Scope and Target Assets
+Please **do not** open a public GitHub issue for security problems,
+especially anything that could let an attacker drain, freeze, or
+misallocate escrowed funds.
+
+Report privately through either channel:
+
+- **GitHub Security Advisories** — use the ["Report a vulnerability"](https://github.com/Arbiter-xyz/arbiter-contract/security/advisories/new)
+  button on this repository's **Security** tab (preferred: it keeps the
+  report, discussion and fix private until a coordinated disclosure).
+- **Email** — `security@arbiter.xyz`.
+
+Please include enough to reproduce: the entry point(s) involved, the exact
+call sequence, and the fund-safety or authorization impact you believe it
+has. If you have a proof-of-concept test (a Soroban test harness
+reproduction is ideal), attach it.
+
+## What's in scope
+
+This repository — the Arbiter Soroban contract — is the highest-stakes
+security surface in the project. In particular:
+
+- Fund-safety of the settlement paths: `resolve()`, `resolve_by_consensus()`,
+  `escalate()`/`escalate_resolve()`, `resolve_challengeable()`/
+  `dispute_resolve()`/`finalize_resolve()`, `refund()`/`refund_timeout()`.
+- Authorization gating: every state-mutating entry point's `require_auth()`/
+  `require_admin()`/`require_resolver_or_admin()` checks, and the
+  `initialize()`/admin-rotation/upgrade-proposal flows.
+- Arithmetic correctness in fee, slash, and stake-maturity computations.
+- The upgrade mechanism itself (`propose_upgrade()`/`execute_upgrade()`) and
+  whether in-flight questions' fund-safety can depend on trusting new code.
+
+Out of scope: the backend (report to
+[arbiter-backend](https://github.com/Arbiter-xyz/arbiter-backend)), the
+frontend (report to
+[arbiter-app](https://github.com/Arbiter-xyz/arbiter-app)), and findings
+that require a compromised admin key or already-leaked secret (that's a key-
+management incident, not a contract bug).
+
+## Deployment status
+
+This is presently a **testnet-only** deployment. It is production-shaped
+and the flows are live, but the keys and funds involved are testnet —
+please calibrate severity accordingly. We would still rather hear about an
+issue early than read it in a public issue.
+
+## What to expect
+
+We aim to acknowledge a report within **3 business days** and to give an
+initial assessment (in scope / severity / rough timeline) within **7
+business days**. We'll keep you updated as we work on a fix and are happy
+to credit you in the advisory unless you'd prefer otherwise.
+
+# Bug bounty scope and rewards
+
+The sections below define bug bounty scope, severity and rewards (#122). For how to report and response times, use the sections above.
+
+### Scope and Target Assets
 
 ### In-Scope Contract
 | Target Asset | Language / Platform | Description |
@@ -39,7 +94,7 @@ The following systems and threat vectors are excluded from this bug bounty progr
 - Volumetric network denial of service (transaction spamming, fee escalation)
 - Vulnerabilities requiring physical access, social engineering, or compromise of off-chain keys without contract logic flaws
 
-## Severity Classification Rubric
+### Severity Classification Rubric
 
 Security findings are evaluated based on their concrete financial and operational impact on the `oracle-escrow` smart contract.
 
@@ -50,7 +105,7 @@ Security findings are evaluated based on their concrete financial and operationa
 | Medium | State machine inconsistency or operational griefing without direct capital loss | 1. Logic flaws causing questions to enter inconsistent terminal states<br>2. Griefing of persistent storage TTLs leading to premature ledger entry archival<br>3. Partial denial of service affecting an isolated account's ability to withdraw<br>4. State mismatch between `DataKey::Balance` tracking and actual token custody |
 | Low / Informational | Minor accounting discrepancies or optimizations with negligible security risk | 1. Inefficient Soroban compute resource usage<br>2. Missing parameter validations that cannot cause state corruption or loss<br>3. Event emission omissions or documentation inaccuracies |
 
-## Severity and Reward Table
+### Severity and Reward Table
 
 Rewards are denominated in USDC. Payouts are sized relative to the economic value at risk and the verified severity rating.
 
@@ -61,7 +116,7 @@ Rewards are denominated in USDC. Payouts are sized relative to the economic valu
 | Medium | $250 – $1,000 | N/A | Reproduction unit test proving state corruption or isolated operational disruption |
 | Low | $50 – $250 | N/A | Detailed analysis with unit test demonstrating the logic edge case |
 
-## Proof of Concept and Verification Requirements
+### Proof of Concept and Verification Requirements
 
 To qualify for a bounty reward, all submissions must satisfy the following verification criteria:
 1. Native Test Suite: Include an automated Rust test case using `soroban-sdk` test utilities (matching the fixture structure in `src/test.rs`).
@@ -69,14 +124,5 @@ To qualify for a bounty reward, all submissions must satisfy the following verif
 3. Minimal State Transition: Provide the exact sequence of contract invocations and ledger sequences required to produce the anomalous state.
 4. Impact Assessment: State the affected functions, economic impact calculations, and proposed remediation diffs.
 
-## Coordinated Disclosure Process
-
-1. Submission: Report findings via GitHub Private Vulnerability Reporting or by email to `security@arbiter.xyz`.
-2. Acknowledgment: Submissions will be acknowledged within 48 hours of receipt.
-3. Triage & Assessment: Technical validity and severity classification will be completed within 5 business days.
-4. Remediation & Patch: Fixes will be prepared, audited, and deployed to testnet prior to production settlement.
-5. Settlement: Rewards are disbursed upon successful validation and deployment of the remediation patch.
-6. Public Disclosure: Coordinated public release occurs 30 days following production deployment.
-
-## Safe Harbor Terms
+### Safe Harbor Terms
 Security researchers who adhere to this policy, test exclusively against local sandboxes or authorized testnets, and do not disrupt active protocol users are protected under safe harbor terms. Arbiter will not initiate legal action against researchers acting in good faith.

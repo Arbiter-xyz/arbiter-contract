@@ -1,0 +1,10 @@
+{
+  "name": "oracle-escrow-shadow",
+  "private": true,
+  "description": "Shadow-contract mirroring and state diffing (issue #120). See docs/SHADOW_TESTING.md.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.0.0"
+  }
+}

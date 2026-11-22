@@ -1,0 +1,5 @@
+{
+  "_comment": "Replace with arbiter-backend's real POST /oracle body. {{n}} becomes the request number.",
+  "question": "load-test question {{n}}",
+  "tier": "0.25"
+}

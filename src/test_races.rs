@@ -129,11 +129,13 @@ impl World {
                 &QID,
                 &Vec::from_array(&self.env, self.workers_a.clone()),
                 &Vec::from_array(&self.env, [self.loser.clone()]),
+                &BytesN::from_array(&self.env, &[0u8; 32]),
             )),
             Racer::ResolveB => flatten(c.try_resolve(
                 &QID,
                 &Vec::from_array(&self.env, self.workers_b.clone()),
                 &Vec::new(&self.env),
+                &BytesN::from_array(&self.env, &[0u8; 32]),
             )),
             Racer::AdminRefund => flatten(c.try_refund(&QID)),
             Racer::TimeoutRefund | Racer::TimeoutRefundByPayer => flatten(c.try_refund_timeout(&QID)),
@@ -192,11 +194,18 @@ fn settled_by(before: &Snapshot, winner: Racer) -> Snapshot {
         Racer::ResolveA => {
             let share = pool / 2;
             let slash = LOSER_STAKE * 500 / 10_000;
+            // SLASH_REDISTRIBUTE_BPS = 5_000 (50%): half goes to workers, half to platform.
+            let worker_portion = (slash / BPS_DENOM) * SLASH_REDISTRIBUTE_BPS
+                + (slash % BPS_DENOM) * SLASH_REDISTRIBUTE_BPS / BPS_DENOM;
+            let platform_portion = slash - worker_portion;
+            // redist_share split evenly across 2 workers (no dust at these numbers)
+            let redist_share = worker_portion / 2;
+            let redist_dust = worker_portion - redist_share * 2;
             s.status = Status::Resolved;
-            s.platform += fee + (pool - share * 2) + slash;
+            s.platform += fee + (pool - share * 2) + platform_portion + redist_dust;
             s.loser_stake -= slash;
-            s.owed[0] += share;
-            s.owed[1] += share;
+            s.owed[0] += share + redist_share;
+            s.owed[1] += share + redist_share;
             s.contract -= fee + (pool - share * 2) + slash;
         }
         Racer::ResolveB => {
@@ -401,11 +410,17 @@ fn losing_worker_front_running_resolve_with_unstake_only_escapes_their_own_slash
         assert_eq!(w.apply(Racer::ResolveA), Ok(()));
         let s = w.snapshot();
         let slash = if front_run { 0 } else { LOSER_STAKE * 500 / 10_000 };
-        assert_eq!(s.platform, fee + dust + slash);
-        assert_eq!(s.owed[0], share);
-        assert_eq!(s.owed[1], share);
+        // With SLASH_REDISTRIBUTE_BPS = 5_000 (50%): half of slash goes to platform,
+        // half is split evenly across the 2 matching workers.
+        let worker_portion = (slash / BPS_DENOM) * SLASH_REDISTRIBUTE_BPS
+            + (slash % BPS_DENOM) * SLASH_REDISTRIBUTE_BPS / BPS_DENOM;
+        let platform_portion = slash - worker_portion;
+        let redist_share = worker_portion / 2; // 2 workers in ResolveA
+        assert_eq!(s.platform, fee + dust + platform_portion);
+        assert_eq!(s.owed[0], share + redist_share);
+        assert_eq!(s.owed[1], share + redist_share);
         assert_eq!(s.loser_stake, if front_run { 0 } else { LOSER_STAKE - slash });
-        assert_eq!(s.contract, share * 2 + s.loser_stake);
+        assert_eq!(s.contract, (share + redist_share) * 2 + s.loser_stake);
     }
 }
 
@@ -440,7 +455,7 @@ fn admin_rotation_proposal_leaves_current_authority_active_during_delay() {
                 sub_invokes: &[],
             },
         }])
-        .try_resolve(&QID, &workers, &losers);
+        .try_resolve(&QID, &workers, &losers, &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(res, Ok(()));
     assert_eq!(w.snapshot().status, Status::Resolved);
 }

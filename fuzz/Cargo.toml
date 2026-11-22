@@ -1,0 +1,35 @@
+[package]
+name = "oracle-escrow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# cargo-fuzz adds `[profile.fuzz]` and `-C passes=sancov-module` when it
+# compiles this crate. The profile here covers only what we need on top of
+# cargo-fuzz's own defaults.
+[profile.fuzz]
+inherits = "dev"
+opt-level = 3
+incremental = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "oracle_escrow_fuzz"
+path = "fuzz_targets/oracle_escrow_fuzz.rs"
+test = false
+doc = false
+
+[dependencies]
+# The contract crate itself, built in testutils mode so Env::default() works.
+oracle-escrow = { path = "..", features = ["testutils"] }
+# arbitrary provides the derive macro we use to turn raw fuzz bytes into
+# structured call sequences, without hand-writing a custom byte-parser.
+arbitrary = { version = "1", features = ["derive"] }
+# libfuzzer-sys is what cargo-fuzz links against; the fuzz_target! macro lives
+# here. Pinned to the exact version cargo-fuzz 0.12 injects so `cargo fuzz run`
+# and direct `cargo build --target x86_64-unknown-linux-gnu` agree.
+libfuzzer-sys = "0.4"
+# soroban-sdk test utilities for Env + Ledger + Address helpers.
+soroban-sdk = { version = "23", features = ["testutils"] }

@@ -2,6 +2,10 @@
 
 //! Issue #86: permissionless sweep_timeouts() batch wrapper around the
 //! same per-question logic refund_timeout() has always used.
+//!
+//! Issue #39 (batch_submit()) is a separate, unimplemented feature; its
+//! tests live with that feature, not here. This file covers only the
+//! expiry sweep.
 
 use super::*;
 use crate::test::{client, setup, token_client, AMOUNT, TIMEOUT_LEDGERS};
@@ -67,7 +71,7 @@ fn sweep_timeouts_skips_an_already_resolved_question_without_reverting_the_batch
     let w1 = Address::generate(&f.env);
     let workers = Vec::from_array(&f.env, [w1]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&2, &workers, &no_losers);
+    c.resolve(&2, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 
     f.env.ledger().with_mut(|li| {
         li.sequence_number += TIMEOUT_LEDGERS + 1;

@@ -13,7 +13,7 @@ fn resolve_one_worker(f: &Fixture, worker: &Address) {
     c.submit(&f.payer, &1, &AMOUNT);
     let workers = Vec::from_array(&f.env, [worker.clone()]);
     let no_losers = Vec::new(&f.env);
-    c.resolve(&1, &workers, &no_losers);
+    c.resolve(&1, &workers, &no_losers, &BytesN::from_array(&f.env, &[0u8; 32]));
 }
 
 #[test]
