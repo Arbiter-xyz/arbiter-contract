@@ -417,6 +417,10 @@ out only the portion that has vested by the current ledger, leaving the rest
 locked until later. See `contracts/fee-vesting/src/lib.rs` for the exact
 schedule math and entry points.
 
+## Security and Bug Bounty
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and for the bug bounty scope, severity rubric and reward table.
+
 ## Economics, operations and pre-deployment testing
 
 - [docs/economics/incentive-alignment.md](docs/economics/incentive-alignment.md) —

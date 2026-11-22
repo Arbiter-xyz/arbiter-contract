@@ -1669,3 +1669,82 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
     assert_eq!(c.get_owed_asset(&worker1, &f.token_address), amount_a * 4 / 5);
     assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
 }
+
+/// Verifies that admin-gated settlement requires administrator authorization.
+#[test]
+fn security_invariant_admin_authorization_enforced() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [winner]);
+    let losers = Vec::new(&f.env);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    assert_eq!(f.env.auths().get(0).unwrap().0, f.admin);
+}
+
+/// Verifies that terminal states reject duplicate settlement, refund, and timeout refund.
+#[test]
+fn security_invariant_escrow_terminal_states_reject_double_settlement() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [winner]);
+    let losers = Vec::new(&f.env);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    assert_eq!(c.try_resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32])), Err(Ok(ContractError::QuestionNotPending)));
+    assert_eq!(c.try_refund(&1), Err(Ok(ContractError::QuestionNotPending)));
+    assert_eq!(c.try_refund_timeout(&1), Err(Ok(ContractError::QuestionNotPending)));
+}
+
+/// Verifies that matching and losing worker lists cannot overlap.
+#[test]
+fn security_invariant_worker_and_losing_worker_disjoint_lists() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let worker = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [worker.clone()]);
+    let losers = Vec::from_array(&f.env, [worker]);
+
+    let res = c.try_resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
+    assert_eq!(res, Err(Ok(ContractError::InvalidWorkerLists)));
+}
+
+/// Verifies that a worker cannot withdraw more than their accrued owed earnings.
+#[test]
+fn security_invariant_withdraw_cannot_exceed_accrued_owed() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winner = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [winner.clone()]);
+    let losers = Vec::new(&f.env);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    let owed = c.get_owed(&winner);
+    let res = c.try_withdraw(&winner, &(owed + 1));
+    assert_eq!(res, Err(Ok(ContractError::InsufficientOwed)));
+}
+
+/// Verifies that a payer cannot overdraw their deposited prepaid balance.
+#[test]
+fn security_invariant_balance_cannot_be_overdrawn() {
+    let f = setup();
+    let c = client(&f);
+    c.deposit(&f.payer, &AMOUNT);
+
+    let res = c.try_withdraw_balance(&f.payer, &(AMOUNT + 1));
+    assert_eq!(res, Err(Ok(ContractError::InsufficientBalance)));
+
+    let res_charge = c.try_charge(&f.payer, &1, &(AMOUNT + 1));
+    assert_eq!(res_charge, Err(Ok(ContractError::InsufficientBalance)));
+}
+
