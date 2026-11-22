@@ -141,7 +141,7 @@ fn setup_large_values() -> Fixture {
     }
 }
 
-fn contract_events(
+pub(crate) fn contract_events(
     f: &Fixture,
 ) -> std::vec::Vec<(
     soroban_sdk::Vec<soroban_sdk::Val>,
@@ -166,7 +166,7 @@ fn last_contract_event(
     contract_events(f).pop().unwrap()
 }
 
-fn event_name(f: &Fixture, topics: &soroban_sdk::Vec<soroban_sdk::Val>) -> Symbol {
+pub(crate) fn event_name(f: &Fixture, topics: &soroban_sdk::Vec<soroban_sdk::Val>) -> Symbol {
     topics.get(0).unwrap().into_val(&f.env)
 }
 
