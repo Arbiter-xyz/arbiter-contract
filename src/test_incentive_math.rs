@@ -26,6 +26,7 @@ fn constants_match_lib_rs() {
     assert_eq!(sim_math::PLATFORM_FEE_BPS, PLATFORM_FEE_BPS);
     assert_eq!(sim_math::SLASH_BPS, SLASH_BPS);
     assert_eq!(sim_math::SLASH_CAP_BPS_OF_AMOUNT, SLASH_CAP_BPS_OF_AMOUNT);
+    assert_eq!(sim_math::SLASH_REDISTRIBUTE_BPS, SLASH_REDISTRIBUTE_BPS);
     assert_eq!(sim_math::BPS_DENOM, BPS_DENOM);
     assert_eq!(Params::CONTRACT.fee_bps, PLATFORM_FEE_BPS);
     assert_eq!(Params::CONTRACT.slash_bps, SLASH_BPS);
@@ -156,7 +157,11 @@ fn check_resolve(amount: i128, winners: u32, losers: &[LoserSpec]) {
     let s = sim_math::resolve(amount, winners, &mut sim_losers, Params::CONTRACT);
 
     for a in &winner_addrs {
-        assert_eq!(c.get_owed(a), s.share, "share, amount={amount} n={winners}");
+        assert_eq!(
+            c.get_owed(a),
+            s.share + s.redistribution_share,
+            "share + redistribution, amount={amount} n={winners}"
+        );
     }
     assert_eq!(
         tok.balance(&m.platform) - platform_before,
@@ -224,6 +229,25 @@ fn resolve_matches_for_unstaked_losers() {
         unbonding: 0,
     };
     check_resolve(2_500_000, 4, &[none, none]);
+}
+
+/// Issue #205: preview_resolve() must not overflow on amounts whose
+/// multiply-then-divide form would exceed i128, matching resolve()'s
+/// divide-first mul_bps() path.
+#[test]
+fn preview_resolve_does_not_overflow_on_large_amounts() {
+    let m = Market::new();
+    let c = m.client();
+
+    // Beyond i128::MAX / BPS_DENOM, so amount * bps would overflow.
+    let amount = i128::MAX / 2;
+    c.submit(&m.payer, &1, &amount);
+
+    let preview = c.preview_resolve(&1);
+    let expected_fee = OracleEscrow::mul_bps(amount, PLATFORM_FEE_BPS);
+    let expected_cap = OracleEscrow::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
+    assert_eq!(preview.fee, expected_fee);
+    assert_eq!(preview.slash_cap, expected_cap);
 }
 
 proptest! {

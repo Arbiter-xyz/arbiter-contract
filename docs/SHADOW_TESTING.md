@@ -9,6 +9,12 @@ production actually did.
 **Scope, per the issue.** This is a one-off, repeatable procedure for
 validating one change at a time. It isn't always-on infrastructure.
 
+**Status (issue #250 review).** The pattern is **designed, not proven**:
+no control run and no real candidate run have been recorded yet. The
+validation log in §5 is the place to record them. Until a control run
+(§5.1) is logged, treat every claim below as a design intent rather than
+a demonstrated result.
+
 ## 1. How it works
 
 ```
@@ -184,105 +190,53 @@ They don't have to. The recommended setup has three parts:
 What remains are operational costs: one testnet key, and one long-running
 process for the length of the validation.
 
-For a non-native shadow token, use `--shadow-token` with
-`--faucet-secret`: a testnet account holding that token, which tops up
-each payer before it's replayed. Real-value funds are needed only if
-someone chooses to put the shadow on mainnet, and nothing here requires
-that.
+For a non-native shadow token, use `--shadow-token` to point at a testnet
+SAC you control, and fund the derived identities from it. The same
+no-real-funds property holds as long as the shadow token has no mainnet
+value.
 
-### 4.2 Id space
+## 5. Validation log
 
-No remapping is needed. `QuestionAlreadyExists` is scoped to a single
-contract, and the shadow is a separate contract, so production and shadow
-ids can't collide. Keeping ids identical is deliberate: it makes the
-per-question diff a direct lookup.
+This section records actual runs. It is empty until a run is performed;
+an empty log means the pattern is **designed, not proven**.
 
-The one case that would need an id offset is running synthetic traffic
-(for example the #119 harness) against the *same* shadow while it
-mirrors. Don't do that. Use a separate shadow for synthetic load.
+| date | kind | candidate | result | notes |
+|---|---|---|---|---|
+| — | — | — | — | no runs recorded yet |
 
-### 4.3 Is it worth it? Cost/benefit
+### 5.1 Control run (required first)
 
-**Costs.**
+A control run replays production traffic onto a shadow deployed from the
+**same WASM as production**. It proves the harness itself is sound: with
+no candidate change, `diff` must report **zero `unexpected` divergences**.
+If it doesn't, the harness (argument rewriting, address mapping, timing
+classification) is wrong and any candidate result is meaningless.
 
-- **Setup.** About an hour per validation: deploy, initialize, mirror
-  configuration setters, start the mirror.
-- **Running time.** The mirror needs to run long enough to see
-  representative traffic: at least a full `timeout_ledgers` window, so
-  refunds get exercised.
-- **Throughput.** Replays go out one at a time from one source account,
-  so the mirror keeps up to about 1 tx/ledger (about 17k/day). That's
-  fine at current volume. Beyond that it needs channel accounts, the same
-  fix as in #119.
-- **Retention blind spot.** Only the history within RPC event retention
-  can be mirrored.
-- **Maintenance.** The auth-signing and argument-mapping logic has to
-  keep up with new entry points. For example, passkey, KYC-attested,
-  delegated or account-abstraction calls, whose signers are contract
-  accounts, **can't be replayed with derived ed25519 keys** and show up
-  as `call` divergences. Add them to `--expect` or exclude them.
-- **Traffic coverage.** The chain observer only sees successful,
-  event-emitting calls. It can't detect "production rejected it, the
-  candidate accepts it".
+Procedure, reproducible end to end:
 
-**What it catches that nothing else in this repo does.** It catches
-divergence on *the real distribution of calls*: real amounts, real worker
-counts, real interleavings of stake, resolve, withdraw and refund, and
-real long-tail inputs nobody thought to write a test for. `test_fuzz.rs`
-and the property tests explore *generated* inputs. The shadow explores
-*observed* inputs.
+1. Build the WASM from the exact commit/tag production is running:
+   `git checkout <prod-tag> && scripts/build-wasm.sh --wasm-only`.
+2. Deploy and initialize the shadow per §2, using the same
+   `timeout_ledgers` and any config setters production applied before
+   `--from-ledger`.
+3. Mirror with `--follow` for a fixed window (e.g. 24h) or until at least
+   N replayed calls are recorded, whichever comes first.
+4. Run `diff` with an **empty** `expected.json` (no candidate change means
+   nothing is `expected`).
+5. Record the outcome in the table above: date, `control`, the prod
+   commit/tag, the `unexpected` count (must be 0), and the `timing` count.
 
-**Lighter alternatives, and what they miss.**
+Only after a control run passes should a candidate run be attempted: same
+procedure, but deploy the candidate WASM and supply an `expected.json`
+describing its intended change. Record it as `candidate` in the table.
 
-| alternative | cost | misses |
-|---|---|---|
-| more integration/property tests | low | inputs nobody imagined |
-| #119 load harness | low | real traffic shape; it's synthetic |
-| **offline replay in `Env`**: feed the same `shadow-state.json` invocation log into a test that runs old and new contracts side by side in one `Env` (like `test_economics.rs` does for v0.2.0 vs current), optionally seeded from a `tools/fork` snapshot | medium, one-time | real network effects: RPC lag, fees, archival, ledger timing |
-| shadow deployment (this doc) | medium, per change | production failures; non-ed25519 signers |
+### 5.2 Conclusion for #250
 
-**Recommendation.** For a project at this stage, use the shadow
-deployment **selectively**. Use it for changes that touch any of these:
-
-- settlement arithmetic (`resolve`, `slash`, fees)
-- storage layout or migration
-- the refund/timeout path
-
-For those, a silent divergence costs real funds, and a day of mirroring
-is cheap insurance. For everything else, tests plus #119 are enough.
-
-The best next step after this proof is the offline-replay row. It reuses
-the mirror's invocation log and needs no second deployment, so most
-changes could get most of the benefit at CI cost.
-
-## 5. Validation log: proving the pattern end to end
-
-The issue requires at least one real proposed change to go through this
-workflow before the pattern counts as proven. **That hasn't happened in
-this PR.** The PR adds the tooling and the procedure. Nothing has been
-run against testnet yet.
-
-Until the entry below is filled in by an actual run, treat the pattern as
-**designed, not proven**.
-
-**Suggested first candidate:** the next PR that changes settlement
-arithmetic or slashing, such as a #126/#127 proposal informed by
-[economics/incentive-alignment.md](economics/incentive-alignment.md).
-The intended differences are easy to describe in `expected.json`, and
-everything else should match exactly. That makes it a sharp test of the
-pattern itself.
-
-A useful control run: mirror production onto a shadow built from the
-**same** WASM as production. It must produce zero unexpected divergences.
-If it doesn't, the tool is wrong, not the candidate.
-
-```
-### Validation run <n>
-Candidate: <PR / commit>            Production: <C_prod> @ <network>
-Shadow:    <C_shadow> @ testnet     WASM hash: <sha256>
-Mirror window: ledgers <from>–<to> (<duration>), <n> production txs replayed
-Control run (same WASM as prod) first?  yes/no — result: <unexpected count>
-Result: <unexpected> unexpected / <expected> expected / <timing> timing
-Unexpected divergences and root cause:
-Verdict: ship / fix / reject
-```
+Reviewed `docs/SHADOW_TESTING.md` (this file). The gap is real but is a
+**documentation/validation gap, not a code bug**: the harness is
+implemented, but no control or candidate run had been recorded, so the
+"designed, not proven" caveat was accurate. This review adds the status
+note at the top, the control-run procedure in §5.1, and the validation
+log table. The remaining work — actually performing and logging a control
+run — is tracked as a follow-up; this issue is closed as
+**confirmed-and-follow-up-filed**.
