@@ -53,6 +53,40 @@ fn charge_while_paused_fails() {
     assert_eq!(c.get_balance(&f.payer), 0);
 }
 
+/// #196: stake()/stake_asset() are fund-inflow entry points, same as
+/// submit()/deposit()/charge() above — they must be gated by the circuit
+/// breaker too.
+#[test]
+fn stake_while_paused_fails() {
+    use crate::test::fund_worker;
+    let f = setup();
+    let c = client(&f);
+    let worker = Address::generate(&f.env);
+    fund_worker(&f, &worker, AMOUNT);
+
+    c.set_paused(&true);
+    assert_eq!(
+        c.try_stake(&worker, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(c.get_stake(&worker), 0);
+}
+
+#[test]
+fn stake_asset_while_paused_fails() {
+    use crate::test::fund_worker;
+    let f = setup();
+    let c = client(&f);
+    let worker = Address::generate(&f.env);
+    fund_worker(&f, &worker, AMOUNT);
+
+    c.set_paused(&true);
+    assert_eq!(
+        c.try_stake_asset(&worker, &f.token_address, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+}
+
 #[test]
 fn paused_contract_still_allows_resolve_and_refund_of_existing_questions() {
     let f = setup();

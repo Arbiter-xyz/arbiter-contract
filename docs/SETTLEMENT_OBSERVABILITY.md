@@ -64,74 +64,35 @@ transferred, and direct `i128 * bps` could overflow on very large amounts.
 Resolution now transfers the per-question platform amount in its bound
 asset and uses overflow-safe integer basis-point calculation.
 
+## Load-testing harness review (#248)
+
+This section records the review conclusion for the load-testing harness
+referenced by `docs/LOAD_TESTING.md:143-159`. The Results table and the
+three throughput hypotheses (flat contract cost, admin-source `resolve()`
+serialization, network-side ceiling) are explicitly marked unconfirmed.
+
+Conclusion: **not-a-bug-closed-with-reasoning** for the harness itself. The
+harness is a measurement tool, not a correctness surface; the absence of a
+recorded run is a missing measurement, not a defect in the code under test.
+The unconfirmed hypotheses remain unconfirmed by design until someone runs
+`bench_load_*` and the network layer against a real deployment. No
+benchmark numbers are asserted here, and no run data is fabricated.
+
+Follow-up: closing out #119 for real requires an actual run. That is
+tracked separately as a measurement task, not as a code fix in this review.
+Until such a run is recorded, treat the Results table and all three
+hypotheses as unverified.
+
 ## Cross-chain settlement bridge (design note, #71)
 
-This note is documentation only. No contract code changes land until the
-bridge-to-contract interface (what actually calls `submit()`/`charge()`, and
-from what address) is settled, per the acceptance criteria for #71.
+The canonical CCTP-forwarder design note for #71 lives in
+[`docs/migration.md`](./migration.md#cross-chain-settlement-bridge-design-note-71).
+That file is the single source of truth for the chosen rail, the fund trace,
+the refund path, and the open interface question; update it there rather
+than duplicating the note here.
 
-### Chosen rail: Circle CCTP with a Stellar forwarder
-
-We name Circle CCTP (native USDC) plus a forwarder contract as the rail for
-"pay from another chain". CCTP is preferred over Axelar GMP here because the
-escrowed asset is USDC and CCTP moves native USDC 1:1 with no wrapped-asset
-or liquidity-pool risk; its trust model is the issuer's attestation service
-rather than a general validator set, and its latency (source finality plus
-attestation) is predictable. Axelar GMP is a better fit for arbitrary
-cross-chain *messages* and heterogeneous assets, but it introduces a
-validator-set trust assumption and message-execution semantics we do not
-need for a single-asset escrow. CCTP already requires a forwarder contract
-for Stellar recipients, which matches `lib.rs`'s existing shape: the
-forwarder, not the origin-chain payer, is the Stellar caller.
-
-### Fund trace: origin chain to `open_question()`
-
-1. Payer holds USDC on an origin chain and initiates a CCTP `depositForBurn`
-   targeting Stellar, with the mint recipient set to the forwarder contract
-   address and a payload identifying the intended escrow action.
-2. Circle's attestation service observes the burn and produces an
-   attestation; the message is relayed to Stellar.
-3. CCTP mints native USDC to the forwarder contract on Stellar.
-4. The forwarder calls the escrow. For a direct question it calls `submit()`
-   with the payer's designated Stellar address as `payer`; for the
-   admin-funded path it calls `charge()` against a prior `deposit()`. In both
-   cases the forwarder is the transaction source, but the `payer` of record
-   is the Stellar address the payer designated.
-5. `submit()`/`charge()` run unchanged: `payer.require_auth()` is satisfied
-   by the designated Stellar address's authorization, and the escrow's
-   `token::Client::transfer` moves the now-Stellar-native USDC into escrow.
-6. `open_question()` records the question with that Stellar address as
-   `Question.payer`.
-
-### Refund path for a bridged payer
-
-A bridged payer must designate their own Stellar address as the
-`Question.payer` of record. `refund()` and `refund_timeout()` call
-`do_refund()`, which today only ever calls `token_client.transfer` on
-Stellar; there is no bridge-back in the settlement path. Consequently a
-refund pays the designated Stellar address in native USDC, and bridging that
-USDC back to the origin chain is the payer's own responsibility, outside the
-contract. Bridging refunds back to the origin chain is explicitly out of
-scope for #71: it would require `do_refund()` to emit a CCTP burn intent and
-coordinate with the forwarder, a much larger change than the forwarder
-pattern above. If a payer does not designate a Stellar address they control,
-the refund is unrecoverable by them, so the forwarder must require and
-validate that address before calling `submit()`/`charge()`.
-
-### Open questions resolved
-
-1. The bridged payer does need their own Stellar address as
-   `Question.payer` of record, so `refund()`/`refund_timeout()` can pay them
-   back on Stellar. Refunds are not bridged back to the origin chain in this
-   design; that is deferred as larger scope.
-2. CCTP with a forwarder fits "pay from another chain" best for this
-   single-asset USDC escrow, given its 1:1 native-USDC movement and
-   issuer-attestation trust model. Axelar GMP remains the option if the
-   escrow later needs arbitrary cross-chain messages or non-USDC assets.
-
-### Interface still to settle before code
-
-The forwarder-to-escrow interface is not yet frozen: whether the forwarder
-calls `submit()` directly or routes through `charge()` after a `deposit()`,
-and the exact address that appears as `payer`, must be agreed before any
-contract change. Until then this remains a design note only.
+For settlement observability, the relevant consequence is that a bridged
+payer's USDC arrives on Stellar as native USDC and is escrowed by the same
+`submit()`/`charge()` path described above. Refunds pay the designated
+Stellar address in native USDC; bridging back to the origin chain is out of
+scope for #71. See the canonical note for the full design.

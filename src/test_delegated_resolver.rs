@@ -5,6 +5,12 @@
 //!  1. resolve_succeeds_when_called_by_the_delegated_resolver
 //!  2. resolve_still_succeeds_when_called_by_admin_with_no_resolver_set
 //!  3. resolver_cannot_call_refund_or_charge_or_set_admin
+//!
+//! Issue #267 review: set_resolver() is intentionally a single-step,
+//! admin-gated rotation (no delay / event-pair confirmation like set_admin()).
+//! The resolver can only call resolve(); it cannot move funds, change the
+//! admin, or escalate its own authority. The test below pins that asymmetry so
+//! a future change that silently widens the resolver's power is caught.
 
 use crate::test::{client, setup, token_client, AMOUNT};
 use crate::Status;
@@ -162,4 +168,60 @@ fn resolver_cannot_call_refund_or_charge_or_set_admin() {
         charge_res.is_err(),
         "resolver must not be able to call charge()"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4. Issue #267: set_resolver() is admin-gated and single-step by design.
+//    Unlike set_admin()'s two-step rotation, the resolver can only resolve();
+//    it cannot escalate. This test documents that asymmetry is intentional.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_resolver_is_admin_gated_and_does_not_grant_escalation() {
+    let f = setup(); // mock_all_auths() active for setup
+    let c = client(&f);
+    let resolver = Address::generate(&f.env);
+
+    // Admin installs the resolver in a single step (no delay / event pair).
+    c.set_resolver(&Some(resolver.clone()));
+    assert_eq!(c.get_resolver(), Some(resolver.clone()));
+
+    // A non-admin key cannot rotate the resolver.
+    f.env.set_auths(&[]);
+    let attacker = Address::generate(&f.env);
+    let rogue = Address::generate(&f.env);
+    let set_resolver_res = c
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &f.contract_id,
+                fn_name: "set_resolver",
+                args: (Some(rogue.clone()),).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_resolver(&Some(rogue.clone()));
+    assert!(
+        set_resolver_res.is_err(),
+        "non-admin must not be able to call set_resolver()"
+    );
+    assert_eq!(c.get_resolver(), Some(resolver.clone()));
+
+    // The resolver itself cannot rotate the resolver (no self-escalation).
+    let self_rotate_res = c
+        .mock_auths(&[MockAuth {
+            address: &resolver,
+            invoke: &MockAuthInvoke {
+                contract: &f.contract_id,
+                fn_name: "set_resolver",
+                args: (Some(rogue.clone()),).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_set_resolver(&Some(rogue.clone()));
+    assert!(
+        self_rotate_res.is_err(),
+        "resolver must not be able to rotate the resolver"
+    );
+    assert_eq!(c.get_resolver(), Some(resolver.clone()));
 }

@@ -50,7 +50,14 @@ decision.
   ed25519-signing dev-dependency (the contract only verifies, it never
   signs).
 
-## ZK proof of worker qualification (issue #55)
+## ZK proof of worker qualification (issue #55) — PROPOSED, NOT IMPLEMENTED
+
+> **Status: design proposal only.** None of the functions described in
+> this section exist in `src/lib.rs` today, and there is no
+> `src/test_qualification.rs`. This section records the proposed design
+> for #55 so the schema/issuer model is settled before any storage or
+> verifier code lands. Do not treat any of the names below as a current
+> contract API.
 
 ### Credential schema and issuer model (documented before storage is finalized)
 
@@ -75,7 +82,7 @@ scope for this contract change and must be specified first.
   Building the credential-issuance system is explicitly out of scope; this
   is the verifier integration only.
 
-### Verifier integration
+### Verifier integration (proposed API — not yet in `src/lib.rs`)
 
 - `set_qualification_verifier(vk)` — admin-only, configures the Groth16
   verification key (or, for the stubbed/mock path, the trusted verifier
@@ -87,12 +94,16 @@ scope for this contract change and must be specified first.
 - `is_qualified(worker)` — read-only, `true` iff a valid qualification
   proof has been recorded for `worker`.
 
-### Gating `resolve()`
+### Gating `resolve()` (proposed — not yet implemented)
 
-`resolve()`'s `workers` list is gated on `is_qualified()` alongside the
-`get_stake()` check: a worker lacking a valid qualification proof is
-excluded from `workers` (and therefore from `credit_owed()`), matching the
-`resolve_rejects_a_worker_without_a_valid_qualification_proof` test.
+If/when the verifier lands, the proposal is to gate `resolve()`'s
+`workers` list on `is_qualified()` alongside the `get_stake()` check: a
+worker lacking a valid qualification proof would be excluded from
+`workers` (and therefore from `credit_owed()`). Today `resolve()` does
+**not** consult any qualification state — it only applies the existing
+`get_stake()` check — and the referenced
+`resolve_rejects_a_worker_without_a_valid_qualification_proof` test does
+not exist. Implementing this gating is a separate, follow-up change.
 
 ### Open questions / tradeoffs (deferred)
 
@@ -111,6 +122,6 @@ excluded from `workers` (and therefore from `credit_owed()`), matching the
 - No credential-issuance system — verifier integration only, per the
   issue's stated scope.
 - No multi-issuer support or issuer rotation history.
-- The stubbed/mock proof path is what the test contract instance exercises;
-  the real Groth16 host-function path is a drop-in replacement once the
-  circuit is specified.
+- The stubbed/mock proof path is what the test contract instance would
+  exercise once implemented; the real Groth16 host-function path is a
+  drop-in replacement once the circuit is specified.

@@ -80,3 +80,33 @@ fn finalize_before_the_window_elapses_fails() {
     let res = c.try_finalize_resolve(&1);
     assert_eq!(res, Err(Ok(ContractError::DisputeWindowNotElapsed)));
 }
+
+// #221: an abandoned escalation (Status::Disputed with no escalate_resolve())
+// must not strand the asker's escrow. The admin-gated recovery path
+// (admin_refund_disputed) is the single override shared with #184's
+// bonded-challenger dispute recovery, and it must return escrow to the asker.
+#[test]
+fn abandoned_escalation_can_be_refunded_via_admin_recovery() {
+    let f = setup();
+    let c = client(&f);
+
+    c.submit(&f.payer, &1, &AMOUNT);
+    c.escalate(&1);
+
+    let q = c.get_question(&1);
+    assert_eq!(q.status, Status::Disputed);
+
+    // refund()/refund_timeout() only accept Pending, so they cannot recover
+    // a Disputed question; the admin override is the only path back.
+    assert_eq!(
+        c.try_refund(&1),
+        Err(Ok(ContractError::InvalidStatus))
+    );
+
+    let before = c.get_balance(&f.payer);
+    c.admin_refund_disputed(&1);
+
+    let q = c.get_question(&1);
+    assert_eq!(q.status, Status::Refunded);
+    assert_eq!(c.get_balance(&f.payer), before + AMOUNT);
+}
