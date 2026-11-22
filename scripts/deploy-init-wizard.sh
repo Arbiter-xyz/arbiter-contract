@@ -1,30 +1,19 @@
 #!/usr/bin/env bash
 #
-# Guided deploy + initialize wizard for OracleEscrow (issue #113).
+# Guided deploy wizard for OracleEscrow (issue #113).
 #
 # Motivation
 # ----------
-# `initialize()` is only guarded by `AlreadyInitialized`: it accepts whoever
-# calls it first, requiring only that caller's own signature on whatever
-# `admin` address they pass in. A freshly-deployed, not-yet-initialized
-# contract therefore races the real deployer -- anyone watching the network
-# for a new OracleEscrow WASM upload could front-run the legitimate
-# `initialize(admin, token, platform, timeout_ledgers)` call and become
-# `admin` themselves.
+# OracleEscrow used to expose a public `initialize()` that any caller could
+# win by signing for their own `admin` address, so a freshly-deployed contract
+# could be front-run after its WASM upload. Setup now lives in `__constructor`,
+# which runs inside the deploy transaction itself, so there is no separate
+# call to race.
 #
-# This wizard mitigates that at the tooling layer: it prompts for and
-# validates all four `initialize()` arguments *before* deploying, then
-# submits `stellar contract deploy` and `stellar contract invoke --
-# initialize` back-to-back in the same invocation with no manual pause in
-# between. That closes the window as tightly as tooling alone can.
-#
-# THIS IS A MITIGATION, NOT A FIX. There is always some gap between two
-# separate transactions, so the front-running window is narrowed but never
-# closed to zero. The contract-level fix (e.g. a commit-reveal deploy
-# pattern, or requiring the deployer's address to match a pre-registered
-# value) is tracked separately in the contract-level `initialize()`
-# front-running issue. If you need a stronger guarantee than "narrow the
-# window", follow that issue instead of relying on this script.
+# This wizard collects and validates all four constructor arguments *before*
+# deploying, then passes them to `stellar contract deploy` in one call. The
+# up-front validation still catches typos before they are locked in: there is
+# no `set_token()` or `set_admin()` in `lib.rs`.
 #
 # Usage:
 #   ./scripts/deploy-init-wizard.sh                 # interactive prompts
@@ -97,10 +86,9 @@ prompt_until_valid() {
 
 if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
   echo "==> OracleEscrow guided deploy + initialize wizard"
-  echo "    (mitigation for the initialize() front-running issue -- not a fix)"
+  echo "    (constructor arguments are supplied atomically with the deploy)"
   echo
-  echo "Collecting all four initialize() arguments BEFORE deploying so they are"
-  echo "ready to submit the instant the contract id is known."
+  echo "Collecting all four constructor arguments BEFORE deploying."
   echo
   [[ -n "$ADMIN" ]] || prompt_until_valid "admin" ADMIN is_account_address "G... account address"
   [[ -n "$TOKEN" ]] || prompt_until_valid "token" TOKEN is_contract_address "C... SEP-41 contract address"
@@ -136,53 +124,29 @@ fi
 SOURCE_ARGS=()
 [[ -n "$SOURCE" ]] && SOURCE_ARGS=(--source "$SOURCE")
 
-# --- deploy -> initialize, back-to-back -------------------------------------
+# --- deploy with constructor arguments --------------------------------------
 #
-# No manual pause between these two calls: the contract id is captured and
-# immediately fed into `initialize` in the same invocation.
+# The arguments are passed to the deploy itself, so OracleEscrow's
+# __constructor runs inside the same transaction that creates the contract.
+# There is no separate initialize() call to race.
 
 echo "==> deploying OracleEscrow to ${NETWORK}"
-DEPLOY_START_NS=$(date +%s%N)
 CONTRACT_ID="$(stellar contract deploy \
   --wasm "$WASM_OUT" \
   --network "$NETWORK" \
-  "${SOURCE_ARGS[@]}")"
-DEPLOY_END_NS=$(date +%s%N)
+  "${SOURCE_ARGS[@]}" \
+  -- \
+  --admin "$ADMIN" \
+  --token "$TOKEN" \
+  --platform "$PLATFORM" \
+  --timeout_ledgers "$TIMEOUT_LEDGERS")"
 
 if [[ -z "$CONTRACT_ID" ]]; then
   echo "deploy did not return a contract id" >&2
   exit 1
 fi
-echo "    contract id: ${CONTRACT_ID}"
-
-echo "==> initializing ${CONTRACT_ID} (admin=${ADMIN}, token=${TOKEN}, platform=${PLATFORM}, timeout_ledgers=${TIMEOUT_LEDGERS})"
-INIT_START_NS=$(date +%s%N)
-stellar contract invoke \
-  --id "$CONTRACT_ID" \
-  --network "$NETWORK" \
-  "${SOURCE_ARGS[@]}" \
-  -- initialize \
-  --admin "$ADMIN" \
-  --token "$TOKEN" \
-  --platform "$PLATFORM" \
-  --timeout_ledgers "$TIMEOUT_LEDGERS"
-INIT_END_NS=$(date +%s%N)
-
-# --- measured deploy -> initialize gap --------------------------------------
-#
-# Reported so the residual window is observable rather than assumed. The
-# acceptance criteria for #113 ask for the actual elapsed time from a real
-# testnet run to be documented; record the value printed here in the README.
-
-GAP_MS=$(( (INIT_START_NS - DEPLOY_END_NS) / 1000000 ))
-TOTAL_MS=$(( (INIT_END_NS - DEPLOY_START_NS) / 1000000 ))
 
 echo
 echo "==> done"
-echo "    contract id:            ${CONTRACT_ID}"
-echo "    deploy -> initialize:   ${GAP_MS} ms (measured)"
-echo "    deploy + initialize:    ${TOTAL_MS} ms (measured)"
-echo
-echo "NOTE: this wizard is a mitigation, not a fix. The deploy -> initialize"
-echo "gap above is narrowed but never zero; the contract-level initialize()"
-echo "front-running issue is tracked separately. See README.md."
+echo "    contract id: ${CONTRACT_ID}"
+echo "    admin:       ${ADMIN}"

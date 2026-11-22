@@ -20,6 +20,16 @@ actually matches this tag's source, rather than trusting the tag name alone.
 
 ## [Unreleased]
 
+- Changed `StakeInfo` (returned by `get_stake_info` / `get_stake_info_asset`):
+  the single `warming_since` field is replaced by `warming_tranches`, an
+  optional list of `{ amount, since }` top-ups. Each `stake()` /
+  `stake_asset()` now matures on its own clock, so topping up no longer
+  delays the maturity of stake already warming (#194). Integrators reading
+  `warming_since` must switch to `warming_tranches`.
+- Added stake snapshotting: `get_stake_info` / `get_stake_info_asset`
+  expose the per-tranche warming state above, and stake reads reflect the
+  snapshot taken at the time of each top-up rather than a single mutable
+  timestamp.
 - Added `resolve_by_consensus(question_id, answers)`: settles from per-worker
   answer commitments and slashes (via the existing slash path) an
   established worker who alone dissented from an otherwise unanimous quorum.
@@ -30,12 +40,29 @@ actually matches this tag's source, rather than trusting the tag name alone.
 - Added `get_admin()` and `get_platform()` views (alongside `get_token()`).
 - Added `get_questions(question_ids)` batch view returning
   `Vec<Option<Question>>` in input order.
-- `QuestionResolved` grew a `bond_forfeited` field (#192). `total_slashed`
-  now reports worker-stake slashing only; a challenger bond forfeited in the
-  same `finalize_resolve()` call is reported separately in `bond_forfeited`
-  (0 when no bond was posted, or the bond was returned to the challenger).
-  Existing indexers that key off the field name keep working; they can now
-  drop the workaround of subtracting bond forfeitures from `total_slashed`.
+- Added the escalation/dispute workflow: `escalate(question_id)` moves a
+  question into the challengeable/escalated state, and
+  `resolve_challengeable(...)` settles it after the dispute window. New
+  `migrate_pending` and `reopen_question` admin paths, plus `preview_resolve`
+  for dry-run settlement previews.
+- Added passkey authentication: workers can register and authorize via
+  passkey-backed signers instead of a raw ed25519 key, with the same
+  stake/answer/withdraw surface.
+- Added KYC attestation: an admin-attested KYC record gates worker
+  participation, with getters to read a worker's attestation status.
+- Added circuit breaker controls: `set_paused(paused)` (admin-only) toggles
+  the contract-wide pause, `is_paused()` reads it, and `get_health()`
+  returns an aggregate health view (#109, #110).
+- Added `submit_basket(payer, question_id, basket)` for a payout basket of
+  up to 8 distinct allowlisted assets, each `(token, amount)`. `resolve()`
+  and `resolve_by_consensus()` settle each leg in its own asset with the same
+  fee, dust, slash and credit rules as a single-asset question. `refund()`
+  and `refund_timeout()` return every leg. `get_question_basket(question_id)`
+  reads the legs back. A basket's `Question.amount` is 0.
+- Basket questions reject `escalate`, `resolve_challengeable`,
+  `migrate_pending`, `reopen_question` and `preview_resolve` with the new
+  `BasketNotSupported` (312) error. New `InvalidBasket` (313) error and
+  `basket_leg_settled` event.
 
 ## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
 
@@ -92,8 +119,8 @@ point:
 
 Errors 1–12 (`AlreadyInitialized` through `InvalidWorkerLists`).
 
-[Unreleased]: https://github.com/nayt9/arbiter-contract/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/nayt9/arbiter-contract/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/nayt9/arbiter-contract/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/nayt9/arbiter-contract/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/nayt9/arbiter-contract/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Arbiter-xyz/arbiter-contract/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Arbiter-xyz/arbiter-contract/releases/tag/v0.1.0

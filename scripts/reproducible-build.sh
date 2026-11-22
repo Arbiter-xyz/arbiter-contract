@@ -62,6 +62,12 @@ echo "$HASH" > target/wasm-hash.txt
 echo "artifact:    $WASM ($(stat -c%s "$WASM") bytes)"
 echo "sha256:      $HASH"
 
+# Emit a machine-readable evidence line so the CI job can record the
+# runner/Docker hash pair in docs/reproducible-builds.md's evidence table.
+# Format: `evidence: <runner|docker> <sha256>` (the caller supplies the label
+# via REPRO_BUILD_LABEL; defaults to "local").
+echo "evidence:    ${REPRO_BUILD_LABEL:-local} $HASH"
+
 if [[ -n "$EXPECTED_HASH" && "$HASH" != "$EXPECTED_HASH" ]]; then
   echo "hash mismatch: expected $EXPECTED_HASH" >&2
   exit 1

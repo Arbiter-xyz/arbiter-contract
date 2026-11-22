@@ -3,12 +3,12 @@
 ## Schema hash (#100)
 
 Questions may carry an optional 32-byte `schema_hash` through
-`submit_with_schema_hash()` or `charge_with_schema_hash()`. It is an opaque
-commitment for off-chain auditability: the contract stores and returns it but
-does not validate the hash, retrieve schema text, or validate answers. Schema
-definitions and verification remain off-chain. Existing questions without a
-stored commitment return `None`; the storage-layout rationale is documented in
-[UPGRADES.md](UPGRADES.md).
+`submit_with_schema_hash()`. It is an opaque commitment for off-chain
+auditability: the contract stores it and returns it through
+`get_question_schema_hash()`, but does not validate the hash, retrieve schema
+text, or validate answers. Schema definitions and verification remain
+off-chain. Existing questions without a stored commitment return `None`; the
+storage-layout rationale is documented in [UPGRADES.md](UPGRADES.md).
 
 ## Range-tolerance consensus (#99)
 
@@ -27,6 +27,16 @@ to that backend implementation and its tests. This workspace contains no
 reconciliation backend, so no backend code or tests are changed here.
 
 ## Partial-consensus settlement (#40)
+
+> **Status: design proposal, not implemented (#195).** Issue #40 was closed
+> without this ever being built — the real `Status` enum has no
+> `PartiallySettled` variant and there is no `resolve()`-adjacent
+> partial-consensus entry point anywhere in `src/`. This section is a design
+> record, not documentation of shipped behavior. If the feature is still
+> wanted, #40 should be reopened. See
+> [SETTLEMENT_RACES.md](SETTLEMENT_RACES.md#slashing-at-partial-consensus) for
+> the slashing question below, which that document used to answer the
+> opposite way; "No" (below) is the resolution.
 
 **Decision: settlement math only, driven by a trusted consensus fraction.**
 `resolve()` today is binary: every winning worker in `workers` receives an
