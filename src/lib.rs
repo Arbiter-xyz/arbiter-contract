@@ -5724,6 +5724,7 @@ impl OracleEscrow {
             worker_count: workers.len(),
             fee,
             total_slashed,
+            bond_forfeited: 0, // any challenger bond is returned, not forfeited
         }
         .publish(&env);
         Ok(())
