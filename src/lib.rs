@@ -586,6 +586,9 @@ pub enum ContractError {
     ContractPaused = 403,
     /// #128: set_public_goods_config() received a bps > BPS_DENOM (100%).
     InvalidPublicGoodsBps = 404,
+    /// submit()/charge() while an upgrade is pending and the question could
+    /// not settle before it executes.
+    UpgradeInProgress = 405,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -1779,6 +1782,20 @@ impl OracleEscrow {
             .instance()
             .get(&DataKey::TimeoutLedgers)
             .ok_or(ContractError::NotInitialized)?;
+        let created_at = env.ledger().sequence();
+        let timeout_ledgers = if let Some(upgrade) = env
+            .storage()
+            .instance()
+            .get::<_, PendingUpgrade>(&DataKey::PendingUpgrade)
+        {
+            let latest_deadline = upgrade.executable_at.saturating_sub(1);
+            if latest_deadline <= created_at {
+                return Err(ContractError::UpgradeInProgress);
+            }
+            timeout_ledgers.min(latest_deadline - created_at)
+        } else {
+            timeout_ledgers
+        };
 
         Self::record_question(
             env,
@@ -1788,7 +1805,7 @@ impl OracleEscrow {
                 payer,
                 amount,
                 status: Status::Pending,
-                created_at: env.ledger().sequence(),
+                created_at,
                 timeout_ledgers,
                 token: token.clone(),
             },
