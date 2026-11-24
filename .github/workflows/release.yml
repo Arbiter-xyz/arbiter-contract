@@ -20,6 +20,9 @@ env:
   RUST_TOOLCHAIN: '1.89.0'
   WASM_TARGET: wasm32v1-none
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build optimized WASM
@@ -27,10 +30,10 @@ jobs:
     outputs:
       wasm_hash: ${{ steps.hash.outputs.wasm_hash }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc  # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ env.WASM_TARGET }}
@@ -59,7 +62,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli --features opt

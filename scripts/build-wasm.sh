@@ -32,7 +32,10 @@ BINDINGS_DIR="${ROOT_DIR}/bindings"
 BINDING_LANGS=("python" "go")
 
 BUILD_WASM=1
-BUILD_BINDINGS=1
+# Default to wasm-only: binding generators (bindings/*/generate.sh) are not
+# committed to this repo, so running with BUILD_BINDINGS=1 would fail on a
+# clean checkout. Pass --bindings-only or omit --wasm-only to regenerate.
+BUILD_BINDINGS=0
 for arg in "$@"; do
   case "$arg" in
     --wasm-only) BUILD_BINDINGS=0 ;;

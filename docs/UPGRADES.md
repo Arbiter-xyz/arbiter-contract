@@ -146,9 +146,10 @@ stellar contract build
 shasum -a 256 target/wasm32v1-none/release/oracle_escrow.wasm   # == the wasm hash
 
 # 2. Pre-flight: the full suite, WASM tests included, must be green.
-#    Run each step separately and stop on the first failure. Do not chain
-#    with `&&`: a broken `cargo test` compile (e.g. the known 194 compile
-#    errors on some branches) must fail the gate loudly, not be masked by
+#    CI runs these steps automatically on every push; a green CI run on the
+#    release tag is the pre-flight gate (issue #501). To verify locally, run
+#    each step separately and stop on the first failure. Do not chain with
+#    `&&`: a broken `cargo test` compile must fail loudly, not be masked by
 #    an earlier step's exit code. The `--ignored` run is the WASM upgrade
 #    suite and only makes sense once the plain suite compiles and passes.
 scripts/build-wasm.sh

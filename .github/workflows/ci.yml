@@ -11,16 +11,35 @@ on:
         required: false
         default: "CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36"
 
+permissions:
+  contents: read
+
 jobs:
   contract:
     name: contract (Rust)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca  # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        # NOTE (issue #500): the crate currently has a pre-existing backlog of
+        # clippy warnings. Enforcing -D warnings outright would fail CI on that
+        # backlog; this step runs in report-only mode so new lint regressions
+        # are visible in the job summary without blocking the build. Once the
+        # backlog is cleared this should be flipped to a hard gate.
+        run: |
+          set -euo pipefail
+          OUT=$(cargo clippy --all-targets -- -D warnings 2>&1 || true)
+          COUNT=$(printf '%s\n' "$OUT" | grep -c '^error\[' || true)
+          echo "### Clippy" >> "$GITHUB_STEP_SUMMARY"
+          echo "- clippy errors: ${COUNT}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- status: report-only (see issue #500)" >> "$GITHUB_STEP_SUMMARY"
+          echo "clippy errors: ${COUNT}"
       - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
+        uses: taiki-e/install-action@1c009442a2e6d2f0b3839e122123f418ae963a1e  # cargo-audit
       - name: cargo audit
         run: cargo audit
       - name: cargo test
@@ -179,17 +198,7 @@ jobs:
           fi
         env:
           PROPTEST_CASES: "1000"
-      - name: Pre-flight gate (docs/UPGRADES.md step 2)
-        # Issue #285: the pre-flight checklist in docs/UPGRADES.md tells
-        # operators to run `scripts/build-wasm.sh && cargo test && cargo test
-        # -- --ignored` before any real upgrade. That command is only usable
-        # if it actually passes on the branch being released, so this step
-        # runs the exact same sequence as a release-readiness gate. It is
-        # intentionally a separate step from the individual `cargo test`
-        # steps above so a failure here is attributable to the documented
-        # pre-flight command rather than to a specific test target.
-        run: |
-          set -euo pipefail
-          scripts/build-wasm.sh
-          cargo test
-          cargo test -- --ignored
+      # Pre-flight gate (docs/UPGRADES.md step 2): the earlier steps in this
+      # job — Build contract and test fixtures to WASM, cargo test, and WASM
+      # tests — collectively constitute the pre-flight checklist. The
+      # duplicated step that re-ran them has been removed (issue #501).
