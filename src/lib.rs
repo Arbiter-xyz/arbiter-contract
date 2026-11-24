@@ -548,6 +548,10 @@ pub enum ContractError {
     /// set_asset_allowed() tried to allow a new non-default token when
     /// MAX_ALLOWED_ASSETS are already allowed.
     AssetLimitReached = 38,
+    /// set_admin()/propose_admin_rotation() named the current admin as the
+    /// new admin. Rejected so a no-op rotation cannot replace a genuine
+    /// pending rotation.
+    NewAdminIsCurrentAdmin = 39,
     // 300s: new-feature error codes for #87/#88/#89/#90. Starting at 300
     // deliberately avoids colliding with other in-flight PRs touching this
     // same file (20s, 100s, 200s already claimed elsewhere) — see this
@@ -2760,14 +2764,12 @@ impl OracleEscrow {
     /// applies, an administrator change.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        Self::schedule_admin_rotation(&env, new_admin);
-        Ok(())
+        Self::schedule_admin_rotation(&env, new_admin)
     }
 
     pub fn propose_admin_rotation(env: Env, new_admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        Self::schedule_admin_rotation(&env, new_admin);
-        Ok(())
+        Self::schedule_admin_rotation(&env, new_admin)
     }
 
     pub fn cancel_admin_rotation(env: Env) -> Result<(), ContractError> {
@@ -3638,7 +3640,15 @@ impl OracleEscrow {
         env.storage().instance().set(key, &next);
     }
 
-    fn schedule_admin_rotation(env: &Env, new_admin: Address) {
+    fn schedule_admin_rotation(env: &Env, new_admin: Address) -> Result<(), ContractError> {
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        if new_admin == current_admin {
+            return Err(ContractError::NewAdminIsCurrentAdmin);
+        }
         let executable_at = env
             .ledger()
             .sequence()
@@ -3656,6 +3666,7 @@ impl OracleEscrow {
         }
         .publish(env);
         Self::bump_instance(env);
+        Ok(())
     }
 
     fn token(env: &Env) -> Result<Address, ContractError> {
