@@ -5460,7 +5460,8 @@ impl OracleEscrow {
             .get(&DataKey::PendingResolution(question_id))
             .ok_or(ContractError::NoPendingResolution)?;
 
-        // Bond must be posted before the dispute window closes.
+        // Bond must be posted before the dispute window closes. Ledger == dispute_deadline is
+        // the dead ledger: refused here and by finalize_resolve(), so neither can run at it.
         if env.ledger().sequence() >= pending_res.dispute_deadline {
             return Err(ContractError::NoChallengeableResolution);
         }
@@ -5748,6 +5749,8 @@ impl OracleEscrow {
             .get(&DataKey::PendingResolution(question_id))
             .ok_or(ContractError::NoPendingResolution)?;
 
+        // Ledger == dispute_deadline is the dead ledger (see post_challenge_bond): finalize
+        // becomes valid only at deadline + 1.
         if env.ledger().sequence() <= pending_res.dispute_deadline {
             return Err(ContractError::DisputeWindowNotElapsed);
         }
