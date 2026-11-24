@@ -1330,6 +1330,13 @@ pub struct PublicGoodsConfigSet {
     pub bps: u32,
 }
 
+/// Emitted when the migration source is set (`Some`) or cleared (`None`).
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationSourceChanged {
+    pub source: Option<Address>,
+}
+
 #[contract]
 pub struct OracleEscrow;
 
@@ -3136,6 +3143,10 @@ impl OracleEscrow {
         env.storage()
             .instance()
             .set(&DataKey::MigrationSource, &source);
+        MigrationSourceChanged {
+            source: Some(source),
+        }
+        .publish(&env);
         Self::bump_instance(&env);
         Ok(())
     }
@@ -3144,6 +3155,7 @@ impl OracleEscrow {
     pub fn clear_migration_source(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().remove(&DataKey::MigrationSource);
+        MigrationSourceChanged { source: None }.publish(&env);
         Self::bump_instance(&env);
         Ok(())
     }
