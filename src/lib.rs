@@ -60,9 +60,10 @@ const REFUND_GRACE_LEDGERS: u32 = 7 * DAY_LEDGERS;
 /// answering buys no credibility (attack A3 in the threat model).
 const STAKE_WARMUP_LEDGERS: u32 = DAY_LEDGERS;
 /// Floor on the unbonding delay. The actual delay is the larger of this and
-/// the current global timeout_ledgers, so stake stays slashable for at
-/// least as long as any question the worker answered can still be resolved
-/// within its SLA.
+/// MAX_TIMEOUT_LEDGERS + MAX_DISPUTE_WINDOW_LEDGERS, a fixed bound rather
+/// than the current global timeout_ledgers, so lowering the timeout never
+/// shortens unbonding below the time a pending question can still take to
+/// reach finalize_resolve().
 const MIN_UNBONDING_LEDGERS: u32 = 3 * DAY_LEDGERS;
 
 /// Max page size for list_pending(). Each id is one persistent read; 100
@@ -79,6 +80,14 @@ const MAX_BASKET_ASSETS: u32 = 8;
 /// refund for every question snapshotting it. Bounding it is also what lets
 /// UPGRADE_DELAY_LEDGERS promise every payer an exit before new code runs.
 pub const MAX_TIMEOUT_LEDGERS: u32 = 120_960;
+
+/// Upper bound on the challenge window resolve_challengeable() opens, 7 days
+/// at a 5s close time. Unstaking is locked for MAX_TIMEOUT_LEDGERS plus this
+/// (see MIN_UNBONDING_LEDGERS), so a loser cannot outwait the slash that
+/// finalize_resolve() applies after the window. Enforcing the bound on
+/// resolve_challengeable() is tracked separately; the unbonding guarantee
+/// holds only for windows at or below it.
+pub const MAX_DISPUTE_WINDOW_LEDGERS: u32 = 7 * DAY_LEDGERS;
 
 /// Largest `workers.len() + losing_workers.len()` resolve() accepts. Derived
 /// from measured WASM resource use re-priced against live mainnet limits,
@@ -2303,7 +2312,10 @@ impl OracleEscrow {
     /// Step 1 of 2 of unstaking. Moves `amount` out of active stake (so the
     /// backend stops dispatching against it right away) into an unbonding
     /// bucket that stays SLASHABLE until the returned release ledger —
-    /// max(MIN_UNBONDING_LEDGERS, current timeout_ledgers) from now.
+    /// max(MIN_UNBONDING_LEDGERS, MAX_TIMEOUT_LEDGERS + MAX_DISPUTE_WINDOW_LEDGERS)
+    /// from now, independent of the current timeout_ledgers. That covers the
+    /// challengeable path (resolve_challengeable + finalize_resolve). An
+    /// escalate()d question has no deadline, so no fixed window covers it.
     /// Withdrawing instantly would let a worker answer, unstake to zero,
     /// and make the pending resolve()'s slash a no-op (attack A3). Draws
     /// from the still-warming amount first. A second request adds to the
@@ -2322,15 +2334,12 @@ impl OracleEscrow {
         Self::drain_warming(&env, &mut info, from_warming);
         info.settled -= amount - from_warming;
 
-        let timeout_ledgers: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TimeoutLedgers)
-            .ok_or(ContractError::NotInitialized)?;
         let release_at = env
             .ledger()
             .sequence()
-            .saturating_add(MIN_UNBONDING_LEDGERS.max(timeout_ledgers));
+            .saturating_add(
+                MIN_UNBONDING_LEDGERS.max(MAX_TIMEOUT_LEDGERS + MAX_DISPUTE_WINDOW_LEDGERS),
+            );
         info.unbonding = info
             .unbonding
             .checked_add(amount)
@@ -2406,15 +2415,12 @@ impl OracleEscrow {
         let from_warming = amount.min(info.warming);
         Self::drain_warming(&env, &mut info, from_warming);
         info.settled -= amount - from_warming;
-        let timeout_ledgers: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TimeoutLedgers)
-            .ok_or(ContractError::NotInitialized)?;
         let release_at = env
             .ledger()
             .sequence()
-            .saturating_add(MIN_UNBONDING_LEDGERS.max(timeout_ledgers));
+            .saturating_add(
+                MIN_UNBONDING_LEDGERS.max(MAX_TIMEOUT_LEDGERS + MAX_DISPUTE_WINDOW_LEDGERS),
+            );
         info.unbonding = info
             .unbonding
             .checked_add(amount)
