@@ -492,6 +492,68 @@ fn question_settlement_never_substitutes_another_asset() {
 }
 
 #[test]
+fn delisting_an_asset_keeps_exit_paths_open_and_blocks_inflows() {
+    let f = setup();
+    let c = client(&f);
+    let x = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    let x_admin = token::StellarAssetClient::new(&f.env, &x);
+    let x_token = token::Client::new(&f.env, &x);
+    let worker = Address::generate(&f.env);
+    x_admin.mint(&f.payer, &(AMOUNT * 5));
+    x_admin.mint(&worker, &(AMOUNT * 2));
+    c.set_asset_allowed(&x, &true);
+
+    // Build up every kind of X balance while X is still allowed.
+    c.submit_asset(&f.payer, &x, &201, &AMOUNT);
+    c.submit_asset(&f.payer, &x, &202, &AMOUNT);
+    c.deposit_asset(&f.payer, &x, &AMOUNT);
+    c.stake_asset(&worker, &x, &AMOUNT);
+    c.resolve(
+        &201,
+        &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
+        &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+    assert_eq!(c.get_owed_asset(&worker, &x), AMOUNT * 4 / 5);
+
+    c.set_asset_allowed(&x, &false);
+
+    // Inflows are rejected.
+    assert_eq!(
+        c.try_submit_asset(&f.payer, &x, &203, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+    assert_eq!(
+        c.try_deposit_asset(&f.payer, &x, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+    assert_eq!(
+        c.try_stake_asset(&worker, &x, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+
+    // Exits still work.
+    let payer_before = x_token.balance(&f.payer);
+    c.withdraw_balance_asset(&f.payer, &x, &AMOUNT);
+    assert_eq!(x_token.balance(&f.payer), payer_before + AMOUNT);
+
+    let worker_before = x_token.balance(&worker);
+    c.withdraw_asset(&worker, &x, &(AMOUNT * 4 / 5));
+    assert_eq!(x_token.balance(&worker), worker_before + AMOUNT * 4 / 5);
+
+    let release_at = c.begin_unstake_asset(&worker, &x, &AMOUNT);
+    f.env.ledger().set_sequence_number(release_at);
+    assert_eq!(c.complete_unstake_asset(&worker, &x), AMOUNT);
+
+    let payer_before = x_token.balance(&f.payer);
+    c.refund(&202);
+    assert_eq!(x_token.balance(&f.payer), payer_before + AMOUNT);
+}
+
+#[test]
 fn six_decimal_asset_uses_native_units_without_seven_decimal_scaling() {
     let f = setup();
     let c = client(&f);
