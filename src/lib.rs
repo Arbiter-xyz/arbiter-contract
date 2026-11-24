@@ -417,6 +417,11 @@ pub enum AssetKey {
     PendingAdminRotation,
 }
 
+/// Error codes are part of the public ABI: a value is frozen once published
+/// and must never be renumbered or reused. Allocation: 1-19, 23-28, 30-38 and
+/// 106 for core errors, 200-201 for quorum bounds, 300-311 for features, and
+/// 400-405 for upgrades, pause and public-goods config. Unlisted values are
+/// unassigned.
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -486,23 +491,13 @@ pub enum ContractError {
     /// set_migration_source() named this same contract as the source.
     InvalidMigrationTarget = 19,
     /// `workers.len() + losing_workers.len()` exceeds the hard, compile-time
-    /// MAX_QUORUM_SIZE cap. This variant was already referenced by resolve()
-    /// on upstream main but never defined in this enum, leaving the crate
-    /// unable to compile — defined here (see issue #85) since it is exactly
-    /// the kind of quorum-size-bound variant that issue is about. Codes
-    /// 200+ are used for this PR's new variants to avoid colliding with the
-    /// 20s range used by a sibling in-flight PR and the 100s range used by
-    /// another.
+    /// MAX_QUORUM_SIZE cap. Always enforced, unlike QuorumOutOfBounds.
     QuorumTooLarge = 200,
     /// `workers.len() + losing_workers.len()` falls outside the
     /// admin-configured `MinQuorum`/`MaxQuorum` bounds (see
     /// `set_quorum_bounds()`). Distinct from `QuorumTooLarge`, which is the
     /// fixed, always-enforced resource-safety ceiling.
     QuorumOutOfBounds = 201,
-    // Numeric codes 20-99 are intentionally skipped: this repo has other
-    // open PRs (upstream #142, #143) adding their own ContractError variants
-    // in that range against the same upstream main. Starting at 100 keeps
-    // these new variants collision-free regardless of merge order.
     /// #94: record_reputation() called twice for the same question_id.
     ReputationAlreadyRecorded = 106,
     /// #97: dispute_resolve()/finalize_resolve() called on a question with
@@ -548,10 +543,6 @@ pub enum ContractError {
     /// set_asset_allowed() tried to allow a new non-default token when
     /// MAX_ALLOWED_ASSETS are already allowed.
     AssetLimitReached = 38,
-    // 300s: new-feature error codes for #87/#88/#89/#90. Starting at 300
-    // deliberately avoids colliding with other in-flight PRs touching this
-    // same file (20s, 100s, 200s already claimed elsewhere) — see this
-    // PR's description for the full breakdown.
     /// #87: reopen_question() called on a question that isn't Refunded (or
     /// isn't owned by the caller).
     QuestionNotRefunded = 300,
@@ -570,8 +561,6 @@ pub enum ContractError {
     /// #50: post_challenge_bond() called on a question_id that already has
     /// a bond posted.
     BondAlreadyPosted = 311,
-    // 400s: codes for variants the enum was missing entirely even though
-    // production code already referenced them (compile-blocking).
     /// #11: resolve_by_consensus()'s answers don't reduce to a single
     /// unanimous-minus-one-dissenter shape (see unanimous_dissenter()).
     NoUnanimousConsensus = 400,
