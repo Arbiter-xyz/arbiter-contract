@@ -586,6 +586,9 @@ pub enum ContractError {
     ContractPaused = 403,
     /// #128: set_public_goods_config() received a bps > BPS_DENOM (100%).
     InvalidPublicGoodsBps = 404,
+    /// #525: set_public_goods_config() received this contract's own address.
+    /// Routing the share to self would strand tokens no entry point can pay out.
+    InvalidPublicGoodsAddress = 406,
     /// submit()/charge() while an upgrade is pending and the question could
     /// not settle before it executes.
     UpgradeInProgress = 405,
@@ -4417,7 +4420,7 @@ impl OracleEscrow {
     /// every future resolve()'s platform_take will be transferred to
     /// `address` before the remainder goes to the Platform address.
     /// Pass `bps = 0` to disable routing (same as never having called this).
-    /// `bps` must be <= 10_000 (100%).
+    /// `bps` must be <= 10_000 (100%). `address` must not be this contract.
     pub fn set_public_goods_config(
         env: Env,
         address: Address,
@@ -4426,6 +4429,9 @@ impl OracleEscrow {
         Self::require_admin(&env)?;
         if bps as i128 > BPS_DENOM {
             return Err(ContractError::InvalidPublicGoodsBps);
+        }
+        if address == env.current_contract_address() {
+            return Err(ContractError::InvalidPublicGoodsAddress);
         }
         env.storage()
             .instance()
