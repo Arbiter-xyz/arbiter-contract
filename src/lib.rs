@@ -608,7 +608,10 @@ pub struct QuestionOpened {
     pub timeout_ledgers: u32,
 }
 
-/// Emitted when a question leaves Pending, for any reason.
+/// Emitted when a question reaches a terminal status via settle_question().
+/// Not emitted by escalate() (-> Disputed) or resolve_challengeable()
+/// (-> ResolvedPending): those are intermediate states that stay in the
+/// pending index. Track them via QuestionEscalated and ResolutionChallengeable.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionSettled {
@@ -3839,7 +3842,7 @@ impl OracleEscrow {
         Self::extend_question_ttl(env, &key, question);
     }
 
-    /// The one place a question leaves Pending: records the terminal status,
+    /// The one place a question reaches a terminal status: records it,
     /// drops it from the pending index and emits QuestionSettled.
     fn settle_question(
         env: &Env,
