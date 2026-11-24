@@ -970,6 +970,16 @@ pub struct TopUpNeeded {
     pub threshold: i128,
 }
 
+/// Emitted by set_top_up_threshold() so a backend can see opt-in/opt-out
+/// (threshold 0 = cleared) without polling storage.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopUpThresholdSet {
+    #[topic]
+    pub payer: Address,
+    pub threshold: i128,
+}
+
 /// #92: emitted by lock_owed().
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4244,9 +4254,10 @@ impl OracleEscrow {
         env.storage()
             .persistent()
             .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
-        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
+        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer.clone()));
 
         Self::bump_instance(&env);
+        TopUpThresholdSet { payer, threshold }.publish(&env);
         Ok(())
     }
 
