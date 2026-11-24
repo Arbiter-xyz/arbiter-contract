@@ -515,9 +515,9 @@ pub enum ContractError {
     /// call already flagged; an admin must resolve the dispute out of band
     /// (see the Out of scope note on resolve_challengeable()).
     QuestionDisputed = 25,
-    /// #98: resolve_median() called with an empty answer set.
+    /// #98: resolve_by_consensus() called with an empty `answers` vector.
     EmptyAnswerSet = 26,
-    /// #98: resolve_median()'s answer set names the same worker Address
+    /// #98: resolve_by_consensus()'s `answers` names the same worker Address
     /// more than once.
     DuplicateAnswerAddress = 27,
     /// verify_passkey_auth() called before register_passkey() for this
