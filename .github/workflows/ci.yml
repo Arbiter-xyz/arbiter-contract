@@ -137,9 +137,10 @@ jobs:
         # mainnet's resource limits that MAX_QUORUM_SIZE's safety margin
         # (docs/RESOURCE_LIMITS.md) is derived against. Nothing else re-fetches
         # it, so a protocol vote that tightens limits would go unnoticed until
-        # someone manually re-ran scripts/fetch-network-settings.sh. Re-fetch
-        # the live snapshot and fail if it differs from the committed one, so
-        # drift surfaces in CI instead of silently invalidating the margin.
+        # someone manually re-ran scripts/fetch-network-settings.sh. Compare the
+        # live settings to the committed one (read-only --check) and fail if
+        # they differ, so drift surfaces in CI instead of silently invalidating
+        # the margin.
         # Non-blocking on network failure: a transient RPC outage should not
         # fail the build, but a successful fetch that disagrees must.
         run: |
@@ -149,15 +150,18 @@ jobs:
             echo "::error::committed snapshot $COMMITTED not found"
             exit 1
           fi
-          if ! scripts/fetch-network-settings.sh > /tmp/live-settings.json 2>/tmp/fetch-err.log; then
+          # --check never writes the snapshot. A "stale:" line on stderr means
+          # a successful fetch disagreed; any other failure is a fetch error.
+          if ! scripts/fetch-network-settings.sh --check 2>/tmp/check-err.log; then
+            if grep -q '^stale:' /tmp/check-err.log; then
+              cat /tmp/check-err.log
+              echo "::error::$COMMITTED is stale relative to live mainnet settings"
+              echo "Re-run scripts/fetch-network-settings.sh and review the diff against docs/RESOURCE_LIMITS.md."
+              exit 1
+            fi
             echo "::warning::could not fetch live mainnet settings; skipping staleness check"
-            cat /tmp/fetch-err.log || true
+            cat /tmp/check-err.log || true
             exit 0
-          fi
-          if ! diff -u "$COMMITTED" /tmp/live-settings.json; then
-            echo "::error::$COMMITTED is stale relative to live mainnet settings"
-            echo "Re-run scripts/fetch-network-settings.sh and review the diff against docs/RESOURCE_LIMITS.md."
-            exit 1
           fi
           echo "Committed mainnet settings match live network"
       - name: WASM tests (mainnet resource-limit gate, upgrade worked example)
