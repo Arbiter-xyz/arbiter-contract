@@ -44,9 +44,10 @@ jobs:
       - name: Compute local WASM hash
         id: hash
         run: |
-          WASM=$(find target/${{ env.WASM_TARGET }}/release -maxdepth 1 -name '*.wasm' ! -name '*_test.wasm' | head -n1)
-          if [ -z "$WASM" ]; then
-            echo "::error::No WASM artifact produced by 'stellar contract build'"
+          # Name the escrow artifact explicitly: the workspace also builds fee_vesting.wasm.
+          WASM=target/${{ env.WASM_TARGET }}/release/oracle_escrow.wasm
+          if [ ! -f "$WASM" ]; then
+            echo "::error::No oracle_escrow.wasm produced by 'stellar contract build'"
             exit 1
           fi
           echo "Local artifact: $WASM"
