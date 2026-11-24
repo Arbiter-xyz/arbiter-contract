@@ -1669,3 +1669,69 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
     assert_eq!(c.get_owed_asset(&worker1, &f.token_address), amount_a * 4 / 5);
     assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
 }
+
+/// #545: the circuit breaker must also gate post_challenge_bond() and the
+/// *_asset inflow entry points, with no token movement.
+#[test]
+fn post_challenge_bond_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_post_challenge_bond(&f.payer, &1, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
+
+#[test]
+fn submit_asset_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    c.set_asset_allowed(&f.token_address, &true);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_submit_asset(&f.payer, &f.token_address, &1, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
+
+#[test]
+fn deposit_asset_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    c.set_asset_allowed(&f.token_address, &true);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_deposit_asset(&f.payer, &f.token_address, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
+
+#[test]
+fn charge_asset_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    c.set_asset_allowed(&f.token_address, &true);
+    c.deposit_asset(&f.payer, &f.token_address, &AMOUNT);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_charge_asset(&f.payer, &f.token_address, &1, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
