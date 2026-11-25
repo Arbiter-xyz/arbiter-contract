@@ -63,8 +63,10 @@ entries.
 
 ## Admin rotation
 
-`set_admin(new_admin)` now schedules a rotation; it does not immediately
-change authority. `propose_admin_rotation` is the explicit equivalent.
+`propose_admin_rotation(new_admin)` schedules a rotation; it does not
+immediately change authority. `set_admin(new_admin)` is a deprecated alias
+with identical behaviour — use `propose_admin_rotation` instead. `set_admin`
+will be removed in the next breaking release.
 The proposal is visible through `get_pending_admin_rotation()` and the
 `admin_rotation_proposed` event, and cannot execute before
 `ADMIN_ROTATION_DELAY_LEDGERS` (the same eight-day window as code upgrades).
@@ -78,6 +80,14 @@ a multisig for ordinary admin actions. A compromised current admin can
 still call other admin-gated methods during the delay; use a contract
 account/multisig as the admin address when threshold authorization for
 those actions is required.
+
+### Admin rotation events
+
+`execute_admin_rotation()` emits a single `AdminRotated { old_admin, new_admin }`
+event. The older `AdminRotationExecuted { new_admin }` event is **deprecated**
+and no longer emitted; it will be removed in the next breaking release.
+Index `AdminRotated`, which carries both addresses, instead of
+`AdminRotationExecuted`.
 
 ## Testnet adoption
 
@@ -93,9 +103,10 @@ For an existing deployment that supports the delayed `propose_upgrade` /
 4. Call `set_asset_allowed` for each additional token, verifying
    `is_asset_allowed` and `get_asset_decimals` before directing traffic to
    it.
-5. To rotate authority, call `set_admin` with the candidate address, publish
-   the proposal, monitor it through the delay, cancel if unexpected, or
-   execute after the delay with both admin authorizations.
+5. To rotate authority, call `propose_admin_rotation` with the candidate
+   address, publish the proposal, monitor it through the delay, cancel if
+   unexpected, or execute after the delay with both admin authorizations.
+   (`set_admin` is a deprecated alias; prefer `propose_admin_rotation`.)
 
 The code version preceding this change cannot be upgraded if it lacks the
 upgrade entrypoints. In that case, deploy and initialize a v2 instance,
