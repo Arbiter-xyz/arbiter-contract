@@ -252,7 +252,7 @@ fn valid_challenge_bond_returned_to_challenger() {
     f.env.mock_all_auths();
     c.submit(&f.payer, &1, &AMOUNT);
 
-    let wv = Vec::from_array(&f.env, [worker]);
+    let wv = Vec::from_array(&f.env, [worker.clone()]);
     let lv: Vec<Address> = Vec::new(&f.env);
     c.resolve_challengeable(&1, &wv, &lv, &50);
 
@@ -263,8 +263,13 @@ fn valid_challenge_bond_returned_to_challenger() {
     let tok = token::Client::new(&f.env, &f.token_address);
     let challenger_before = tok.balance(&challenger);
 
-    // Admin adjudicates the dispute in the challenger's favour.
+    // Admin marks the resolution as disputed, then overrides it in the
+    // challenger's favour. The bond is returned by admin_override_resolution(),
+    // which calls settle_disputed_bond() internally.
     c.dispute_resolve(&1);
+    let override_wv = Vec::from_array(&f.env, [worker]);
+    let override_lv: Vec<Address> = Vec::new(&f.env);
+    c.admin_override_resolution(&1, &override_wv, &override_lv);
 
     // Bond returned to challenger.
     assert_eq!(tok.balance(&challenger), challenger_before + bond_amount);
