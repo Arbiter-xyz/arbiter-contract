@@ -29,6 +29,9 @@ const SLASH_CAP_BPS_OF_AMOUNT: i128 = 10_000;
 /// resolve(), so total funds are always conserved to the last stroop.
 const SLASH_REDISTRIBUTE_BPS: i128 = 5_000;
 const BPS_DENOM: i128 = 10_000;
+/// Minimum challenge bond: 10% of the question amount, rounded up to the
+/// nearest stroop when the question amount is not evenly divisible.
+const CHALLENGE_BOND_MIN_BPS: i128 = 1_000;
 
 /// Ledgers per day at a 5s close time — the unit every duration below is
 /// expressed in.
@@ -5435,7 +5438,9 @@ impl OracleEscrow {
     /// finalize_resolve() checks. Only one bond per question_id is tracked.
     ///
     /// The question must be in ResolvedPending status and must have an
-    /// unexpired dispute window (current ledger < dispute_deadline).
+    /// unexpired dispute window (current ledger < dispute_deadline). The bond
+    /// must be at least 10% of the question amount (CHALLENGE_BOND_MIN_BPS,
+    /// rounded up to the nearest stroop).
     pub fn post_challenge_bond(
         env: Env,
         challenger: Address,
@@ -5452,6 +5457,18 @@ impl OracleEscrow {
         let question = Self::load_question(&env, question_id)?;
         if question.status != Status::ResolvedPending {
             return Err(ContractError::NoChallengeableResolution);
+        }
+
+        // 10% of the question amount, with positive integer rounding up so
+        // even small questions have a meaningful, non-zero minimum bond.
+        let minimum_bond = question
+            .amount
+            .checked_mul(CHALLENGE_BOND_MIN_BPS)
+            .and_then(|value| value.checked_add(BPS_DENOM - 1))
+            .map(|value| value / BPS_DENOM)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if amount < minimum_bond {
+            return Err(ContractError::InvalidBondAmount);
         }
 
         let pending_res: PendingResolution = env
