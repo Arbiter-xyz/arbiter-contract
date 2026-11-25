@@ -455,7 +455,7 @@ fn admin_rotation_proposal_leaves_current_authority_active_during_delay() {
                 sub_invokes: &[],
             },
         }])
-        .try_resolve(&QID, &workers, &losers, &BytesN::from_array(&env, &[0u8; 32]));
+        .try_resolve(&QID, &workers, &losers, &BytesN::from_array(&w.env, &[0u8; 32]));
     assert_eq!(res, Ok(()));
     assert_eq!(w.snapshot().status, Status::Resolved);
 }
