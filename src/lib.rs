@@ -400,6 +400,8 @@ pub enum DataKey {
     /// #128: public-goods fee-routing share in bps, paired with
     /// PublicGoodsAddress. Absent/0 means no routing (today's behavior).
     PublicGoodsBps,
+    /// #125: pending worker answer hash, keyed by question and worker.
+    Commit(u64, Address),
 }
 
 #[contracttype]
@@ -589,6 +591,12 @@ pub enum ContractError {
     /// submit()/charge() while an upgrade is pending and the question could
     /// not settle before it executes.
     UpgradeInProgress = 405,
+    /// #125: the worker already committed an answer for this question.
+    CommitAlreadyExists = 406,
+    /// #125: no answer commitment exists for this worker and question.
+    CommitNotFound = 407,
+    /// #125: the revealed answer and salt do not match the stored commitment.
+    CommitHashMismatch = 408,
 }
 
 /// `question_opened` topics: question_id; data: payer, token, amount,
@@ -1477,6 +1485,87 @@ impl OracleEscrow {
             &amount,
         );
         Self::open_question(&env, payer, question_id, amount, token, None, None)
+    }
+
+    /// #125: commit to an answer hash while a question is pending.
+    pub fn commit_answer(
+        env: Env,
+        worker: Address,
+        question_id: u64,
+        answer_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        worker.require_auth();
+        let question = Self::load_question(&env, question_id)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let key = DataKey::Commit(question_id, worker.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(ContractError::CommitAlreadyExists);
+        }
+        let committed_at = env.ledger().sequence();
+        Self::set_persistent(
+            &env,
+            &key,
+            &CommitEntry {
+                answer_hash,
+                committed_at,
+            },
+        );
+        AnswerCommitted {
+            question_id,
+            worker,
+            committed_at,
+        }
+        .publish(&env);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// #125: verify a worker's reveal against their stored commitment.
+    pub fn reveal_answer(
+        env: Env,
+        worker: Address,
+        question_id: u64,
+        answer: Bytes,
+        salt: Bytes,
+    ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        worker.require_auth();
+        let question = Self::load_question(&env, question_id)?;
+        if question.status != Status::Pending {
+            return Err(ContractError::QuestionNotPending);
+        }
+
+        let key = DataKey::Commit(question_id, worker.clone());
+        let entry: CommitEntry = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CommitNotFound)?;
+        let mut preimage = answer;
+        preimage.append(&salt);
+        if env.crypto().sha256(&preimage) != entry.answer_hash {
+            return Err(ContractError::CommitHashMismatch);
+        }
+
+        env.storage().persistent().remove(&key);
+        AnswerRevealed {
+            question_id,
+            worker,
+        }
+        .publish(&env);
+        Self::bump_instance(&env);
+        Ok(())
+    }
+
+    /// #125: read a worker's pending answer commitment, if any.
+    pub fn get_commit(env: Env, question_id: u64, worker: Address) -> Option<CommitEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Commit(question_id, worker))
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -5929,3 +6018,5 @@ mod test_second_tier_quorum;
 mod test_bonded_challenger;
 #[cfg(test)]
 mod test_rpc_chaos;
+#[cfg(test)]
+mod test_commit_reveal;

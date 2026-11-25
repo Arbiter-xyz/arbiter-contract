@@ -22,7 +22,7 @@ use soroban_sdk::{
 /// A minimal pending question: payer submits AMOUNT, returns question_id 1.
 fn open_question(f: &crate::test::Fixture) -> u64 {
     let c = client(f);
-    c.submit(&f.payer, &f.token_address, &1, &AMOUNT);
+    c.submit_asset(&f.payer, &f.token_address, &1, &AMOUNT);
     1
 }
 
