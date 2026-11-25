@@ -1566,15 +1566,14 @@ impl OracleEscrow {
         }
 
         let token_addr = Self::token(&env)?;
+        let updated = existing - amount;
+        Self::set_persistent(&env, &key, &updated);
+        Self::bump_instance(&env);
         token::Client::new(&env, &token_addr).transfer(
             &env.current_contract_address(),
             &payer,
             &amount,
         );
-
-        let updated = existing - amount;
-        Self::set_persistent(&env, &key, &updated);
-        Self::bump_instance(&env);
         PrepaidBalanceChanged {
             payer,
             token: token_addr,
@@ -1600,14 +1599,14 @@ impl OracleEscrow {
         if amount > balance {
             return Err(ContractError::InsufficientBalance);
         }
+        let updated = balance - amount;
+        Self::set_persistent(&env, &key, &updated);
+        Self::bump_instance(&env);
         token::Client::new(&env, &token).transfer(
             &env.current_contract_address(),
             &payer,
             &amount,
         );
-        let updated = balance - amount;
-        Self::set_persistent(&env, &key, &updated);
-        Self::bump_instance(&env);
         PrepaidBalanceChanged {
             payer,
             token,
@@ -2367,16 +2366,15 @@ impl OracleEscrow {
 
         let amount = info.unbonding;
         let token_addr = Self::token(&env)?;
+        info.unbonding = 0;
+        info.unbonding_release_at = 0;
+        Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
+        Self::bump_instance(&env);
         token::Client::new(&env, &token_addr).transfer(
             &env.current_contract_address(),
             &worker,
             &amount,
         );
-
-        info.unbonding = 0;
-        info.unbonding_release_at = 0;
-        Self::set_persistent(&env, &DataKey::Stake(worker), &info);
-        Self::bump_instance(&env);
         Ok(amount)
     }
 
@@ -2448,16 +2446,16 @@ impl OracleEscrow {
             return Err(ContractError::UnbondingNotElapsed);
         }
         let amount = info.unbonding;
-        token::Client::new(&env, &token).transfer(
-            &env.current_contract_address(),
-            &worker,
-            &amount,
-        );
         info.unbonding = 0;
         info.unbonding_release_at = 0;
         let key = Self::stake_key(&env, &token, &worker)?;
         Self::set_persistent(&env, &key, &info);
         Self::bump_instance(&env);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &worker,
+            &amount,
+        );
         Ok(amount)
     }
 
@@ -2590,7 +2588,7 @@ impl OracleEscrow {
         token: &Address,
         amount: i128,
     ) -> Result<i128, ContractError> {
-        if amount <= 0 {
+        if amount <= 0 || *recipient == env.current_contract_address() {
             return Err(ContractError::InvalidAmount);
         }
 
@@ -2612,14 +2610,13 @@ impl OracleEscrow {
             return Err(ContractError::InsufficientOwed);
         }
 
+        Self::set_persistent(env, &key, &(owed - amount));
+        Self::bump_instance(env);
         token::Client::new(env, token).transfer(
             &env.current_contract_address(),
             recipient,
             &amount,
         );
-
-        Self::set_persistent(env, &key, &(owed - amount));
-        Self::bump_instance(env);
         WorkerPaid {
             worker: worker.clone(),
             recipient: recipient.clone(),
@@ -3280,7 +3277,10 @@ impl OracleEscrow {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
-        if timeout_ledgers == 0 || timeout_ledgers > MAX_TIMEOUT_LEDGERS {
+        if timeout_ledgers == 0
+            || timeout_ledgers > MAX_TIMEOUT_LEDGERS
+            || created_at > env.ledger().sequence()
+        {
             return Err(ContractError::InvalidTimeout);
         }
         if env
@@ -3799,6 +3799,7 @@ impl OracleEscrow {
             Some(legs) => legs,
             None => vec![env, (Self::question_token(env, question_id)?, question.amount)],
         };
+        Self::settle_question(env, question_id, &key, &mut question, Status::Refunded);
         for (token, amount) in legs.iter() {
             token::Client::new(env, &token).transfer(
                 &env.current_contract_address(),
@@ -3817,7 +3818,6 @@ impl OracleEscrow {
             }
         }
 
-        Self::settle_question(env, question_id, &key, &mut question, Status::Refunded);
         QuestionRefunded {
             question_id,
             payer: question.payer.clone(),

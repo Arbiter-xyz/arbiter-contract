@@ -1191,6 +1191,31 @@ fn partial_withdrawal_leaves_the_remainder_claimable_later() {
 }
 
 #[test]
+fn withdraw_to_rejects_the_contract_itself_as_beneficiary() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+    let owed = c.get_owed(&w1);
+
+    assert_eq!(
+        c.try_withdraw_to(&w1, &f.contract_id, &owed),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(
+        c.try_withdraw_to_asset(&w1, &f.contract_id, &f.token_address, &owed),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(c.get_owed(&w1), owed);
+}
+
+#[test]
 fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
     let f = setup();
     let c = client(&f);
