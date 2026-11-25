@@ -313,9 +313,8 @@ pub enum DataKey {
     Underwriter(Address),
     /// #96 worker-diversity: admin-attested source-diversity tag for a
     /// worker (e.g. a region/network-origin code). The admin is the trust
-    /// anchor here rather than a third-party attestation protocol — see
-    /// docs-maintainer-notes/valreb001.md and the PR description for why
-    /// this is scoped down from a real oracle integration.
+    /// anchor here rather than a third-party attestation protocol; a real
+    /// oracle integration was considered out of scope at the time.
     WorkerRegion(Address),
     /// #97 dispute-window finality: the not-yet-credited resolution recorded
     /// by resolve_challengeable(), keyed by question_id. Holds the worker
@@ -427,7 +426,9 @@ pub enum ContractError {
     /// A function that reads Admin, Token, Platform or TimeoutLedgers from
     /// instance storage (every admin-gated call, resolve(), submit()/charge(),
     /// the get_admin()/get_token()/get_platform()/get_timeout_ledgers() views,
-    /// ...) was called before initialize().
+    /// ...) was called before the constructor ran. Practically this only
+    /// occurs on an instance deployed from older WASM before the front-running
+    /// fix moved setup into `__constructor`.
     NotInitialized = 2,
     /// An amount argument is zero or negative. Returned by submit*/charge*,
     /// deposit*/withdraw_balance*, stake*/begin_unstake*, withdraw*,
@@ -451,8 +452,8 @@ pub enum ContractError {
     /// refund_timeout() (or a sweep_timeouts() entry) called before the
     /// question's own `created_at + timeout_ledgers` deadline.
     TooEarlyForTimeout = 8,
-    /// initialize()/set_timeout_ledgers()/import_question() received a timeout
-    /// of 0 or above MAX_TIMEOUT_LEDGERS.
+    /// `__constructor`/`set_timeout_ledgers`/`import_question` received a
+    /// timeout of 0 or above MAX_TIMEOUT_LEDGERS.
     InvalidTimeout = 9,
     /// begin_unstake*() asked to unbond more than the worker's active stake
     /// (settled + warming).
@@ -1029,10 +1030,10 @@ pub struct ReputationInfo {
 
 /// #95: fee (basis points, deducted from the refunded amount) paid to a
 /// registered underwriter for fronting an instant refund before a question's
-/// permissionless refund_timeout() deadline. See docs-maintainer-notes for
-/// why this is scoped as "an earlier, fee-bearing refund path" rather than
-/// a separately-funded insurance pool (the issue itself flags the latter as
-/// an unresolved design question, out of scope here).
+/// permissionless refund_timeout() deadline. This is scoped as "an earlier,
+/// fee-bearing refund path" rather than a separately-funded insurance pool
+/// (a full insurance pool was flagged as an unresolved design question,
+/// out of scope for this issue).
 const UNDERWRITER_FEE_BPS: i128 = 500;
 
 /// Emitted when the admin approves or revokes an underwriter (#95).

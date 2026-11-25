@@ -326,8 +326,10 @@ from oracle_escrow import Client, Status
 
 client = Client(rpc_url, contract_id, network_passphrase)
 
-question_id = client.submit(asker, question, reward)
-client.resolve(oracle, question_id, answer)
+# submit(payer, question_id, amount)
+client.submit(payer, question_id, amount)
+# resolve(question_id, workers, losing_workers, answer_hash)
+client.resolve(question_id, workers, losing_workers, answer_hash)
 assert client.get_question(question_id).status == Status.RESOLVED
 ```
 
@@ -341,7 +343,7 @@ field), regenerate them with:
 ```sh
 stellar contract build
 stellar contract bindings typescript \
-  --wasm target/wasm32-unknown-unknown/release/arbiter_contract.wasm \
+  --wasm target/wasm32v1-none/release/oracle_escrow.wasm \
   --output-dir <output-dir>
 ```
 
@@ -371,21 +373,21 @@ A minimal example equivalent to `test.rs`'s `setup()`/`client()` pattern,
 demonstrating `submit`/`resolve`/`refund` against a running contract:
 
 ```rust
-use oracle_escrow_client::{Client, Status};
+use oracle_escrow_client::Client;
 
 // Equivalent to test.rs's setup(): deploy the contract and build a client.
 let client = Client::new(&env, &contract_id);
 
-// submit
-let question_id = client.submit(&asker, &question, &reward);
+// submit(payer, question_id, amount)
+client.submit(&payer, &question_id, &amount);
 
-// resolve
-client.resolve(&oracle, &question_id, &answer);
-assert_eq!(client.status(&question_id), Status::Resolved);
+// resolve(question_id, workers, losing_workers, answer_hash)
+client.resolve(&question_id, &workers, &losing_workers, &answer_hash);
 
-// refund
-client.refund(&asker, &question_id);
-assert_eq!(client.status(&question_id), Status::Refunded);
+// permissionless refund after timeout
+client.refund_timeout(&question_id);
+// or early refund by admin
+client.refund(&question_id);
 ```
 
 ### Out of scope
@@ -476,7 +478,7 @@ Acceptance criteria
 
 ```sh
 stellar contract build
-ls -l target/wasm32-unknown-unknown/release/arbiter_contract.wasm
+ls -l target/wasm32v1-none/release/oracle_escrow.wasm
 ```
 
 **Baseline: 15.5KB** (optimized). The build must stay at or below this
