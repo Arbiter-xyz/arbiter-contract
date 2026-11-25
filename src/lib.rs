@@ -253,20 +253,6 @@ pub enum DataKey {
     /// Set by THIS contract's admin on a migration TARGET: the one source
     /// contract allowed to call import_question() here.
     MigrationSource,
-    /// #88: a fixed-price template a payer can open a question from, instead
-    /// of supplying a caller-chosen amount. Admin-managed. Advisory-only
-    /// quorum_hint (see QuestionTemplate) — not enforced by this contract.
-    Template(u32),
-    /// #89: `owner` has pre-authorized `delegate` to call
-    /// submit_as_delegate() on their behalf, up to this much cumulative
-    /// i128 amount (decremented per use, mirroring a capped allowance
-    /// rather than unlimited authority).
-    Delegate(Address, Address),
-    /// #90: a claimable-vesting stream from `payer` to `beneficiary` — the
-    /// practical on-chain approximation of "payment streaming" (see Stream
-    /// doc comment). Keyed by (payer, beneficiary) so one payer can run at
-    /// most one active stream per beneficiary at a time.
-    Stream(Address, Address),
     /// Admin-settable lower bound on `workers.len() + losing_workers.len()`
     /// for resolve() (issue #85). Absent means unbounded (today's
     /// behavior) — see `set_quorum_bounds()` / `get_quorum_bounds()`.
@@ -878,83 +864,6 @@ pub struct QuestionReopened {
     pub timeout_ledgers: u32,
 }
 
-/// #88: a fixed on-chain price a question can be opened at via
-/// submit_from_template(), instead of a caller-supplied amount.
-/// `quorum_hint` is advisory only — this contract does not enforce it
-/// against resolve()'s actual worker/losing_worker counts; overlaps with
-/// #85 if that enforcement is added later.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QuestionTemplate {
-    pub price: i128,
-    pub quorum_hint: u32,
-}
-
-/// Emitted by register_template() (#88).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TemplateRegistered {
-    #[topic]
-    pub template_id: u32,
-    pub price: i128,
-    pub quorum_hint: u32,
-}
-
-/// Emitted by grant_delegate() (#89).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DelegateGranted {
-    #[topic]
-    pub owner: Address,
-    pub delegate: Address,
-    pub cap: i128,
-}
-
-/// Emitted by revoke_delegate() (#89).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DelegateRevoked {
-    #[topic]
-    pub owner: Address,
-    pub delegate: Address,
-}
-
-/// #90: a claimable-vesting stream, the practical on-chain approximation of
-/// "payment streaming" — see create_stream()/claim_stream() doc comments
-/// for why this contract does not attempt real per-ledger push-transfers.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Stream {
-    pub payer: Address,
-    pub beneficiary: Address,
-    pub total: i128,
-    pub claimed: i128,
-    pub start_ledger: u32,
-    pub end_ledger: u32,
-}
-
-/// Emitted by create_stream() (#90).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamCreated {
-    #[topic]
-    pub payer: Address,
-    pub beneficiary: Address,
-    pub total: i128,
-    pub start_ledger: u32,
-    pub end_ledger: u32,
-}
-
-/// Emitted by claim_stream()/cancel_stream() (#90).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamClaimed {
-    #[topic]
-    pub payer: Address,
-    pub beneficiary: Address,
-    pub amount: i128,
-}
-
 /// #91: emitted by check_top_up_threshold() whenever a payer's Balance is
 /// found at or below their own configured TopUpThreshold. Purely
 /// informational — it never blocks or reverses anything; a backend watching
@@ -1381,20 +1290,7 @@ impl OracleEscrow {
         question_id: u64,
         amount: i128,
     ) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
-        payer.require_auth();
-
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-
-        let token_addr = Self::token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &payer,
-            &env.current_contract_address(),
-            &amount,
-        );
-
+        let token_addr = Self::submit_core(&env, &payer, amount)?;
         Self::open_question(&env, payer, question_id, amount, token_addr, None, None)
     }
 
@@ -1405,26 +1301,8 @@ impl OracleEscrow {
         amount: i128,
         schema_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
-        payer.require_auth();
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-        let token_addr = Self::token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &payer,
-            &env.current_contract_address(),
-            &amount,
-        );
-        Self::open_question(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token_addr,
-            Some(schema_hash),
-            None,
-        )
+        let token_addr = Self::submit_core(&env, &payer, amount)?;
+        Self::open_question(&env, payer, question_id, amount, token_addr, Some(schema_hash), None)
     }
 
     pub fn submit_with_category(
@@ -1434,26 +1312,8 @@ impl OracleEscrow {
         amount: i128,
         category: Symbol,
     ) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
-        payer.require_auth();
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-        let token_addr = Self::token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &payer,
-            &env.current_contract_address(),
-            &amount,
-        );
-        Self::open_question(
-            &env,
-            payer,
-            question_id,
-            amount,
-            token_addr,
-            None,
-            Some(category),
-        )
+        let token_addr = Self::submit_core(&env, &payer, amount)?;
+        Self::open_question(&env, payer, question_id, amount, token_addr, None, Some(category))
     }
 
     /// Payer locks an admin-allowlisted SEP-41 asset for one question.
@@ -1471,12 +1331,23 @@ impl OracleEscrow {
             return Err(ContractError::InvalidAmount);
         }
         Self::require_allowed_token(&env, &token)?;
-        token::Client::new(&env, &token).transfer(
-            &payer,
-            &env.current_contract_address(),
-            &amount,
-        );
+        token::Client::new(&env, &token).transfer(&payer, &env.current_contract_address(), &amount);
         Self::open_question(&env, payer, question_id, amount, token, None, None)
+    }
+
+    /// Shared prelude for submit / submit_with_schema_hash / submit_with_category:
+    /// checks pause state, authenticates payer, validates amount, transfers the
+    /// platform token, and returns the token address. submit_asset is excluded
+    /// because it uses a caller-supplied token and an allowlist check.
+    fn submit_core(env: &Env, payer: &Address, amount: i128) -> Result<Address, ContractError> {
+        Self::require_not_paused(env)?;
+        payer.require_auth();
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let token_addr = Self::token(env)?;
+        token::Client::new(env, &token_addr).transfer(payer, &env.current_contract_address(), &amount);
+        Ok(token_addr)
     }
 
     /// Payer locks `amount` into a standing prepaid balance — one signature,
@@ -4508,6 +4379,15 @@ impl OracleEscrow {
     /// currently gates on this; wiring it into an entry point is left to
     /// the worker-console integration issue #74 scopes as depending on
     /// this verification primitive.
+    ///
+    /// **Replay-protection caveat**: this function performs a bare signature
+    /// check over caller-supplied `message` bytes.  It does **not** bind the
+    /// signature to a nonce, expiry timestamp, contract address, or network
+    /// passphrase, so the same `(message, signature)` pair can be resubmitted
+    /// indefinitely.  Callers must enforce replay protection themselves — for
+    /// example by embedding a monotonically-increasing nonce, a ledger
+    /// sequence bound, or the invoker's address inside `message` before
+    /// passing it here.
     pub fn verify_passkey_auth(
         env: Env,
         worker: Address,
@@ -5287,42 +5167,19 @@ impl OracleEscrow {
             .get(&DataKey::Platform)
             .ok_or(ContractError::NotInitialized)?;
         let question_token = Self::question_token(&env, question_id)?;
-        let token_client = token::Client::new(&env, &question_token);
 
-        let amount = question.amount;
-        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
-        let pool = amount - fee;
-        let n = workers.len() as i128;
-        let share = pool / n;
-        let dust = pool - share * n;
-
-        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
-            Self::distribute_slashes(
-                &env,
-                question_id,
-                &question_token,
-                &losing_workers,
-                slash_cap,
-                n,
-            )?;
-        let platform_take = (fee + dust)
-            .checked_add(slash_platform_take)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        let worker_credit = share
-            .checked_add(slash_redist_per_worker)
-            .ok_or(ContractError::ArithmeticOverflow)?;
+        let (fee, total_slashed) = Self::settle_asset(
+            &env,
+            question_id,
+            &question_token,
+            question.amount,
+            &workers,
+            &losing_workers,
+            &platform,
+        )?;
         for worker in workers.iter() {
-            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
-            WorkerCredited {
-                question_id,
-                worker: worker.clone(),
-                amount: worker_credit,
-            }
-            .publish(&env);
             Self::record_resolved_credit(&env, &worker);
         }
-        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         // Clean up escalation storage.
         if escalated.is_some() {
@@ -5772,39 +5629,19 @@ impl OracleEscrow {
         let question_token = Self::question_token(&env, question_id)?;
         let token_client = token::Client::new(&env, &question_token);
 
-        let amount = question.amount;
-        let fee = Self::mul_bps(amount, PLATFORM_FEE_BPS);
-        let pool = amount - fee;
         let workers = &pending_res.workers;
         let losing_workers = &pending_res.losing_workers;
-        let n = workers.len() as i128;
-        let share = pool / n;
-        let dust = pool - share * n;
 
-        let slash_cap = Self::mul_bps(amount, SLASH_CAP_BPS_OF_AMOUNT);
-        let (slash_platform_take, slash_redist_per_worker, total_slashed) =
-            Self::distribute_slashes(
-                &env,
-                question_id,
-                &question_token,
-                &losing_workers,
-                slash_cap,
-                n,
-            )?;
-        let mut platform_take = (fee + dust)
-            .checked_add(slash_platform_take)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        let worker_credit = share
-            .checked_add(slash_redist_per_worker)
-            .ok_or(ContractError::ArithmeticOverflow)?;
+        let (fee, total_slashed) = Self::settle_asset(
+            &env,
+            question_id,
+            &question_token,
+            question.amount,
+            workers,
+            losing_workers,
+            &platform,
+        )?;
         for worker in workers.iter() {
-            Self::credit_owed(&env, &question_token, &worker, worker_credit)?;
-            WorkerCredited {
-                question_id,
-                worker: worker.clone(),
-                amount: worker_credit,
-            }
-            .publish(&env);
             Self::record_resolved_credit(&env, &worker);
         }
 
@@ -5816,10 +5653,6 @@ impl OracleEscrow {
             .get(&bond_key);
         let mut forfeited_bond: i128 = 0;
         if let Some(bond) = maybe_bond {
-            // Bond forfeited: add to platform_take so it transfers in one call.
-            platform_take = platform_take
-                .checked_add(bond.amount)
-                .ok_or(ContractError::ArithmeticOverflow)?;
             forfeited_bond = bond.amount;
             env.storage().persistent().remove(&bond_key);
             ChallengeBondSettled {
@@ -5829,9 +5662,8 @@ impl OracleEscrow {
                 returned: false,
             }
             .publish(&env);
+            Self::route_platform_take(&env, &token_client, &platform, forfeited_bond);
         }
-
-        Self::route_platform_take(&env, &token_client, &platform, platform_take);
 
         // Clean up.
         env.storage()
