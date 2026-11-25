@@ -72,6 +72,12 @@ is_contract_address() {
   [[ "$1" =~ ^C[A-Z2-7]{55}$ ]]
 }
 
+# Accept either a G... account address or a C... contract address.
+# Used for admin and platform, which the contract accepts as any Address.
+is_admin_address() {
+  is_account_address "$1" || is_contract_address "$1"
+}
+
 prompt_until_valid() {
   local label="$1" var_name="$2" validator="$3" hint="$4" value=""
   while true; do
@@ -90,9 +96,9 @@ if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
   echo
   echo "Collecting all four constructor arguments BEFORE deploying."
   echo
-  [[ -n "$ADMIN" ]] || prompt_until_valid "admin" ADMIN is_account_address "G... account address"
+  [[ -n "$ADMIN" ]] || prompt_until_valid "admin" ADMIN is_admin_address "G... account or C... contract address"
   [[ -n "$TOKEN" ]] || prompt_until_valid "token" TOKEN is_contract_address "C... SEP-41 contract address"
-  [[ -n "$PLATFORM" ]] || prompt_until_valid "platform" PLATFORM is_account_address "G... account address"
+  [[ -n "$PLATFORM" ]] || prompt_until_valid "platform" PLATFORM is_admin_address "G... account or C... contract address"
   if [[ -z "$TIMEOUT_LEDGERS" ]]; then
     while true; do
       read -r -p "timeout_ledgers (positive integer): " TIMEOUT_LEDGERS
@@ -103,14 +109,14 @@ if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
 fi
 
 # Validate everything up front, regardless of how it was supplied.
-if ! is_account_address "$ADMIN"; then
-  echo "invalid --admin: expected a G... account address" >&2; exit 2
+if ! is_admin_address "$ADMIN"; then
+  echo "invalid --admin: expected a G... account address or C... contract address" >&2; exit 2
 fi
 if ! is_contract_address "$TOKEN"; then
   echo "invalid --token: expected a C... SEP-41 contract address" >&2; exit 2
 fi
-if ! is_account_address "$PLATFORM"; then
-  echo "invalid --platform: expected a G... account address" >&2; exit 2
+if ! is_admin_address "$PLATFORM"; then
+  echo "invalid --platform: expected a G... account address or C... contract address" >&2; exit 2
 fi
 if ! [[ "$TIMEOUT_LEDGERS" =~ ^[0-9]+$ ]] || [[ "$TIMEOUT_LEDGERS" -le 0 ]]; then
   echo "invalid --timeout-ledgers: expected a positive integer" >&2; exit 2

@@ -707,6 +707,17 @@ pub struct QuestionRefunded {
     pub via_timeout: bool,
 }
 
+/// `unstake_completed` topics: worker, token; data: amount paid out.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnstakeCompleted {
+    #[topic]
+    pub worker: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
+}
+
 /// `stake_changed` topics: worker, token; data: signed amount, new_total.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1758,7 +1769,15 @@ impl OracleEscrow {
         if amount > existing {
             return Err(ContractError::InsufficientBalance);
         }
-        Self::set_persistent(&env, &key, &(existing - amount));
+        let new_total = existing - amount;
+        Self::set_persistent(&env, &key, &new_total);
+        PrepaidBalanceChanged {
+            payer: payer.clone(),
+            token: token.clone(),
+            amount: -amount,
+            new_total,
+        }
+        .publish(env);
 
         Self::open_question(env, payer, question_id, amount, token, None, None)
     }
@@ -2375,8 +2394,14 @@ impl OracleEscrow {
 
         info.unbonding = 0;
         info.unbonding_release_at = 0;
-        Self::set_persistent(&env, &DataKey::Stake(worker), &info);
+        Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
         Self::bump_instance(&env);
+        UnstakeCompleted {
+            worker,
+            token: token_addr,
+            amount,
+        }
+        .publish(&env);
         Ok(amount)
     }
 
@@ -2458,6 +2483,12 @@ impl OracleEscrow {
         let key = Self::stake_key(&env, &token, &worker)?;
         Self::set_persistent(&env, &key, &info);
         Self::bump_instance(&env);
+        UnstakeCompleted {
+            worker,
+            token,
+            amount,
+        }
+        .publish(&env);
         Ok(amount)
     }
 
