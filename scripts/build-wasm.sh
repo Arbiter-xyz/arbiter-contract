@@ -24,11 +24,14 @@ WASM_OUT="${ROOT_DIR}/target/${WASM_TARGET}/release/oracle_escrow.wasm"
 BINDINGS_DIR="${ROOT_DIR}/bindings"
 
 # Languages we ship raw call/type bindings for. Each entry is a directory under
-# `bindings/` containing a generator that maps the contract's 14 entry points
-# (initialize, submit, deposit, withdraw_balance, charge, resolve, stake,
-# unstake, withdraw, withdraw_to, touch, refund, refund_timeout, set_admin,
-# set_timeout_ledgers) plus the `get_*` reads and the Question/Status/
-# ContractError types to that language's native shapes.
+# `bindings/` containing a generator that maps the contract's public entry points
+# (submit, submit_with_schema_hash, submit_with_category, submit_asset, deposit,
+# deposit_asset, charge, charge_asset, resolve, refund, refund_timeout,
+# sweep_timeouts, reopen_question, begin_unstake, complete_unstake, withdraw,
+# withdraw_balance, withdraw_to, touch, touch_question, set_paused, set_admin,
+# set_timeout_ledgers, import_question, migrate_pending, post_challenge_bond)
+# plus the `get_*` reads and the Question/Status/ContractError types to that
+# language's native shapes.
 BINDING_LANGS=("python" "go")
 
 BUILD_WASM=1

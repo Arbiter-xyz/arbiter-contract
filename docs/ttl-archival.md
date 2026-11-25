@@ -98,9 +98,9 @@ keep-alive path, or could it archive with no caller ever touching it again?
 
 | key | keep-alive path | verdict |
 |---|---|---|
-| `PasskeyPubkey` | Written once at registration; read on every authenticated call, and each such call re-extends the instance/code. | Fine as-is: a passkey that is never used again is dead by definition, and auto-restore covers a later re-use. |
-| `KycAttestation` | Written by the attestation call; read by the settlement path that checks it. | Fine as-is: read on the path that needs it, and auto-restore covers a cold read. |
-| `StakeSnapshot` | Written alongside `Stake`; the same `touch(address)` that keeps `Stake` live re-extends it. | Covered by `touch(address)`. |
+| `PasskeyPubkey` | Written once at registration; read only by `verify_passkey_auth()`, not on every authenticated call. Each call that invokes `verify_passkey_auth()` re-extends the instance/code. | Fine as-is: a passkey that is never used again is dead by definition, and auto-restore covers a later re-use. |
+| `KycAttestation` | Written by the attestation call; not read by the current settlement path (the check was removed). | The entry lives in instance storage and is re-extended on any state-changing call. If a future path re-reads it, auto-restore will cover a cold read. |
+| `StakeSnapshot` | Written alongside `Stake`. **`touch(address)` does not extend `StakeSnapshot`** — `touch` does not know the ledgers required to bump a snapshot. The entry is re-extended only when a path that writes it is called. | As long as staking activity continues, archival is unlikely. For long-idle stakes, the backend sweep should touch the snapshot explicitly or rely on auto-restore at the next stake/unstake. |
 | `ChallengerBond` | Written when a challenge is opened; read by the resolution path that settles or slashes it. | Fine as-is: the resolution path reads it, and auto-restore covers a cold read. |
 | `PendingResolution` | Written when a question enters resolution; read by the finalize path. | Fine as-is: read on the path that finalizes it. |
 | `EscalatedQuestion` | Written on escalation; read by the escalation-resolution path. | Fine as-is: read on the path that resolves it. |
