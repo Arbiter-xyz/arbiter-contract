@@ -1174,38 +1174,6 @@ pub struct ChallengeBondSettled {
 }
 }
 
-/// #125: a worker's pending hash commitment for a question. Stored under
-/// DataKey::Commit(question_id, worker) by commit_answer() and removed by
-/// reveal_answer() once it has been verified.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitEntry {
-    /// SHA-256 of (answer_bytes || salt_bytes), as supplied by the worker.
-    pub answer_hash: BytesN<32>,
-    /// Ledger sequence when the commitment was posted.
-    pub committed_at: u32,
-}
-
-/// #125: emitted when a worker posts a commitment.
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnswerCommitted {
-    #[topic]
-    pub question_id: u64,
-    #[topic]
-    pub worker: Address,
-    pub committed_at: u32,
-}
-
-/// #125: emitted when a worker's reveal is accepted.
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnswerRevealed {
-    #[topic]
-    pub question_id: u64,
-    #[topic]
-    pub worker: Address,
-}
 
 /// #128: emitted when the admin configures the public-goods routing.
 #[contractevent]
@@ -1874,20 +1842,7 @@ impl OracleEscrow {
         losing_workers: Vec<Address>,
     ) -> Result<(), ContractError> {
         let env = env.clone();
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        // Before validate_worker_lists(): that check is O(n^2), so an
-        // oversized call must be rejected before paying for it.
-        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
-            return Err(ContractError::QuorumTooLarge);
-        }
-        // Issue #85: one guard clause enforcing admin-configured quorum
-        // bounds, in addition to (not instead of) the fixed MAX_QUORUM_SIZE
-        // check above. Unconfigured bounds (never called set_quorum_bounds())
-        // default to unbounded, preserving today's behavior.
-        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
-        Self::validate_worker_lists(&workers, &losing_workers)?;
+        Self::validate_quorum(&env, &workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
         let mut question: Question = env
@@ -2126,75 +2081,16 @@ impl OracleEscrow {
     /// from the still-warming amount first. A second request adds to the
     /// bucket and restarts its clock.
     pub fn begin_unstake(env: Env, worker: Address, amount: i128) -> Result<u32, ContractError> {
-        worker.require_auth();
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-
-        let mut info = Self::stake_info(&env, &worker);
-        if amount > info.settled + info.warming {
-            return Err(ContractError::InsufficientStake);
-        }
-        let from_warming = amount.min(info.warming);
-        info.warming -= from_warming;
-        info.settled -= amount - from_warming;
-
-        let timeout_ledgers: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TimeoutLedgers)
-            .ok_or(ContractError::NotInitialized)?;
-        let release_at = env
-            .ledger()
-            .sequence()
-            .saturating_add(MIN_UNBONDING_LEDGERS.max(timeout_ledgers));
-        info.unbonding = info
-            .unbonding
-            .checked_add(amount)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        info.unbonding_release_at = release_at;
-
-        let new_total = info.settled + info.warming;
-        let token_addr = Self::token(&env)?;
-        Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
-        Self::bump_instance(&env);
-        StakeChanged {
-            worker,
-            token: token_addr,
-            amount: -amount,
-            new_total,
-        }
-        .publish(&env);
-        Ok(release_at)
+        let token = Self::token(&env)?;
+        Self::begin_unstake_asset(env, worker, token, amount)
     }
 
     /// Step 2 of 2: pays out the whole unbonding bucket once its release
     /// ledger has passed. Returns the amount paid (net of any slashes it
     /// took while unbonding).
     pub fn complete_unstake(env: Env, worker: Address) -> Result<i128, ContractError> {
-        worker.require_auth();
-
-        let mut info = Self::stake_info(&env, &worker);
-        if info.unbonding <= 0 {
-            return Err(ContractError::NothingUnbonding);
-        }
-        if env.ledger().sequence() < info.unbonding_release_at {
-            return Err(ContractError::UnbondingNotElapsed);
-        }
-
-        let amount = info.unbonding;
-        let token_addr = Self::token(&env)?;
-        token::Client::new(&env, &token_addr).transfer(
-            &env.current_contract_address(),
-            &worker,
-            &amount,
-        );
-
-        info.unbonding = 0;
-        info.unbonding_release_at = 0;
-        Self::set_persistent(&env, &DataKey::Stake(worker), &info);
-        Self::bump_instance(&env);
-        Ok(amount)
+        let token = Self::token(&env)?;
+        Self::complete_unstake_asset(env, worker, token)
     }
 
     /// #127: Alias for complete_unstake(). Same semantics — worker calls this
@@ -2670,7 +2566,7 @@ impl OracleEscrow {
             executable_at,
         };
         env.storage().instance().set(&DataKey::PendingUpgrade, &upgrade);
-        Self::extend_instance_ttl(&env);
+        Self::bump_instance(&env);
         UpgradeProposed {
             wasm_hash: new_wasm_hash,
             executable_at,
@@ -2684,7 +2580,7 @@ impl OracleEscrow {
         Self::require_admin(&env)?;
         let upgrade = Self::pending_upgrade(&env)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
-        Self::extend_instance_ttl(&env);
+        Self::bump_instance(&env);
         UpgradeCancelled {
             wasm_hash: upgrade.wasm_hash,
         }
@@ -2703,7 +2599,7 @@ impl OracleEscrow {
             return Err(ContractError::UpgradeNotReady);
         }
         env.storage().instance().remove(&DataKey::PendingUpgrade);
-        Self::extend_instance_ttl(&env);
+        Self::bump_instance(&env);
         env.deployer().update_current_contract_wasm(upgrade.wasm_hash.clone());
         UpgradeExecuted {
             wasm_hash: upgrade.wasm_hash,
@@ -3176,15 +3072,6 @@ impl OracleEscrow {
             .ok_or(ContractError::NoUpgradePending)
     }
 
-    /// Instance storage (admin, token, timeout, pending upgrade) and the
-    /// contract code share one TTL, and nothing else ever extends it. Every
-    /// state-changing call keeps it alive so the contract, and with it every
-    /// escrowed question, never archives under steady use.
-    fn extend_instance_ttl(env: &Env) {
-        env.storage()
-            .instance()
-            .extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
-    }
 
     fn require_admin(env: &Env) -> Result<(), ContractError> {
         let admin: Address = env
@@ -3592,6 +3479,26 @@ impl OracleEscrow {
         Ok(())
     }
 
+    /// Validates a (workers, losing_workers) pair: non-empty, not over
+    /// MAX_QUORUM_SIZE, within admin-configured bounds, and no duplicates or
+    /// overlap. Call this once at every resolve/escalate entry point instead
+    /// of repeating the four-step preamble inline.
+    fn validate_quorum(
+        env: &Env,
+        workers: &Vec<Address>,
+        losing_workers: &Vec<Address>,
+    ) -> Result<(), ContractError> {
+        if workers.is_empty() {
+            return Err(ContractError::NoWorkers);
+        }
+        let total = workers.len().saturating_add(losing_workers.len());
+        if total > MAX_QUORUM_SIZE {
+            return Err(ContractError::QuorumTooLarge);
+        }
+        Self::check_quorum_bounds(env, total)?;
+        Self::validate_worker_lists(workers, losing_workers)
+    }
+
     // ---- Issue #84: dry-run resolve() simulation ----------------------
     //
     // Simplifications vs. the full issue:
@@ -3617,14 +3524,7 @@ impl OracleEscrow {
         workers: Vec<Address>,
         losing_workers: Vec<Address>,
     ) -> Result<ResolvePreview, ContractError> {
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
-            return Err(ContractError::QuorumTooLarge);
-        }
-        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()) as u32)?;
-        Self::validate_worker_lists(&workers, &losing_workers)?;
+        Self::validate_quorum(&env, &workers, &losing_workers)?;
 
         let question: Question = env
             .storage()
@@ -4550,10 +4450,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
 
-        if first_workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        Self::validate_worker_lists(&first_workers, &first_losing_workers)?;
+        Self::validate_quorum(&env, &first_workers, &first_losing_workers)?;
 
         let mut question = Self::load_question(&env, question_id)?;
         if question.status != Status::Pending {
@@ -4603,14 +4500,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
 
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
-            return Err(ContractError::QuorumTooLarge);
-        }
-        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
-        Self::validate_worker_lists(&workers, &losing_workers)?;
+        Self::validate_quorum(&env, &workers, &losing_workers)?;
 
         let key = DataKey::Question(question_id);
         let mut question = Self::load_question(&env, question_id)?;
@@ -4752,14 +4642,7 @@ impl OracleEscrow {
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
 
-        if workers.is_empty() {
-            return Err(ContractError::NoWorkers);
-        }
-        if workers.len().saturating_add(losing_workers.len()) > MAX_QUORUM_SIZE {
-            return Err(ContractError::QuorumTooLarge);
-        }
-        Self::check_quorum_bounds(&env, workers.len().saturating_add(losing_workers.len()))?;
-        Self::validate_worker_lists(&workers, &losing_workers)?;
+        Self::validate_quorum(&env, &workers, &losing_workers)?;
 
         let mut question = Self::load_question(&env, question_id)?;
         if question.status != Status::Pending {
