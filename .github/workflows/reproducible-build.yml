@@ -32,6 +32,7 @@ jobs:
       - name: Install pinned Stellar CLI
         run: |
           curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  stellar-cli_27.1.0_amd64.deb" | sha256sum -c -
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - id: build
         run: |

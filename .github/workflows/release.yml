@@ -36,7 +36,10 @@ jobs:
           targets: ${{ env.WASM_TARGET }}
 
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --features opt
+        run: |
+          curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  stellar-cli_27.1.0_amd64.deb" | sha256sum -c -
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
 
       - name: Build contract WASM
         run: stellar contract build
@@ -52,7 +55,18 @@ jobs:
           echo "Local artifact: $WASM"
           HASH=$(sha256sum "$WASM" | awk '{print $1}')
           echo "wasm_hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "wasm_path=$WASM" >> "$GITHUB_OUTPUT"
           echo "Local WASM sha256: $HASH"
+          sha256sum "$WASM" > "${WASM}.sha256"
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: |
+            ${{ steps.hash.outputs.wasm_path }}
+            ${{ steps.hash.outputs.wasm_path }}.sha256
+          retention-days: 90
 
   verify-hash:
     name: Verify deployed WASM hash
@@ -62,7 +76,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --features opt
+        run: |
+          curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  stellar-cli_27.1.0_amd64.deb" | sha256sum -c -
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
 
       - name: Resolve target contract id
         id: target
@@ -102,3 +119,23 @@ jobs:
             exit 1
           fi
           echo "::notice::WASM hash verified: deployed contract matches this commit's build."
+
+  publish-release:
+    name: Attach WASM to GitHub Release
+    # Only runs on tag pushes — not on workflow_dispatch verification runs.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [build, verify-hash]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: dist/
+
+      - name: Attach WASM and hash to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

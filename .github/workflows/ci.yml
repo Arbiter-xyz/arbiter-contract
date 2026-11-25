@@ -71,7 +71,8 @@ jobs:
         # in hardware-wallet support (dbus, then libudev/hidapi) and takes
         # 10+ minutes. Pinned to the version this project was built against.
         run: |
-          curl -LO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  stellar-cli_27.1.0_amd64.deb" | sha256sum -c -
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - name: Build contract and test fixtures to WASM
         run: scripts/build-wasm.sh
@@ -95,14 +96,11 @@ jobs:
             exit 1
           fi
       - name: WASM-hash verification against deployed contract
-        # Ties the deployed contract id pinned in the README to the lib.rs
-        # commit under test: builds the WASM (same `stellar contract build`
-        # output as above), fetches the deployed contract's on-chain WASM
-        # hash, and fails loudly on any mismatch. This is only meaningful
-        # because the build is reproducible (#115); a mismatch means either
-        # the deployed bytecode drifted from this commit or the build is no
-        # longer deterministic. There is no incident-alerting wiring in this
-        # repo, so the failure path is a hard CI failure (non-zero exit).
+        # Runs only on workflow_dispatch so PRs that change the contract are
+        # not blocked by a stale deployed hash. Triggered automatically by
+        # release.yml after a deploy; trigger manually to verify a specific
+        # commit against a named contract id.
+        if: github.event_name == 'workflow_dispatch'
         env:
           CONTRACT_ID: ${{ github.event.inputs.contract_id || 'CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36' }}
           NETWORK: testnet
