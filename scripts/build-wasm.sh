@@ -50,7 +50,11 @@ done
 
 if [[ "$BUILD_WASM" -eq 1 ]]; then
   echo "==> building contract wasm (${WASM_TARGET})"
-  (cd "$ROOT_DIR" && cargo build --target "$WASM_TARGET" --release)
+  (cd "$ROOT_DIR" && stellar contract build)
+  echo "==> building upgrade-test-v3 fixture"
+  (cd "$ROOT_DIR" && stellar contract build --features upgrade-test-v3 --out-dir target/wasm32v1-none/release-upgrade-test-v3)
+  echo "==> building bench-uncapped-quorum fixture"
+  (cd "$ROOT_DIR" && stellar contract build --features bench-uncapped-quorum --out-dir target/wasm32v1-none/release-bench-uncapped-quorum)
 fi
 
 if [[ "$BUILD_BINDINGS" -eq 1 ]]; then
