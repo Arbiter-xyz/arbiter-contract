@@ -1652,6 +1652,9 @@ impl OracleEscrow {
         if !allowed && is_default {
             return Err(ContractError::CannotDisableDefaultAsset);
         }
+        if allowed == was_allowed {
+            return Ok(());
+        }
         if allowed && !was_allowed {
             let count: u32 = env
                 .storage()
@@ -2902,6 +2905,9 @@ impl OracleEscrow {
             .instance()
             .get(&DataKey::TimeoutLedgers)
             .unwrap_or(0);
+        if old_timeout_ledgers == new_timeout_ledgers {
+            return Ok(());
+        }
         env.storage()
             .instance()
             .set(&DataKey::TimeoutLedgers, &new_timeout_ledgers);
@@ -3030,6 +3036,9 @@ impl OracleEscrow {
     /// a third party cannot trip the breaker to deny service.
     pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        if Self::paused(&env) == paused {
+            return Ok(());
+        }
         env.storage().instance().set(&DataKey::Paused, &paused);
         Self::bump_instance(&env);
         PausedChanged { paused }.publish(&env);
