@@ -51,9 +51,10 @@ export CARGO_INCREMENTAL=0
 rm -rf target/wasm32v1-none/release
 stellar contract build --locked
 
-WASM="$(find target/wasm32v1-none/release -maxdepth 1 -name '*.wasm' ! -name '*_test.wasm' | sort | head -n1)"
-if [[ -z "$WASM" ]]; then
-  echo "no WASM artifact produced" >&2
+# Name the escrow artifact explicitly: the workspace also builds fee_vesting.wasm.
+WASM="target/wasm32v1-none/release/oracle_escrow.wasm"
+if [[ ! -f "$WASM" ]]; then
+  echo "no WASM artifact produced at $WASM" >&2
   exit 1
 fi
 
