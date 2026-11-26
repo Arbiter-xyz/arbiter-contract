@@ -75,6 +75,22 @@ can mint a question on the target by calling `import_question` directly.
 That's tested with the source's auth for the import itself mocked but not
 the transfer: `import_cannot_mint_a_question_without_funds_actually_arriving`.
 
+## Questions submitted during a migration
+
+`run` does not migrate a fixed list. Each batch is the live head of the
+source's pending set, so a question submitted on the source after the
+baseline was written is migrated too. We chose to allow this rather than
+refuse it: refusing would leave the run stuck on every late arrival until
+someone deleted the journal, and that is the wrong fix for a routine event.
+
+`verify` covers these questions. It checks the union of the baseline's
+questions and every id journaled in a `batch-intent` entry (written before
+each send, so a crash after the send is still covered). A late question
+gets the same checks as a baseline one (`moved exactly once`, `terms
+preserved`, `not duplicated`), and its amount counts toward the balance
+check. It has no baseline terms, so its terms are read from the source
+record, which keeps its `Migrated` status after the move.
+
 ## Why a crash can't lose or duplicate funds
 
 The orchestrator can only die **between** transactions, and every

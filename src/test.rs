@@ -708,6 +708,33 @@ fn begin_unstake_moves_stake_to_unbonding_without_paying_out() {
 }
 
 #[test]
+fn begin_unstake_drains_the_newest_warming_tranche_first() {
+    let f = setup();
+    let c = client(&f);
+    let w1 = Address::generate(&f.env);
+    fund_worker(&f, &w1, 1_000_000);
+    let l = f.env.ledger().sequence();
+    c.stake(&w1, &100);
+    f.env.ledger().set_sequence_number(l + 100);
+    c.stake(&w1, &50);
+
+    c.begin_unstake(&w1, &50);
+
+    let tranches = c.get_stake_info(&w1).warming_tranches.unwrap();
+    assert_eq!(tranches.len(), 1);
+    assert_eq!(
+        tranches.get(0).unwrap(),
+        WarmingTranche { amount: 100, since: l }
+    );
+
+    // The surviving oldest tranche keeps its original maturity.
+    f.env.ledger().set_sequence_number(l + STAKE_WARMUP_LEDGERS - 1);
+    assert_eq!(c.get_matured_stake(&w1), 0);
+    f.env.ledger().set_sequence_number(l + STAKE_WARMUP_LEDGERS);
+    assert_eq!(c.get_matured_stake(&w1), 100);
+}
+
+#[test]
 fn complete_unstake_pays_out_only_after_the_release_ledger() {
     let f = setup();
     let c = client(&f);
