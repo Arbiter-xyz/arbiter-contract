@@ -114,9 +114,8 @@ function makeClient(o) {
     tokenOf(id) {
       return call(id, "get_token");
     },
-    decimals(id, token) {
-      if (!decimalsCache.has(token)) decimalsCache.set(token, Number(call(id, "get_asset_decimals", { token })));
-      return decimalsCache.get(token);
+    questionToken(id, qid) {
+      return call(id, "get_question_token", { question_id: String(qid) });
     },
     balance(token, who) {
       return BigInt(call(token, "balance", { id: who }));
@@ -190,10 +189,7 @@ const fmtTotals = (totals, decimalsOf) =>
 function plan(o, c) {
   const ledger = c.latestLedger();
   const { ids, legacy } = enumeratePending(o, c);
-  const questions = ids.map((id) => {
-    const q = c.question(o.source, id);
-    return { id, ...q, decimals: c.decimals(o.source, q.token) };
-  });
+  const questions = ids.map((id) => ({ id, ...c.question(o.source, id), token: legacy ? null : c.questionToken(o.source, id) }));
   const problems = [];
   let targetSource = null;
   if (!legacy) {
@@ -222,6 +218,7 @@ function plan(o, c) {
       created_at: q.created_at,
       refund_timeout_from: q.created_at + q.timeout_ledgers,
       past_deadline: ledger >= q.created_at + q.timeout_ledgers,
+      token: q.token,
     })),
     problems,
   };
@@ -279,14 +276,15 @@ function run(o, c) {
   }
   // The first run records a baseline; re-runs after a crash keep the
   // original one so `verify` can check the whole migration, not just the
-  // tail end of it.
+  // tail end of it. Each question moves in its own asset, so balances are
+  // recorded per token: the default one plus every question's bound token.
   if (!readJournal(o).some((e) => e.kind === "baseline")) {
-    const token = c.tokenOf(o.source);
-    journal(o, {
-      kind: "baseline", ledger: r.ledger, source: o.source, target: o.target, token,
-      source_balance: c.balance(token, o.source), target_balance: c.balance(token, o.target),
-      questions: r.questions,
-    });
+    const tokens = new Set([c.tokenOf(o.source), ...r.questions.map((q) => q.token).filter(Boolean)]);
+    const balances = {};
+    for (const token of tokens) {
+      balances[token] = { source_balance: c.balance(token, o.source), target_balance: c.balance(token, o.target) };
+    }
+    journal(o, { kind: "baseline", ledger: r.ledger, source: o.source, target: o.target, balances, questions: r.questions });
   }
   journal(o, { kind: "run-start", pending: r.pending });
 
@@ -344,16 +342,10 @@ function verify(o, c) {
   const ok = (name, pass, detail = "") => checks.push({ name, pass, detail });
 
   const legacy = !!(o.legacyIds || o.legacyIdsFile);
-  // run migrates the live pending head, so questions submitted after the
-  // baseline get migrated too. Check every id it journaled as a batch (the
-  // intent is written before each send, so even an unjournaled-result crash
-  // is covered). Late ids have no baseline terms; their terms come from the
-  // source record, which keeps Migrated status.
-  const late = new Set(readJournal(o).filter((e) => e.kind === "batch-intent").flatMap((e) => e.ids.map(String)));
-  for (const q of base.questions) late.delete(String(q.id));
-  let moved = 0n;
-  let settledElsewhere = 0n;
-  for (const q of [...base.questions, ...[...late].map((id) => ({ id, source_only: true }))]) {
+  const moved = new Map(); // token -> migrated amount
+  const settledElsewhere = new Map(); // token -> amount settled on source during the run
+  const add = (m, k, v) => m.set(k, (m.get(k) ?? 0n) + v);
+  for (const q of base.questions) {
     const src = c.question(o.source, q.id);
     if (q.source_only) {
       if (!src) { ok(`#${q.id} exists on source`, false, "MISSING ON SOURCE"); continue; }
@@ -366,7 +358,7 @@ function verify(o, c) {
       ok(`#${q.id} moved exactly once`, !!dst && !srcPending, dst ? `target status ${dst.status}` : "MISSING ON TARGET");
       if (dst) {
         ok(`#${q.id} terms preserved`, dst.payer === q.payer && dst.amount.toString() === q.amount && dst.created_at === q.created_at && dst.created_at + dst.timeout_ledgers === q.refund_timeout_from);
-        moved += BigInt(q.amount);
+        add(moved, q.token, BigInt(q.amount));
       }
     } else if (srcPending) {
       ok(`#${q.id} still only on source`, !dstExists, dstExists ? "ALSO ON TARGET" : "not migrated yet");
@@ -374,18 +366,21 @@ function verify(o, c) {
       // Resolved/refunded on the source while the migration ran: fine, as
       // long as it didn't ALSO get imported.
       ok(`#${q.id} settled on source (${src?.status}), not duplicated`, !dstExists);
-      settledElsewhere += BigInt(q.amount);
+      add(settledElsewhere, q.token, BigInt(q.amount));
     }
   }
   if (!legacy) {
-    const dec = c.decimals(o.source, base.token);
-    const srcNow = c.balance(base.token, o.source);
-    const tgtNow = c.balance(base.token, o.target);
-    const srcDelta = BigInt(base.source_balance) - srcNow;
-    const tgtDelta = tgtNow - BigInt(base.target_balance);
-    ok("target received exactly what was migrated", tgtDelta === moved, `target +${fmtAmount(tgtDelta, dec)}, migrated ${fmtAmount(moved, dec)}`);
-    ok("source released exactly what was migrated (plus any settlements)", srcDelta >= moved && srcDelta <= moved + settledElsewhere,
-      `source -${fmtAmount(srcDelta, dec)}, migrated ${fmtAmount(moved, dec)}, settled on source ${fmtAmount(settledElsewhere, dec)}`);
+    for (const [token, b] of Object.entries(base.balances)) {
+      const migrated = moved.get(token) ?? 0n;
+      const settled = settledElsewhere.get(token) ?? 0n;
+      const srcNow = c.balance(token, o.source);
+      const tgtNow = c.balance(token, o.target);
+      const srcDelta = BigInt(b.source_balance) - srcNow;
+      const tgtDelta = tgtNow - BigInt(b.target_balance);
+      ok(`[${token}] target received exactly what was migrated`, tgtDelta === migrated, `target +${fmtAmount(tgtDelta)}, migrated ${fmtAmount(migrated)}`);
+      ok(`[${token}] source released exactly what was migrated (plus any settlements)`, srcDelta >= migrated && srcDelta <= migrated + settled,
+        `source -${fmtAmount(srcDelta)}, migrated ${fmtAmount(migrated)}, settled on source ${fmtAmount(settled)}`);
+    }
     const srcPending = new Set(enumeratePending(o, c).ids.map(String));
     const tgtPending = new Set();
     const tc = c.pendingCount(o.target);
