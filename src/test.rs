@@ -1696,3 +1696,38 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
     assert_eq!(c.get_owed_asset(&worker1, &f.token_address), amount_a * 4 / 5);
     assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
 }
+
+// --- set_public_goods_config() bps bounds (#535)
+
+#[test]
+fn set_public_goods_config_rejects_bps_above_denominator() {
+    let f = setup();
+    let c = client(&f);
+    let pg_addr = Address::generate(&f.env);
+
+    let res = c.try_set_public_goods_config(&pg_addr, &10_001u32);
+    assert_eq!(res, Err(Ok(ContractError::InvalidPublicGoodsBps)));
+    assert_eq!(c.get_public_goods_config(), None);
+}
+
+#[test]
+fn public_goods_bps_10000_routes_entire_platform_take() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+    let pg_addr = Address::generate(&f.env);
+    let worker = Address::generate(&f.env);
+
+    c.set_public_goods_config(&pg_addr, &10_000u32);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let platform_before = tc.balance(&f.platform);
+    let pg_before = tc.balance(&pg_addr);
+
+    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    // One worker takes the whole pool, so platform_take = fee (dust = 0).
+    let fee = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
+    assert_eq!(tc.balance(&f.platform) - platform_before, 0);
+    assert_eq!(tc.balance(&pg_addr) - pg_before, fee);
+}
