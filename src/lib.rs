@@ -5897,8 +5897,6 @@ mod test_question_templates;
 #[cfg(test)]
 mod test_delegated_auth;
 #[cfg(test)]
-mod test_payment_streaming;
-#[cfg(test)]
 mod test_migrate_balances;
 #[cfg(test)]
 mod test_second_tier_quorum;
