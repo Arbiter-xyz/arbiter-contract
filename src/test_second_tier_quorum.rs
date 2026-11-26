@@ -147,6 +147,18 @@ fn second_tier_quorum_can_overturn_the_first_quorums_consensus() {
     let q = c.get_question(&1);
     assert_eq!(q.status, Status::Resolved, "question must be Resolved after escalate_resolve");
 
+    let (_, topics, data) = f.env.events().all().last().unwrap();
+    assert_eq!(
+        topics.get(0).unwrap().into_val(&f.env),
+        Symbol::new(&f.env, "escalation_resolved")
+    );
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    let overturned: bool = data
+        .get(Symbol::new(&f.env, "overturned"))
+        .unwrap()
+        .into_val(&f.env);
+    assert!(overturned, "EscalationResolved must report the overturn");
+
     let fee = AMOUNT * 2000 / 10_000;
     // w2 is now the winner — must be credited.
     assert_eq!(c.get_owed(&w2), AMOUNT - fee, "winner not credited after second quorum overturn");
