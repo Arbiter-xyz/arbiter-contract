@@ -4991,7 +4991,7 @@ impl OracleEscrow {
     /// 2. pre-authorizes a token transfer to `target` for the sum;
     /// 3. calls target.import_balances() to record and receive the funds;
     /// 4. zeroes out the entries here;
-    /// 5. emits a BalanceMigrated event.
+    /// 5. emits a BalanceMigrated event (only for pairs that moved funds).
     ///
     /// Any failure (unknown address, arithmetic overflow, target refusing the
     /// import or rejecting a non-allowlisted token) reverts the ENTIRE batch
@@ -5112,17 +5112,17 @@ impl OracleEscrow {
                     total = total
                         .checked_add(sum)
                         .ok_or(ContractError::ArithmeticOverflow)?;
-                }
 
-                BalanceMigrated {
-                    address,
-                    token: token.clone(),
-                    stake: stake_amount,
-                    owed: owed_amount,
-                    balance: balance_amount,
-                    target: target.clone(),
+                    BalanceMigrated {
+                        address,
+                        token: token.clone(),
+                        stake: stake_amount,
+                        owed: owed_amount,
+                        balance: balance_amount,
+                        target: target.clone(),
+                    }
+                    .publish(&env);
                 }
-                .publish(&env);
             }
         }
 
