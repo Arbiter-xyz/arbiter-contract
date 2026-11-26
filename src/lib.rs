@@ -145,7 +145,8 @@ pub enum Status {
     /// quorum's verdict is recorded in DataKey::EscalatedQuestion; a second
     /// quorum must still confirm (or override) before the question settles.
     /// refund() / refund_timeout() no longer apply once a question is
-    /// Disputed — the admin must call escalate_resolve() to finalize.
+    /// Disputed — the admin must call escalate_resolve() or
+    /// admin_refund_disputed() to finalize.
     Disputed,
 }
 
@@ -559,7 +560,8 @@ pub enum ContractError {
     InvalidBalanceMigrationTarget = 306,
     /// #49: escalate() called on a question that is not Pending.
     QuestionNotPendingForEscalation = 307,
-    /// #49: escalate_resolve() called on a question that is not Disputed.
+    /// #49: escalate_resolve() called on a question that is not Disputed, or
+    /// admin_refund_disputed() called without an eligible disputed question.
     QuestionNotDisputed = 308,
     /// #50: post_challenge_bond() called on a question that has no
     /// in-flight PendingResolution (the question was never put through
@@ -2741,7 +2743,26 @@ impl OracleEscrow {
     /// makes this a true fail-closed-only transition.
     pub fn refund(env: Env, question_id: u64) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        Self::do_refund(&env, question_id, false)
+        Self::do_refund(&env, question_id, false, false)
+    }
+
+    /// Admin-only recovery for an abandoned second-tier escalation or
+    /// challenged pending resolution. Returns escrow to the original payer
+    /// and permanently settles the question as Refunded.
+    pub fn admin_refund_disputed(env: Env, question_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let question = Self::load_question(&env, question_id)?;
+        let is_challenged_resolution = question.status == Status::ResolvedPending
+            && env
+                .storage()
+                .persistent()
+                .get::<_, PendingResolution>(&DataKey::PendingResolution(question_id))
+                .map(|pending| pending.disputed)
+                .unwrap_or(false);
+        if question.status != Status::Disputed && !is_challenged_resolution {
+            return Err(ContractError::QuestionNotDisputed);
+        }
+        Self::do_refund(&env, question_id, false, true)
     }
 
     /// Permissionless escape hatch: once a question has sat Pending for at
@@ -3767,6 +3788,7 @@ impl OracleEscrow {
         env: &Env,
         question_id: u64,
         via_timeout: bool,
+        allow_escalated: bool,
     ) -> Result<(), ContractError> {
         let key = DataKey::Question(question_id);
         let mut question: Question = env
@@ -3775,6 +3797,7 @@ impl OracleEscrow {
             .get(&key)
             .ok_or(ContractError::QuestionNotFound)?;
         if question.status != Status::Pending {
+            let can_refund_escalated = allow_escalated && question.status == Status::Disputed;
             let can_refund_disputed = !via_timeout
                 && question.status == Status::ResolvedPending
                 && env
@@ -3783,8 +3806,13 @@ impl OracleEscrow {
                     .get::<_, PendingResolution>(&DataKey::PendingResolution(question_id))
                     .map(|pr| pr.disputed)
                     .unwrap_or(false);
-            if !can_refund_disputed {
+            if !can_refund_escalated && !can_refund_disputed {
                 return Err(ContractError::QuestionNotPending);
+            }
+            if can_refund_escalated {
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::EscalatedQuestion(question_id));
             }
             Self::settle_disputed_bond(env, question_id)?;
             env.storage()
@@ -4213,7 +4241,7 @@ impl OracleEscrow {
         if env.ledger().sequence() < deadline {
             return Err(ContractError::TooEarlyForTimeout);
         }
-        Self::do_refund(env, question_id, true)?;
+        Self::do_refund(env, question_id, true, false)?;
         Ok(())
     }
 
@@ -5168,7 +5196,8 @@ impl OracleEscrow {
     /// second quorum can inspect and override it. Does NOT credit any
     /// workers or transfer any funds — the question amount stays escrowed.
     /// The question can no longer be refund()ed or refund_timeout()ed once
-    /// Disputed; it must go through escalate_resolve() to finalize.
+    /// Disputed; it must go through escalate_resolve() or
+    /// admin_refund_disputed() to finalize.
     pub fn escalate(
         env: Env,
         question_id: u64,
