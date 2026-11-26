@@ -344,10 +344,21 @@ function verify(o, c) {
   const ok = (name, pass, detail = "") => checks.push({ name, pass, detail });
 
   const legacy = !!(o.legacyIds || o.legacyIdsFile);
+  // run migrates the live pending head, so questions submitted after the
+  // baseline get migrated too. Check every id it journaled as a batch (the
+  // intent is written before each send, so even an unjournaled-result crash
+  // is covered). Late ids have no baseline terms; their terms come from the
+  // source record, which keeps Migrated status.
+  const late = new Set(readJournal(o).filter((e) => e.kind === "batch-intent").flatMap((e) => e.ids.map(String)));
+  for (const q of base.questions) late.delete(String(q.id));
   let moved = 0n;
   let settledElsewhere = 0n;
-  for (const q of base.questions) {
+  for (const q of [...base.questions, ...[...late].map((id) => ({ id, source_only: true }))]) {
     const src = c.question(o.source, q.id);
+    if (q.source_only) {
+      if (!src) { ok(`#${q.id} exists on source`, false, "MISSING ON SOURCE"); continue; }
+      Object.assign(q, { payer: src.payer, amount: src.amount.toString(), created_at: src.created_at, refund_timeout_from: src.created_at + src.timeout_ledgers });
+    }
     const dst = legacy ? null : c.question(o.target, q.id);
     const srcPending = src?.status === "Pending";
     const dstExists = !!dst;
