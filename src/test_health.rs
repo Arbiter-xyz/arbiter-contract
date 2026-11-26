@@ -22,7 +22,7 @@ fn get_health_reflects_open_question_count_across_submit_resolve_and_refund() {
     assert_eq!(c.get_health().total_opened, 3);
 
     // resolve(): Pending -> Resolved
-    c.resolve(&1, &vec![&f.env, worker], &vec![&f.env]);
+    c.resolve(&1, &vec![&f.env, worker], &vec![&f.env], &BytesN::from_array(&f.env, &[0u8; 32]));
     let h = c.get_health();
     assert_eq!(h.open_question_count, 2);
     assert_eq!(h.total_resolved, 1);
@@ -83,7 +83,7 @@ fn get_health_reports_correct_token_balance_as_tvl() {
 
     // resolve() sends the platform fee out; the workers' share stays in the
     // contract as Owed until withdrawn, so TVL drops by exactly the fee.
-    c.resolve(&1, &vec![&f.env, worker], &vec![&f.env]);
+    c.resolve(&1, &vec![&f.env, worker], &vec![&f.env], &BytesN::from_array(&f.env, &[0u8; 32]));
     assert_eq!(c.get_health().token_balance, tc.balance(&f.contract_id));
     assert!(c.get_health().token_balance < AMOUNT * 2);
 

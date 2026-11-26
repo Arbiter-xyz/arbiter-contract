@@ -1,0 +1,12 @@
+{
+  "_comment": "Well past what 2 attempts can absorb: most calls fail. Proves the stronger claim: even when retry.js loses, the fail-closed refund or the keeper's refund_timeout() still settles every question.",
+  "default": {
+    "p": { "delay": 0.1, "hang": 0.15, "httpError": 0.2, "rpcError": 0.2 },
+    "delayMs": [500, 5000],
+    "hangMs": 30000
+  },
+  "methods": {
+    "sendTransaction": { "p": { "dropAfter": 0.25 } }
+  },
+  "lag": { "getTransactionMs": 10000, "staleReadsMs": 8000, "latestLedgerBehind": 3 }
+}

@@ -156,7 +156,7 @@ fn settled_questions_leave_the_index_and_the_rest_stay_listed() {
     p.env.mock_all_auths();
     let c = OracleEscrowClient::new(&p.env, &p.old);
     let w = Address::generate(&p.env);
-    c.resolve(&1, &Vec::from_array(&p.env, [w]), &Vec::new(&p.env)); // head
+    c.resolve(&1, &Vec::from_array(&p.env, [w]), &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32])); // head
     c.refund(&6); // tail
     c.refund(&3); // middle
     p.env.ledger().set_sequence_number(10_000 + TIMEOUT);
@@ -301,7 +301,7 @@ fn migrated_question_settles_normally_on_the_target_and_is_dead_on_the_source() 
 
     let old_c = OracleEscrowClient::new(&p.env, &p.old);
     assert_eq!(
-        old_c.try_resolve(&1, &workers, &Vec::new(&p.env)),
+        old_c.try_resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32])),
         Err(Ok(ContractError::QuestionNotPending))
     );
     assert_eq!(
@@ -314,7 +314,7 @@ fn migrated_question_settles_normally_on_the_target_and_is_dead_on_the_source() 
         Err(Ok(ContractError::QuestionNotPending))
     );
 
-    OracleEscrowClient::new(&p.env, &p.new).resolve(&1, &workers, &Vec::new(&p.env));
+    OracleEscrowClient::new(&p.env, &p.new).resolve(&1, &workers, &Vec::new(&p.env), &BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(
         OracleEscrowClient::new(&p.env, &p.new).get_owed(&w),
         AMOUNT * 8 / 10
@@ -644,5 +644,95 @@ fn randomized_migration_never_loses_or_duplicates_funds() {
             }
             check_invariants(&p, &owed, paid_out, total_in);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #200: migrate_pending() calls the target contract before marking
+// local state settled — a malicious/buggy target that reenters
+// refund_timeout() on the same question_id mid-call must not be able to
+// double-settle it.
+// ---------------------------------------------------------------------------
+mod reentrancy {
+    use super::*;
+    use soroban_sdk::{contract, contractimpl};
+
+    /// A target contract that, instead of honestly importing the question,
+    /// reenters the SOURCE contract's permissionless refund_timeout() on
+    /// the same question_id before import_question() returns. Records
+    /// whether that reentrant call succeeded so the test can assert on it.
+    #[contract]
+    struct MaliciousTarget;
+
+    #[contractimpl]
+    impl MaliciousTarget {
+        #[allow(clippy::too_many_arguments)]
+        pub fn import_question(
+            env: Env,
+            source: Address,
+            _token: Address,
+            question_id: u64,
+            _payer: Address,
+            _amount: i128,
+            _created_at: u32,
+            _timeout_ledgers: u32,
+        ) {
+            let reentry_result = OracleEscrowClient::new(&env, &source)
+                .try_refund_timeout(&question_id);
+            let succeeded = matches!(reentry_result, Ok(Ok(())));
+            env.storage().instance().set(&0u32, &succeeded);
+        }
+
+        pub fn reentry_succeeded(env: Env) -> bool {
+            env.storage().instance().get(&0u32).unwrap_or(false)
+        }
+    }
+
+    /// Confirms (rather than just suspects) issue #200: with the
+    /// checks-effects-interactions fix, the question is already marked
+    /// Migrated (and removed from the Pending index) before
+    /// import_question() is invoked, so a reentrant refund_timeout() call
+    /// from inside it sees a non-Pending question and is rejected — no
+    /// double-settlement.
+    #[test]
+    fn malicious_target_reentering_refund_timeout_cannot_double_settle() {
+        let p = pair(1);
+        let payer = p.payers[0].clone();
+
+        // Advance well past the timeout so a reentrant refund_timeout()
+        // would succeed were the question still Pending at that point.
+        p.env.ledger().with_mut(|li| li.sequence_number += TIMEOUT + 1);
+
+        let malicious = p.env.register(MaliciousTarget, ());
+        let old_c = OracleEscrowClient::new(&p.env, &p.old);
+        let payer_balance_before =
+            token::Client::new(&p.env, &p.token).balance(&payer);
+
+        old_c
+            .mock_auths(&[MockAuth {
+                address: &p.old_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &p.old,
+                    fn_name: "migrate_pending",
+                    args: (ids(&p.env, &[1]), malicious.clone()).into_val(&p.env),
+                    sub_invokes: &[],
+                },
+            }])
+            .migrate_pending(&ids(&p.env, &[1]), &malicious);
+
+        // The reentrant refund_timeout() call must have been rejected.
+        assert!(
+            !MaliciousTargetClient::new(&p.env, &malicious).reentry_succeeded(),
+            "reentrant refund_timeout() must not succeed on an already-migrating question"
+        );
+
+        // The question ended up Migrated exactly once, never refunded.
+        assert_eq!(old_c.get_question(&1).status, Status::Migrated);
+
+        // The payer was never refunded a second time.
+        assert_eq!(
+            token::Client::new(&p.env, &p.token).balance(&payer),
+            payer_balance_before
+        );
     }
 }

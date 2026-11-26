@@ -2,7 +2,8 @@
 
 use crate::test::{client, setup, AMOUNT, TIMEOUT_LEDGERS};
 use crate::{ContractError, Status};
-use soroban_sdk::testutils::Ledger;
+use soroban_sdk::testutils::{Address as _, Ledger};
+use soroban_sdk::BytesN;
 
 #[test]
 fn reopened_question_starts_a_fresh_timeout_window() {
@@ -35,6 +36,7 @@ fn reopen_of_an_already_resolved_question_fails() {
         &2,
         &soroban_sdk::vec![&f.env, worker],
         &soroban_sdk::vec![&f.env],
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
 
     let res = c.try_reopen_question(&f.payer, &2, &AMOUNT);

@@ -1,0 +1,15 @@
+{
+  "name": "oracle-escrow-chaos",
+  "private": true,
+  "description": "RPC-failure chaos testing (issue #121). See docs/RPC_CHAOS_TESTING.md.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "lifecycle": "node chaos.mjs lifecycle",
+    "proxy": "node chaos.mjs proxy",
+    "verify": "node chaos.mjs verify"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.0.0"
+  }
+}

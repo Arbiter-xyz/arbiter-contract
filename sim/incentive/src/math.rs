@@ -23,6 +23,8 @@ pub const PLATFORM_FEE_BPS: i128 = 2000;
 pub const SLASH_BPS: i128 = 500;
 /// lib.rs `SLASH_CAP_BPS_OF_AMOUNT`.
 pub const SLASH_CAP_BPS_OF_AMOUNT: i128 = 10_000;
+/// lib.rs `SLASH_REDISTRIBUTE_BPS`.
+pub const SLASH_REDISTRIBUTE_BPS: i128 = 5_000;
 /// lib.rs `BPS_DENOM`.
 pub const BPS_DENOM: i128 = 10_000;
 
@@ -97,18 +99,22 @@ pub fn slash(info: &mut Stake, slash_bps: i128, cap: i128) -> i128 {
 pub struct Settlement {
     /// `mul_bps(amount, fee_bps)`.
     pub fee: i128,
-    /// Credited to EACH winning worker's Owed balance.
+    /// Credited to EACH winning worker's Owed balance as base share.
     pub share: i128,
+    /// Redistributed share of slashes credited to EACH winning worker.
+    pub redistribution_share: i128,
     /// `pool - share * n`, swept to the platform.
     pub dust: i128,
     /// Sum of every losing worker's slash.
     pub total_slashed: i128,
+    /// Portion of slashes going to the platform (platform portions + redistribution dust).
+    pub slash_platform_take: i128,
 }
 
 impl Settlement {
     /// The single token transfer resolve() makes to the platform.
     pub fn platform_take(&self) -> i128 {
-        self.fee + self.dust + self.total_slashed
+        self.fee + self.dust + self.slash_platform_take
     }
 }
 
@@ -126,13 +132,26 @@ pub fn resolve(amount: i128, winners: u32, losers: &mut [Stake], p: Params) -> S
 
     let cap = mul_bps(amount, p.slash_cap_bps_of_amount);
     let mut total_slashed = 0i128;
+    let mut slash_platform_take = 0i128;
+    let mut redistribution_share = 0i128;
     for loser in losers.iter_mut() {
-        total_slashed += slash(loser, p.slash_bps, cap);
+        let slashed = slash(loser, p.slash_bps, cap);
+        if slashed > 0 {
+            let worker_portion = mul_bps(slashed, SLASH_REDISTRIBUTE_BPS);
+            let platform_portion = slashed - worker_portion;
+            let redist_share = worker_portion / n;
+            let redist_dust = worker_portion - redist_share * n;
+            redistribution_share += redist_share;
+            slash_platform_take += platform_portion + redist_dust;
+            total_slashed += slashed;
+        }
     }
     Settlement {
         fee,
         share,
+        redistribution_share,
         dust,
         total_slashed,
+        slash_platform_take,
     }
 }

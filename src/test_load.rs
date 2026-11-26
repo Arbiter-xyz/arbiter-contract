@@ -268,7 +268,7 @@ fn bench_load_submit_all_then_resolve_all() {
             ws.push_back(m.workers[(i as usize * QUORUM as usize + j) % pool].clone());
         }
         m.env.cost_estimate().budget().reset_unlimited();
-        c.resolve(&(i + 1), &ws, &Vec::new(&m.env));
+        c.resolve(&(i + 1), &ws, &Vec::new(&m.env), &BytesN::from_array(&m.env, &[0u8; 32]));
         resolve.record(i, n, last_call_cost(&m.env));
     }
     resolve.wall_secs = t.elapsed().as_secs_f64();
@@ -318,7 +318,7 @@ fn bench_load_steady_state_window() {
                 ws.push_back(m.workers[(q as usize * QUORUM as usize + j) % pool].clone());
             }
             m.env.cost_estimate().budget().reset_unlimited();
-            c.resolve(&(q + 1), &ws, &Vec::new(&m.env));
+            c.resolve(&(q + 1), &ws, &Vec::new(&m.env), &BytesN::from_array(&m.env, &[0u8; 32]));
             resolve.record(q, n, last_call_cost(&m.env));
         }
     }

@@ -21,7 +21,7 @@ const QUESTION: i128 = USDC / 4; // 0.25 USDC, the smallest pricing tier
 /// The operations the simulations need, over either contract version.
 trait Escrow {
     fn submit(&self, payer: &Address, id: u64, amount: i128);
-    fn resolve(&self, id: u64, workers: &Vec<Address>, losers: &Vec<Address>);
+    fn resolve(&self, id: u64, workers: &Vec<Address>, losers: &Vec<Address>, hash: &BytesN<32>);
     fn refund(&self, id: u64);
     fn stake(&self, worker: &Address, amount: i128);
     /// The strongest "get my stake out before resolve() lands" move each
@@ -36,7 +36,7 @@ impl Escrow for legacy::Client<'_> {
     fn submit(&self, payer: &Address, id: u64, amount: i128) {
         legacy::Client::submit(self, payer, &id, &amount);
     }
-    fn resolve(&self, id: u64, workers: &Vec<Address>, losers: &Vec<Address>) {
+    fn resolve(&self, id: u64, workers: &Vec<Address>, losers: &Vec<Address>, _hash: &BytesN<32>) {
         legacy::Client::resolve(self, &id, workers, losers);
     }
     fn refund(&self, id: u64) {
@@ -63,8 +63,8 @@ impl Escrow for OracleEscrowClient<'_> {
     fn submit(&self, payer: &Address, id: u64, amount: i128) {
         OracleEscrowClient::submit(self, payer, &id, &amount);
     }
-    fn resolve(&self, id: u64, workers: &Vec<Address>, losers: &Vec<Address>) {
-        OracleEscrowClient::resolve(self, &id, workers, losers);
+    fn resolve(&self, id: u64, workers: &Vec<Address>, losers: &Vec<Address>, hash: &BytesN<32>) {
+        OracleEscrowClient::resolve(self, &id, workers, losers, hash);
     }
     fn refund(&self, id: u64) {
         OracleEscrowClient::refund(self, &id);
@@ -178,6 +178,7 @@ fn slash_after_pulling_stake(version: Version) -> i128 {
             1,
             &Vec::from_array(&m.env, [honest.clone()]),
             &Vec::from_array(&m.env, [liar.clone()]),
+            &BytesN::from_array(&m.env, &[0u8; 32]),
         )
     });
     let after = m.with(|e| e.bonded(&liar)) + token::Client::new(&m.env, &m.token).balance(&liar);
@@ -211,6 +212,7 @@ fn a3_unbonding_stake_stays_slashable_until_release_and_nets_out_on_claim() {
         &1,
         &Vec::from_array(&m.env, [honest]),
         &Vec::from_array(&m.env, [liar.clone()]),
+        &BytesN::from_array(&m.env, &[0u8; 32]),
     );
 
     m.env.ledger().set_sequence_number(release);
@@ -278,6 +280,7 @@ fn slash_hits_warming_first_then_settled_then_unbonding() {
         &1,
         &Vec::from_array(&m.env, [honest]),
         &Vec::from_array(&m.env, [w.clone()]),
+        &BytesN::from_array(&m.env, &[0u8; 32]),
     );
 
     let i = c.get_stake_info(&w);
@@ -303,7 +306,7 @@ fn victim_loss_single_event(version: Version, victim_stake: i128) -> i128 {
         winners.push_back(c.clone());
     }
     let before = m.with(|e| e.bonded(&victim));
-    m.with(|e| e.resolve(1, &winners, &Vec::from_array(&m.env, [victim.clone()])));
+    m.with(|e| e.resolve(1, &winners, &Vec::from_array(&m.env, [victim.clone()]), &BytesN::from_array(&m.env, &[0u8; 32])));
     before - m.with(|e| e.bonded(&victim))
 }
 
@@ -336,6 +339,7 @@ fn a2_micro_questions_no_longer_multiply_slash_leverage() {
                 1,
                 &Vec::from_array(&m.env, [w.clone()]),
                 &Vec::from_array(&m.env, [victim.clone()]),
+                &BytesN::from_array(&m.env, &[0u8; 32]),
             )
         });
         before - m.with(|e| e.bonded(&victim))
@@ -510,7 +514,7 @@ fn simulate(version: Version, s: Scenario, seed: u64) -> Outcome {
             out.refunded += 1;
             continue;
         }
-        m.with(|e| e.resolve(q, &winners, &losers));
+        m.with(|e| e.resolve(q, &winners, &losers, &BytesN::from_array(&env, &[0u8; 32])));
         if lie && !audit && !consensus {
             out.corrupted += 1;
             bribes += s.bribe;

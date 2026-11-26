@@ -1,0 +1,5 @@
+{
+  "_comment": "No errors: only the read-after-write lag round 6 observed on testnet. Confirmations arrive late, balance/state reads come back stale, the ledger number trails.",
+  "default": { "p": {} },
+  "lag": { "getTransactionMs": 8000, "staleReadsMs": 6000, "latestLedgerBehind": 2 }
+}

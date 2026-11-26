@@ -35,6 +35,7 @@ fn make_established(f: &Fixture, w: &Address, question_id: u64) {
         &question_id,
         &Vec::from_array(&f.env, [w.clone()]),
         &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
     );
     assert_eq!(c.get_resolved_count(w), 1);
 }

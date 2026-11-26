@@ -47,7 +47,7 @@ fn resolve_routes_public_goods_share_alongside_platform_fee() {
     let platform_before = tc.balance(&f.platform);
     let pg_before = tc.balance(&pg_addr);
 
-    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let platform_after = tc.balance(&f.platform);
     let pg_after = tc.balance(&pg_addr);
@@ -101,7 +101,7 @@ fn resolve_dust_lands_entirely_on_platform() {
     let pg_before = tc.balance(&pg_addr);
 
     c.submit(&f.payer, &99, &tiny_amount);
-    c.resolve(&99, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env));
+    c.resolve(&99, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let platform_after = tc.balance(&f.platform);
     let pg_after = tc.balance(&pg_addr);
@@ -143,7 +143,7 @@ fn default_behavior_with_zero_bps_matches_single_transfer() {
 
     let platform_before = tc.balance(&f.platform);
 
-    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env));
+    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
 
     let platform_after = tc.balance(&f.platform);
 
@@ -156,4 +156,62 @@ fn default_behavior_with_zero_bps_matches_single_transfer() {
         expected_platform_take,
         "with 0 bps configured, platform should receive the full platform_take"
     );
+}
+
+#[test]
+fn escalate_resolve_routes_public_goods_share_alongside_platform_fee() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    let pg_addr = soroban_sdk::Address::generate(&f.env);
+    let worker = soroban_sdk::Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [worker]);
+    let losers = Vec::new(&f.env);
+
+    c.set_public_goods_config(&pg_addr, &PUBLIC_GOODS_BPS);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let platform_before = tc.balance(&f.platform);
+    let pg_before = tc.balance(&pg_addr);
+
+    c.escalate(&1, &workers, &losers);
+    c.escalate_resolve(&1, &workers, &losers);
+
+    let fee: i128 = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
+    let pg_share = fee * PUBLIC_GOODS_BPS as i128 / BPS_DENOM;
+    let platform_remainder = fee - pg_share;
+
+    assert_eq!(tc.balance(&pg_addr) - pg_before, pg_share);
+    assert_eq!(tc.balance(&f.platform) - platform_before, platform_remainder);
+}
+
+#[test]
+fn finalize_resolve_routes_public_goods_share_alongside_platform_fee() {
+    use soroban_sdk::testutils::Ledger;
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    let pg_addr = soroban_sdk::Address::generate(&f.env);
+    let worker = soroban_sdk::Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [worker]);
+    let losers = Vec::new(&f.env);
+
+    c.set_public_goods_config(&pg_addr, &PUBLIC_GOODS_BPS);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let platform_before = tc.balance(&f.platform);
+    let pg_before = tc.balance(&pg_addr);
+
+    c.resolve_challengeable(&1, &workers, &losers, &50);
+    f.env.ledger().with_mut(|li| li.sequence_number += 51);
+    c.finalize_resolve(&1);
+
+    let fee: i128 = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
+    let pg_share = fee * PUBLIC_GOODS_BPS as i128 / BPS_DENOM;
+    let platform_remainder = fee - pg_share;
+
+    assert_eq!(tc.balance(&pg_addr) - pg_before, pg_share);
+    assert_eq!(tc.balance(&f.platform) - platform_before, platform_remainder);
 }
