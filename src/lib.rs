@@ -976,6 +976,32 @@ pub struct OwedReleased {
     pub total_locked: i128,
 }
 
+/// #511: emitted by set_resolver() whenever the resolver address changes.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolverChanged {
+    pub old_resolver: Option<Address>,
+    pub new_resolver: Option<Address>,
+}
+
+/// #513: emitted by set_kyc_attestor() whenever the KYC attestor key changes.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KycAttestorChanged {
+    pub old_attestor: Option<BytesN<32>>,
+    pub new_attestor: BytesN<32>,
+}
+
+/// #514: emitted by set_quorum_bounds() whenever bounds change.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumBoundsChanged {
+    pub old_min: u32,
+    pub old_max: u32,
+    pub new_min: u32,
+    pub new_max: u32,
+}
+
 /// #93: a non-transferable proof that `question_id` was adjudicated. There
 /// is deliberately no transfer/approve function anywhere in this contract
 /// for this record, which is what makes it non-transferable — see
@@ -2789,10 +2815,12 @@ impl OracleEscrow {
         resolver: Option<Address>,
     ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        let old_resolver: Option<Address> = env.storage().instance().get(&DataKey::Resolver);
         match &resolver {
             Some(addr) => env.storage().instance().set(&DataKey::Resolver, addr),
             None => env.storage().instance().remove(&DataKey::Resolver),
         }
+        ResolverChanged { old_resolver, new_resolver: resolver }.publish(&env);
         Self::bump_instance(&env);
         Ok(())
     }
@@ -3997,9 +4025,10 @@ impl OracleEscrow {
         if min > max {
             return Err(ContractError::InvalidAmount);
         }
+        let (old_min, old_max) = Self::get_quorum_bounds(env.clone());
         env.storage().instance().set(&DataKey::MinQuorum, &min);
         env.storage().instance().set(&DataKey::MaxQuorum, &max);
-
+        QuorumBoundsChanged { old_min, old_max, new_min: min, new_max: max }.publish(&env);
         Self::bump_instance(&env);
         Ok(())
     }
@@ -4200,11 +4229,14 @@ impl OracleEscrow {
         if threshold < 0 {
             return Err(ContractError::InvalidAmount);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
-        Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
-
+        if threshold == 0 {
+            env.storage().persistent().remove(&DataKey::TopUpThreshold(payer.clone()));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TopUpThreshold(payer.clone()), &threshold);
+            Self::extend_persistent(&env, &DataKey::TopUpThreshold(payer));
+        }
         Self::bump_instance(&env);
         Ok(())
     }
@@ -4489,9 +4521,11 @@ impl OracleEscrow {
     /// already-recorded KycAttestation entries — see docs/kyc-attestation.md.
     pub fn set_kyc_attestor(env: Env, attestor_pubkey: BytesN<32>) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        let old_attestor: Option<BytesN<32>> = env.storage().instance().get(&DataKey::KycAttestorPubkey);
         env.storage()
             .instance()
             .set(&DataKey::KycAttestorPubkey, &attestor_pubkey);
+        KycAttestorChanged { old_attestor, new_attestor: attestor_pubkey }.publish(&env);
         Self::bump_instance(&env);
         Ok(())
     }
