@@ -402,21 +402,6 @@ pub enum DataKey {
     PublicGoodsBps,
 }
 
-#[contracttype]
-pub enum AssetKey {
-    QuestionToken(u64),
-    /// #30: per-asset legs `(token, amount)` of a basket question. Present
-    /// only for questions opened with submit_basket().
-    QuestionBasket(u64),
-    AllowedToken(Address),
-    TokenDecimals(Address),
-    OwedAsset(Address, Address),
-    BalanceAsset(Address, Address),
-    StakeAsset(Address, Address),
-    AllowedAssetCount,
-    PendingAdminRotation,
-}
-
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -800,10 +785,9 @@ pub struct PausedChanged {
     pub paused: bool,
 }
 
-/// #110: one-call snapshot of how healthy this deployment is right now.
-/// Everything here is either a running counter maintained alongside the
-/// existing state transitions or a value already in instance storage, so
-/// get_health() never scans storage.
+/// #110 health counters, maintained alongside the state transitions
+/// get_health() reports on. All saturate rather than trap (see
+/// bump_counter()/drop_counter()) since they are observability only.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContractHealth {
@@ -1768,6 +1752,22 @@ impl OracleEscrow {
     /// question that resolve()/refund()/refund_timeout() already know how
     /// to settle. Funds have already moved into the contract by the time
     /// this runs; this only ever records the question.
+    fn open_question(
+        env: &Env,
+        payer: Address,
+        question_id: u64,
+        amount: i128,
+        token: Address,
+        schema_hash: Option<BytesN<32>>,
+        category: Option<Symbol>,
+    ) -> Result<(), ContractError> {
+        let timeout_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimeoutLedgers)
+            .ok_or(ContractError::NotInitialized)?;
+        let created_at = env.ledger().sequence();
+        let timeout_ledgers = if let Some(up
     fn open_question(
         env: &Env,
         payer: Address,
