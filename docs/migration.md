@@ -72,9 +72,10 @@ each id:
    move by a single ledger.
 4. Mark it `Migrated` here and drop it from the index.
 
-The `migrate_pending()` return value is the sum of native integer amounts.
-For a batch containing tokens with different decimal scales, do not treat
-that aggregate as a value; verify amounts per question and per token.
+The `migrate_pending()` return value is the sum of native integer amounts
+across tokens. If a batch mixes tokens (different assets or decimal scales),
+do not treat that aggregate as a value; verify amounts per question and per
+token using the `QuestionMigrated` events.
 
 Because the target pulls rather than being pushed to, a question can only
 exist on the target backed by funds that actually arrived there. Nobody

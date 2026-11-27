@@ -3366,7 +3366,11 @@ impl OracleEscrow {
     /// transaction, so a question is always in exactly one of two states:
     /// Pending here and absent there, or Migrated here and Pending there.
     /// That's what lets the off-chain orchestrator crash at any point and
-    /// simply re-run. Returns the total amount moved.
+    /// simply re-run. Returns the sum of each question's `amount` in its own
+    /// token, so it is unit-incoherent when the batch mixes assets (same
+    /// caveat as migrate_balances()). Only meaningful as a value when every
+    /// question shares one token; use the `QuestionMigrated` events for
+    /// per-token amounts.
     pub fn migrate_pending(
         env: Env,
         question_ids: Vec<u64>,
