@@ -19,6 +19,9 @@ on:
       - ".github/workflows/reproducible-build.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   runner:
     name: build on runner
@@ -26,7 +29,7 @@ jobs:
     outputs:
       hash: ${{ steps.build.outputs.hash }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       # rustup reads rust-toolchain.toml, so this installs the pinned rustc.
       - run: rustup show
       - name: Install pinned Stellar CLI
@@ -46,7 +49,7 @@ jobs:
     outputs:
       hash: ${{ steps.build.outputs.hash }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       # #268: the Dockerfile pins its base image by tag only, so a Debian
       # security rebuild of that tag can silently change the underlying layers
       # and break byte-for-byte reproducibility. Resolve the tag to its current
