@@ -9,11 +9,11 @@ is not re-investigated.
 Soroban exposes native XLM through a Stellar Asset Contract (SAC) at a fixed
 contract address. The contract never constructs or wraps a token of its own.
 Every token-moving path reads the single `DataKey::Token` address, set once
-in `initialize()`, and calls `token::Client::new(&env, &token)`:
+in the constructor (`__constructor`), and calls `token::Client::new(&env, &token)`:
 
-- `initialize()` stores the address and calls `decimals()` on it
-  (`src/lib.rs`, `initialize`).
-- `submit()`, `deposit()`, `open_question()`, `stake()`, `unstake()`,
+- `__constructor` stores the address and calls `decimals()` on it
+  (`src/lib.rs`, `__constructor`).
+- `submit()`, `deposit()`, `open_question()`, `stake()`, `begin_unstake()` / `complete_unstake()`,
   `withdraw()` / `withdraw_to()`, `refund()` / `refund_timeout()` and the
   settlement paths all call SEP-41 `transfer` on that address. The native
   SAC implements the same `transfer` / `balance` / `decimals` surface as any
@@ -22,7 +22,7 @@ in `initialize()`, and calls `token::Client::new(&env, &token)`:
   treats the configured default token as always allowed, so native XLM is
   allowed by construction.
 
-Passing the native SAC address to `initialize()` therefore settles identically
+Passing the native SAC address to `__constructor` as `token` therefore settles identically
 to a custom SAC. Amounts are integer stroops: the native SAC reports 7
 decimals, and the contract stores and uses native units throughout, with no
 decimal scaling.

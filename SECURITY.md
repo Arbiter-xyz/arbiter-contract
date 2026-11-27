@@ -28,7 +28,7 @@ security surface in the project. In particular:
   `dispute_resolve()`/`finalize_resolve()`, `refund()`/`refund_timeout()`.
 - Authorization gating: every state-mutating entry point's `require_auth()`/
   `require_admin()`/`require_resolver_or_admin()` checks, and the
-  `initialize()`/admin-rotation/upgrade-proposal flows.
+  `__constructor` setup, admin-rotation, and upgrade-proposal flows.
 - Arithmetic correctness in fee, slash, and stake-maturity computations.
 - The upgrade mechanism itself (`propose_upgrade()`/`execute_upgrade()`) and
   whether in-flight questions' fund-safety can depend on trusting new code.
