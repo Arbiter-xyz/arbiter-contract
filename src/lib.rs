@@ -359,10 +359,12 @@ pub enum DataKey {
     CategoryCount(Symbol),
     /// #48 atomic balance migration: a dense Vec<Address> of every address
     /// that has ever had a non-zero Stake, Owed, or Balance entry written by
-    /// this contract, maintained with an O(1) set via a parallel position map
-    /// ParticipantPos(Address). Provides the enumeration primitive that
-    /// migrate_balances() needs — see that function's doc comment for why
-    /// this approach was chosen over off-chain indexing.
+    /// this contract. Append-only: addresses are never removed, so entries
+    /// may be zero-balance after migrate_balances(). Insert is O(1) via a
+    /// parallel position map ParticipantPos(Address). Provides the
+    /// enumeration primitive that migrate_balances() needs — see that
+    /// function's doc comment for why this approach was chosen over
+    /// off-chain indexing.
     /// The value stored is a u32 count (the total number of tracked addresses).
     ParticipantList,
     /// #48: forward index — Address stored at position `u32` in the
@@ -721,6 +723,17 @@ pub struct QuestionRefunded {
     pub payer: Address,
     pub amount: i128,
     pub via_timeout: bool,
+}
+
+/// `unstake_completed` topics: worker, token; data: amount paid out.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnstakeCompleted {
+    #[topic]
+    pub worker: Address,
+    #[topic]
+    pub token: Address,
+    pub amount: i128,
 }
 
 /// `stake_changed` topics: worker, token; data: signed amount, new_total.
@@ -2602,11 +2615,12 @@ impl OracleEscrow {
         let key = Self::stake_key(&env, &token, &worker)?;
         Self::set_or_remove(&env, &key, &info);
         Self::bump_instance(&env);
-        token::Client::new(&env, &token).transfer(
-            &env.current_contract_address(),
-            &worker,
-            &amount,
-        );
+        UnstakeCompleted {
+            worker,
+            token,
+            amount,
+        }
+        .publish(&env);
         Ok(amount)
     }
 
@@ -3348,7 +3362,11 @@ impl OracleEscrow {
     /// transaction, so a question is always in exactly one of two states:
     /// Pending here and absent there, or Migrated here and Pending there.
     /// That's what lets the off-chain orchestrator crash at any point and
-    /// simply re-run. Returns the total amount moved.
+    /// simply re-run. Returns the sum of each question's `amount` in its own
+    /// token, so it is unit-incoherent when the batch mixes assets (same
+    /// caveat as migrate_balances()). Only meaningful as a value when every
+    /// question shares one token; use the `QuestionMigrated` events for
+    /// per-token amounts.
     pub fn migrate_pending(
         env: Env,
         question_ids: Vec<u64>,
@@ -5087,10 +5105,12 @@ impl OracleEscrow {
     // storage model is a key/value map, not a relational table — there is no
     // "scan all keys with prefix DataKey::Stake" primitive. The alternatives
     // are: (a) off-chain index rebuilt from events, which is fragile and
-    // requires a running indexer; (b) an on-chain list maintained with O(1)
-    // add/remove (swap-remove, same pattern as PendingAt/PendingPos), which is
-    // what this implementation chooses. The cost is one extra persistent write
-    // per new participant, paid by the participant on their first stake/deposit.
+    // requires a running indexer; (b) an on-chain list that is append-only with
+    // O(1) insert via ParticipantPos, which is what this implementation chooses.
+    // Addresses are never removed, even after migrate_balances() zeroes their
+    // entries, so migration tooling must tolerate zero-balance addresses. The
+    // cost is one extra persistent write per new participant, paid by the
+    // participant on their first stake/deposit.
     // "Atomic" within Soroban means: all addresses in the batch are processed
     // in the same transaction, so from the target contract's perspective funds
     // either all arrive or none arrive. It does NOT mean all addresses across
