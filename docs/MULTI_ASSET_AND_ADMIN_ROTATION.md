@@ -63,8 +63,10 @@ entries.
 
 ## Admin rotation
 
-`set_admin(new_admin)` now schedules a rotation; it does not immediately
-change authority. `propose_admin_rotation` is the explicit equivalent.
+`propose_admin_rotation(new_admin)` schedules a rotation; it does not
+immediately change authority. `set_admin(new_admin)` is a deprecated alias
+with identical behaviour — use `propose_admin_rotation` instead. `set_admin`
+will be removed in the next breaking release.
 The proposal is visible through `get_pending_admin_rotation()` and the
 `admin_rotation_proposed` event, and cannot execute before
 `ADMIN_ROTATION_DELAY_LEDGERS` (the same eight-day window as code upgrades).
@@ -79,22 +81,13 @@ still call other admin-gated methods during the delay; use a contract
 account/multisig as the admin address when threshold authorization for
 those actions is required.
 
-## Fee-vesting beneficiary rotation
+### Admin rotation events
 
-The fee-vesting contract's beneficiary (the multisig/DAO address that
-receives vested fees) is set at `initialize()` and can be rotated by the
-admin via `set_beneficiary(new_beneficiary)`. The call requires the admin's
-auth and only changes where future payouts go: the vesting schedule, token,
-and `Claimed` amount are untouched, so already-vested-and-claimed funds are
-not affected and the unlock curve continues unchanged.
-
-Trust model: the admin key is the trust root for redirecting all future
-vested fees. A compromised admin key can point the beneficiary at an
-attacker-controlled address and drain every subsequent claim. Deployments
-should therefore use a contract account or multisig as the admin address so
-that rotation requires threshold authorization. Hardening of
-`set_beneficiary()` is tracked separately; this section describes its current
-behaviour only.
+`execute_admin_rotation()` emits a single `AdminRotated { old_admin, new_admin }`
+event. The older `AdminRotationExecuted { new_admin }` event is **deprecated**
+and no longer emitted; it will be removed in the next breaking release.
+Index `AdminRotated`, which carries both addresses, instead of
+`AdminRotationExecuted`.
 
 ## Testnet adoption
 
@@ -110,9 +103,10 @@ For an existing deployment that supports the delayed `propose_upgrade` /
 4. Call `set_asset_allowed` for each additional token, verifying
    `is_asset_allowed` and `get_asset_decimals` before directing traffic to
    it.
-5. To rotate authority, call `set_admin` with the candidate address, publish
-   the proposal, monitor it through the delay, cancel if unexpected, or
-   execute after the delay with both admin authorizations.
+5. To rotate authority, call `propose_admin_rotation` with the candidate
+   address, publish the proposal, monitor it through the delay, cancel if
+   unexpected, or execute after the delay with both admin authorizations.
+   (`set_admin` is a deprecated alias; prefer `propose_admin_rotation`.)
 
 The code version preceding this change cannot be upgraded if it lacks the
 upgrade entrypoints. In that case, deploy and initialize a v2 instance,

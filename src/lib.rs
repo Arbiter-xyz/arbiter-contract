@@ -321,14 +321,6 @@ pub enum DataKey {
     /// #94: guards record_reputation() against being called twice for the
     /// same question_id, which would double-count that resolution.
     ReputationRecorded(u64),
-    /// #95 refund-risk underwriting: admin-approved address allowed to call
-    /// instant_refund(). Value is a bool flag (true = currently approved).
-    Underwriter(Address),
-    /// #96 worker-diversity: admin-attested source-diversity tag for a
-    /// worker (e.g. a region/network-origin code). The admin is the trust
-    /// anchor here rather than a third-party attestation protocol; a real
-    /// oracle integration is deliberately out of scope for this issue.
-    WorkerRegion(Address),
     /// #97 dispute-window finality: the not-yet-credited resolution recorded
     /// by resolve_challengeable(), keyed by question_id. Holds the worker
     /// lists, the dispute deadline and whether it's been disputed.
@@ -1100,42 +1092,6 @@ pub struct ReputationInfo {
     pub lost: u32,
 }
 
-/// #95: fee (basis points, deducted from the refunded amount) paid to a
-/// registered underwriter for fronting an instant refund before a question's
-/// permissionless refund_timeout() deadline. Scoped as "an earlier,
-/// fee-bearing refund path" rather than a separately-funded insurance pool
-/// (the issue itself flags the latter as an unresolved design question, out
-/// of scope here).
-const UNDERWRITER_FEE_BPS: i128 = 500;
-
-/// Emitted when the admin approves or revokes an underwriter (#95).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnderwriterStatusChanged {
-    #[topic]
-    pub underwriter: Address,
-    pub approved: bool,
-}
-
-/// Emitted when a registered underwriter fronts an instant refund (#95).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InstantRefundFronted {
-    #[topic]
-    pub question_id: u64,
-    pub underwriter: Address,
-    pub fee: i128,
-}
-
-/// Emitted when the admin attests a worker's source-diversity region (#96).
-#[contractevent]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerRegionAttested {
-    #[topic]
-    pub worker: Address,
-    pub region: Symbol,
-}
-
 /// #97: the not-yet-credited resolution recorded by resolve_challengeable(),
 /// awaiting either a dispute_resolve() flag or finalize_resolve() after the
 /// window elapses.
@@ -1291,6 +1247,9 @@ pub struct AdminRotationCancelled {
     pub new_admin: Address,
 }
 
+/// **Deprecated** — `AdminRotated` carries both addresses and supersedes
+/// this event. `AdminRotationExecuted` is no longer emitted; it will be
+/// removed in the next breaking release. Index `AdminRotated` instead.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminRotationExecuted {
@@ -2961,8 +2920,11 @@ impl OracleEscrow {
         Self::try_refund_timeout(&env, question_id)
     }
 
-    /// Compatibility entrypoint: schedules, but no longer immediately
-    /// applies, an administrator change.
+    /// **Deprecated** — use `propose_admin_rotation()` instead. This
+    /// entrypoint has identical behaviour (it schedules, not immediately
+    /// applies, an admin change) but the name implies an instant switch,
+    /// which is no longer accurate. `set_admin()` will be removed in the
+    /// next breaking release.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         Self::schedule_admin_rotation(&env, new_admin)
@@ -3012,10 +2974,6 @@ impl OracleEscrow {
         AdminRotated {
             old_admin,
             new_admin: pending.new_admin.clone(),
-        }
-        .publish(&env);
-        AdminRotationExecuted {
-            new_admin: pending.new_admin,
         }
         .publish(&env);
         Self::bump_instance(&env);

@@ -29,17 +29,27 @@ asset-specific slashable stake up to the question amount. These values are
 therefore not secret before settlement; a third party can calculate them
 without simulation.
 
-The successful `resolve()` return value is empty. The escrow's settlement
-event reports question id and terminal status, not worker shares or exact
-stake. Token transfer events and the resulting `get_owed*` / stake state
-make actual settlement observable after inclusion. In execution order,
-`resolve()` updates credit/slash storage, calls the token to transfer the
-platform amount, then records the terminal question status and emits
-`question_settled`; a token transfer event therefore precedes the escrow's
-settlement event. These changes and events commit atomically. A simulation
-service may expose the corresponding diagnostic events before inclusion,
-but they contain no private information absent from the public inputs and
-state. Resource use can reveal list sizes, which are also in the call.
+The successful `resolve()` return value is empty. In execution order,
+`resolve()` emits the following events per settlement:
+
+- **`WorkerCredited { question_id, worker, amount }`** — one per matching
+  worker, reporting the token credit (base share plus any redistributed
+  slash) written to that worker's owed balance.
+- **`WorkerSlashed { question_id, worker, amount, token }`** — one per
+  losing worker whose slashable stake was reduced.
+- **`QuestionResolved { question_id, worker_count, fee, total_slashed, bond_forfeited }`**
+  — emitted once after all credits and slashes, reporting the platform fee,
+  the aggregate slash amount, and any forfeited challenger bond.
+
+For basket questions, `BasketLegSettled { question_id, token, amount, fee, total_slashed }`
+is emitted once per asset leg in place of the per-worker events.
+
+A token transfer event (the platform-fee transfer) precedes `QuestionResolved`.
+All storage writes, token transfers, and events commit atomically. A
+simulation service may expose the corresponding diagnostic events before
+inclusion, but they contain no private information absent from the public
+inputs and state. Resource use can reveal list sizes, which are also in the
+call.
 
 ## Leak assessment and response
 
