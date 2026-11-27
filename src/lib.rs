@@ -1690,6 +1690,10 @@ impl OracleEscrow {
             &payer,
             &amount,
         );
+
+        let updated = existing - amount;
+        Self::set_or_remove(&env, &key, &updated);
+        Self::bump_instance(&env);
         PrepaidBalanceChanged {
             payer,
             token: token_addr,
@@ -1723,6 +1727,9 @@ impl OracleEscrow {
             &payer,
             &amount,
         );
+        let updated = balance - amount;
+        Self::set_or_remove(&env, &key, &updated);
+        Self::bump_instance(&env);
         PrepaidBalanceChanged {
             payer,
             token,
@@ -1876,15 +1883,7 @@ impl OracleEscrow {
         if amount > existing {
             return Err(ContractError::InsufficientBalance);
         }
-        let new_total = existing - amount;
-        Self::set_persistent(&env, &key, &new_total);
-        PrepaidBalanceChanged {
-            payer: payer.clone(),
-            token: token.clone(),
-            amount: -amount,
-            new_total,
-        }
-        .publish(env);
+        Self::set_or_remove(env, &key, &(existing - amount));
 
         Self::open_question(env, payer, question_id, amount, token, None, None)
     }
@@ -2541,14 +2540,8 @@ impl OracleEscrow {
 
         info.unbonding = 0;
         info.unbonding_release_at = 0;
-        Self::set_persistent(&env, &DataKey::Stake(worker.clone()), &info);
+        Self::set_or_remove(&env, &DataKey::Stake(worker), &info);
         Self::bump_instance(&env);
-        UnstakeCompleted {
-            worker,
-            token: token_addr,
-            amount,
-        }
-        .publish(&env);
         Ok(amount)
     }
 
@@ -2620,7 +2613,7 @@ impl OracleEscrow {
         info.unbonding = 0;
         info.unbonding_release_at = 0;
         let key = Self::stake_key(&env, &token, &worker)?;
-        Self::set_persistent(&env, &key, &info);
+        Self::set_or_remove(&env, &key, &info);
         Self::bump_instance(&env);
         UnstakeCompleted {
             worker,
@@ -2789,6 +2782,9 @@ impl OracleEscrow {
             recipient,
             &amount,
         );
+
+        Self::set_or_remove(env, &key, &(owed - amount));
+        Self::bump_instance(env);
         WorkerPaid {
             worker: worker.clone(),
             recipient: recipient.clone(),
@@ -4133,6 +4129,21 @@ impl OracleEscrow {
     ) {
         env.storage().persistent().set(key, value);
         Self::extend_persistent(env, key);
+    }
+
+    /// Removes the entry when the value is zero/default instead of storing it,
+    /// so dead Stake/Owed/Balance entries stop accruing rent and touch() can't
+    /// keep them alive. Getters already default to 0 for a missing key.
+    fn set_or_remove<K, V>(env: &Env, key: &K, value: &V)
+    where
+        K: IntoVal<Env, soroban_sdk::Val>,
+        V: IntoVal<Env, soroban_sdk::Val> + Default + PartialEq,
+    {
+        if *value == V::default() {
+            env.storage().persistent().remove(key);
+        } else {
+            Self::set_persistent(env, key, value);
+        }
     }
 
     fn extend_persistent<K: IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
