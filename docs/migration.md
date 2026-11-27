@@ -37,7 +37,7 @@ the resolved open questions, see the canonical copy in
 
 | piece | where | what it does |
 |---|---|---|
-| `pending_count()`, `list_pending(start, limit)` | contract | Enumerates every Pending question id from an O(1) swap-remove index (`PendingAt`/`PendingPos`/`PendingCount`) maintained by every open and settle path. Pages hold at most 100 ids. |
+| `pending_count()`, `list_pending(start, limit)` | contract | Enumerates ids retained in the open-obligation index (`PendingAt`/`PendingPos`/`PendingCount`), including Disputed and ResolvedPending questions awaiting finalization. Pages hold at most 100 ids. |
 | `question_opened` / `question_settled` / `question_migrated` events | contract | Opened/migrated events include the bound token so indexers can preserve per-asset accounting. RPC keeps events for only ~7 days, so this complements the on-chain index rather than replacing it. |
 | `set_migration_source(source)` | contract (target admin) | Target's half of the handshake: names the only contract allowed to import. |
 | `migrate_pending(ids, target)` | contract (source admin) | Moves a batch atomically (see below). |
@@ -45,6 +45,13 @@ the resolved open questions, see the canonical copy in
 | `get_token()`, `get_question_token(id)` | contract | Reports the configured default and each question's bound asset. The target must allowlist every imported question token. |
 | [tools/migrate/migrate.mjs](../tools/migrate/migrate.mjs) | orchestrator | `plan` (dry run), `run`, `verify`. No npm dependencies; drives the `stellar` CLI, which holds the admin key. |
 | [tools/migrate/e2e-testnet.mjs](../tools/migrate/e2e-testnet.mjs) | test | The full procedure against real testnet, including a SIGKILL mid-migration. |
+| [tools/migrate/migrate.test.mjs](../tools/migrate/migrate.test.mjs) | test | Offline regression check that non-Pending indexed questions are flagged and skipped. |
+
+`plan` reports indexed questions whose status is not Pending as problems, but
+does not treat them as blockers. `run` checks the live indexed questions'
+statuses before each batch, migrates only Pending ids, and exits successfully
+when only non-Pending obligations remain. It prints those ids and statuses as
+not migrated; the contract's `migrate_pending()` does not finalize them.
 
 ## What one batch does, atomically
 
@@ -65,15 +72,32 @@ each id:
    move by a single ledger.
 4. Mark it `Migrated` here and drop it from the index.
 
-The `migrate_pending()` return value is the sum of native integer amounts.
-For a batch containing tokens with different decimal scales, do not treat
-that aggregate as a value; verify amounts per question and per token.
+The `migrate_pending()` return value is the sum of native integer amounts
+across tokens. If a batch mixes tokens (different assets or decimal scales),
+do not treat that aggregate as a value; verify amounts per question and per
+token using the `QuestionMigrated` events.
 
 Because the target pulls rather than being pushed to, a question can only
 exist on the target backed by funds that actually arrived there. Nobody
 can mint a question on the target by calling `import_question` directly.
 That's tested with the source's auth for the import itself mocked but not
 the transfer: `import_cannot_mint_a_question_without_funds_actually_arriving`.
+
+## Questions submitted during a migration
+
+`run` does not migrate a fixed list. Each batch is the live head of the
+source's pending set, so a question submitted on the source after the
+baseline was written is migrated too. We chose to allow this rather than
+refuse it: refusing would leave the run stuck on every late arrival until
+someone deleted the journal, and that is the wrong fix for a routine event.
+
+`verify` covers these questions. It checks the union of the baseline's
+questions and every id journaled in a `batch-intent` entry (written before
+each send, so a crash after the send is still covered). A late question
+gets the same checks as a baseline one (`moved exactly once`, `terms
+preserved`, `not duplicated`), and its amount counts toward the balance
+check. It has no baseline terms, so its terms are read from the source
+record, which keeps its `Migrated` status after the move.
 
 ## Why a crash can't lose or duplicate funds
 
