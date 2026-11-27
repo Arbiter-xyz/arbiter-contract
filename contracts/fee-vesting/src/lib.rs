@@ -41,7 +41,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Add
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Address allowed to (re)initialize the schedule. Set once.
+    /// Address allowed to rotate the beneficiary via `set_beneficiary` and
+    /// recover stray tokens via `rescue_token`. Set once at `initialize()`;
+    /// the vesting schedule cannot be re-initialized.
     Admin,
     /// Address that receives unlocked fee revenue (DAO treasury / multisig).
     Beneficiary,

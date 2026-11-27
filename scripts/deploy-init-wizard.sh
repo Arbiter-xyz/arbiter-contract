@@ -140,7 +140,7 @@ echo "==> deploying OracleEscrow to ${NETWORK}"
 CONTRACT_ID="$(stellar contract deploy \
   --wasm "$WASM_OUT" \
   --network "$NETWORK" \
-  "${SOURCE_ARGS[@]}" \
+  ${SOURCE_ARGS[@]+"${SOURCE_ARGS[@]}"} \
   -- \
   --admin "$ADMIN" \
   --token "$TOKEN" \

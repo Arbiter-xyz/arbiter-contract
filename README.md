@@ -504,3 +504,6 @@ number; a PR that reg
 
 <!-- handsoff-issue-235 -->
 - #235: test.rs's own resolve() helpers use the stale 3-arg signature
+
+<!-- handsoff-issue-429 -->
+- #429: Make preview_resolve() round slash redistribution per loser like resolve()
