@@ -120,6 +120,47 @@ fn challenge_bond_can_be_posted_within_the_dispute_window() {
 }
 
 #[test]
+fn challenge_bond_rejects_one_stroop_below_minimum() {
+    let f = setup();
+    let c = client(&f);
+    let worker = Address::generate(&f.env);
+    let challenger = Address::generate(&f.env);
+
+    f.env.mock_all_auths();
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let wv = Vec::from_array(&f.env, [worker]);
+    let lv: Vec<Address> = Vec::new(&f.env);
+    c.resolve_challengeable(&1, &wv, &lv, &50);
+
+    token::StellarAssetClient::new(&f.env, &f.token_address).mint(&challenger, &1);
+    let res = c.try_post_challenge_bond(&challenger, &1, &1);
+    assert_eq!(res, Err(Ok(ContractError::InvalidBondAmount)));
+}
+
+#[test]
+fn challenge_bond_accepts_exact_minimum() {
+    let f = setup();
+    let c = client(&f);
+    let worker = Address::generate(&f.env);
+    let challenger = Address::generate(&f.env);
+
+    f.env.mock_all_auths();
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let wv = Vec::from_array(&f.env, [worker]);
+    let lv: Vec<Address> = Vec::new(&f.env);
+    c.resolve_challengeable(&1, &wv, &lv, &50);
+
+    let minimum = (AMOUNT * CHALLENGE_BOND_MIN_BPS + BPS_DENOM - 1) / BPS_DENOM;
+    token::StellarAssetClient::new(&f.env, &f.token_address).mint(&challenger, &minimum);
+    c.post_challenge_bond(&challenger, &1, &minimum);
+
+    let bond = c.get_challenger_bond(&1);
+    assert_eq!(bond.unwrap().amount, minimum);
+}
+
+#[test]
 fn challenge_bond_cannot_be_posted_after_window_closes() {
     let f = setup();
     let c = client(&f);

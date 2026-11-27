@@ -121,6 +121,94 @@ fn participant_index_tracks_worker_credited_via_resolve() {
     assert!(found, "worker not found in participant list after resolve");
 }
 
+/// Scan the participant index for `addr`, returning true if present.
+fn participant_index_contains(c: &OracleEscrowClient, addr: &Address) -> bool {
+    let count = c.get_participant_count();
+    for i in 0..count {
+        if c.get_participant_at(&i) == Some(addr.clone()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Register a second (non-default) token and return its address.
+fn register_other_token(env: &Env) -> Address {
+    env.register_stellar_asset_contract_v2(Address::generate(env))
+        .address()
+}
+
+// ---------------------------------------------------------------------------
+// #418: non-default-asset entry points must populate the participant index
+// ---------------------------------------------------------------------------
+
+#[test]
+fn participant_index_tracks_worker_who_only_stakes_non_default_asset() {
+    use crate::test::{client, setup};
+    let f = setup();
+    let c = client(&f);
+    assert_eq!(c.get_participant_count(), 0);
+
+    let other = register_other_token(&f.env);
+    let sac = token::StellarAssetClient::new(&f.env, &other);
+
+    let worker = Address::generate(&f.env);
+    sac.mint(&worker, &1_000_000);
+    f.env.mock_all_auths();
+    c.stake_asset(&worker, &other, &1_000_000);
+
+    assert!(
+        participant_index_contains(&c, &worker),
+        "worker who only staked a non-default asset must appear in participant index"
+    );
+}
+
+#[test]
+fn participant_index_tracks_payer_who_only_deposits_non_default_asset() {
+    use crate::test::{client, setup};
+    let f = setup();
+    let c = client(&f);
+    assert_eq!(c.get_participant_count(), 0);
+
+    let other = register_other_token(&f.env);
+    let sac = token::StellarAssetClient::new(&f.env, &other);
+
+    let payer = Address::generate(&f.env);
+    sac.mint(&payer, &500_000);
+    f.env.mock_all_auths();
+    c.deposit_asset(&payer, &other, &500_000);
+
+    assert!(
+        participant_index_contains(&c, &payer),
+        "payer who only deposited a non-default asset must appear in participant index"
+    );
+}
+
+#[test]
+fn participant_index_tracks_worker_credited_via_non_default_asset_settlement() {
+    use crate::test::{client, setup};
+    let f = setup();
+    let c = client(&f);
+
+    let other = register_other_token(&f.env);
+    let sac = token::StellarAssetClient::new(&f.env, &other);
+
+    let payer = Address::generate(&f.env);
+    sac.mint(&payer, &AMOUNT);
+    f.env.mock_all_auths();
+    c.submit_asset(&payer, &1, &other, &AMOUNT);
+
+    let worker = Address::generate(&f.env);
+    let workers = Vec::from_array(&f.env, [worker.clone()]);
+    let losers: Vec<Address> = Vec::new(&f.env);
+    c.resolve(&1, &workers, &losers, &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    assert!(
+        participant_index_contains(&c, &worker),
+        "worker credited only via a non-default-asset settlement must appear in participant index"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // migrate_balances tests
 // ---------------------------------------------------------------------------
