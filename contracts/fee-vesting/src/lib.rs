@@ -55,9 +55,9 @@ pub enum VestingError {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Address allowed to rotate the beneficiary via `set_beneficiary` and
-    /// recover stray tokens via `rescue_token`. Set once at `initialize()`;
-    /// the vesting schedule cannot be re-initialized.
+    /// Address allowed to call `set_beneficiary()`. Set once at `initialize()`.
+    /// `initialize()` panics on a second call regardless of caller, so this key
+    /// does **not** grant the power to re-initialize the vesting schedule.
     Admin,
     /// Address that receives unlocked fee revenue (DAO treasury / multisig).
     Beneficiary,

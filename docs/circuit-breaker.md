@@ -33,14 +33,12 @@ original payers and cannot be redirected. What does protect payers is that
 | `stake`, `stake_asset` | **rejected** (worker posts a new bond) |
 | `post_challenge_bond` | **rejected** (challenger posts a new bond) |
 | `reopen_question` | **rejected** (it pulls a fresh payer transfer) |
-| `resolve`, `resolve_by_consensus`, `refund`, `refund_timeout`, `sweep_timeouts` | allowed |
+| `stake`, `stake_asset` | **rejected** (new fund inflow — both are paused) |
+| `post_challenge_bond` | **rejected** (transfers funds into escrow — paused) |
+| `resolve`, `refund`, `refund_timeout`, `sweep_timeouts` | allowed |
 | `withdraw*`, `withdraw_balance*`, `begin_unstake`/`complete_unstake*` | allowed |
-| `migrate_pending` / `import_question` | allowed (moves existing funds; no new payer funds) |
-| `migrate_balances` / `import_balances` | allowed (moves existing Stake/Owed/Balance between contracts; no `require_not_paused()` check) |
-
-The gated set is exactly the `submit*`, `deposit*`, `stake*` and `charge*`
-entry points (the last via `charge_for_token`), plus `reopen_question` and
-`post_challenge_bond`; every other entry point is allowed while paused.
+| `migrate_pending` / `import_question` | allowed (moves existing funds; it does not take new payer funds) |
+| `import_balances` / `migrate_balances` | allowed (migration helpers; no new external fund inflow) |
 
 The rule is that a pause only stops money from coming **in**. Money that is
 already escrowed can always leave, so a pause can never strand funds. The test
