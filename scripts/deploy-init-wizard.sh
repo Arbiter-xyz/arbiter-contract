@@ -23,12 +23,12 @@
 # Environment overrides (used as prompt defaults):
 #   STELLAR_NETWORK   (default: testnet)
 #   STELLAR_SOURCE    (default: the CLI's configured default identity)
-#   ORACLE_ESCROW_WASM (default: target/wasm32-unknown-unknown/release/oracle_escrow.wasm)
+#   ORACLE_ESCROW_WASM (default: target/wasm32v1-none/release/oracle_escrow.wasm)
 #
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WASM_OUT="${ORACLE_ESCROW_WASM:-${ROOT_DIR}/target/wasm32-unknown-unknown/release/oracle_escrow.wasm}"
+WASM_OUT="${ORACLE_ESCROW_WASM:-${ROOT_DIR}/target/wasm32v1-none/release/oracle_escrow.wasm}"
 NETWORK="${STELLAR_NETWORK:-testnet}"
 SOURCE="${STELLAR_SOURCE:-}"
 
@@ -95,9 +95,9 @@ if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
   [[ -n "$PLATFORM" ]] || prompt_until_valid "platform" PLATFORM is_account_address "G... account address"
   if [[ -z "$TIMEOUT_LEDGERS" ]]; then
     while true; do
-      read -r -p "timeout_ledgers (positive integer): " TIMEOUT_LEDGERS
-      [[ "$TIMEOUT_LEDGERS" =~ ^[0-9]+$ ]] && [[ "$TIMEOUT_LEDGERS" -gt 0 ]] && break
-      echo "  invalid timeout_ledgers; expected a positive integer" >&2
+      read -r -p "timeout_ledgers (1–120960): " TIMEOUT_LEDGERS
+      [[ "$TIMEOUT_LEDGERS" =~ ^[0-9]+$ ]] && [[ "$TIMEOUT_LEDGERS" -gt 0 ]] && [[ "$TIMEOUT_LEDGERS" -le 120960 ]] && break
+      echo "  invalid timeout_ledgers; expected a positive integer no greater than 120960 (MAX_TIMEOUT_LEDGERS)" >&2
     done
   fi
 fi
@@ -112,8 +112,8 @@ fi
 if ! is_account_address "$PLATFORM"; then
   echo "invalid --platform: expected a G... account address" >&2; exit 2
 fi
-if ! [[ "$TIMEOUT_LEDGERS" =~ ^[0-9]+$ ]] || [[ "$TIMEOUT_LEDGERS" -le 0 ]]; then
-  echo "invalid --timeout-ledgers: expected a positive integer" >&2; exit 2
+if ! [[ "$TIMEOUT_LEDGERS" =~ ^[0-9]+$ ]] || [[ "$TIMEOUT_LEDGERS" -le 0 ]] || [[ "$TIMEOUT_LEDGERS" -gt 120960 ]]; then
+  echo "invalid --timeout-ledgers: expected a positive integer no greater than 120960 (MAX_TIMEOUT_LEDGERS)" >&2; exit 2
 fi
 
 if [[ ! -f "$WASM_OUT" ]]; then
@@ -134,7 +134,7 @@ echo "==> deploying OracleEscrow to ${NETWORK}"
 CONTRACT_ID="$(stellar contract deploy \
   --wasm "$WASM_OUT" \
   --network "$NETWORK" \
-  "${SOURCE_ARGS[@]}" \
+  ${SOURCE_ARGS[@]+"${SOURCE_ARGS[@]}"} \
   -- \
   --admin "$ADMIN" \
   --token "$TOKEN" \

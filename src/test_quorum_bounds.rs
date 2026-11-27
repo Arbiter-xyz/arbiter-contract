@@ -61,3 +61,12 @@ fn resolve_at_exactly_the_bounds_succeeds() {
     let tc = token_client(&f);
     assert_eq!(tc.balance(&f.platform), 500_000);
 }
+
+#[test]
+fn set_quorum_bounds_rejects_min_greater_than_max_and_stores_nothing() {
+    let f = setup();
+    let c = client(&f);
+    let res = c.try_set_quorum_bounds(&5, &4);
+    assert_eq!(res, Err(Ok(ContractError::InvalidAmount)));
+    assert_eq!(c.get_quorum_bounds(), (0, u32::MAX));
+}

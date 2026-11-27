@@ -492,6 +492,68 @@ fn question_settlement_never_substitutes_another_asset() {
 }
 
 #[test]
+fn delisting_an_asset_keeps_exit_paths_open_and_blocks_inflows() {
+    let f = setup();
+    let c = client(&f);
+    let x = f
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&f.env))
+        .address();
+    let x_admin = token::StellarAssetClient::new(&f.env, &x);
+    let x_token = token::Client::new(&f.env, &x);
+    let worker = Address::generate(&f.env);
+    x_admin.mint(&f.payer, &(AMOUNT * 5));
+    x_admin.mint(&worker, &(AMOUNT * 2));
+    c.set_asset_allowed(&x, &true);
+
+    // Build up every kind of X balance while X is still allowed.
+    c.submit_asset(&f.payer, &x, &201, &AMOUNT);
+    c.submit_asset(&f.payer, &x, &202, &AMOUNT);
+    c.deposit_asset(&f.payer, &x, &AMOUNT);
+    c.stake_asset(&worker, &x, &AMOUNT);
+    c.resolve(
+        &201,
+        &soroban_sdk::Vec::from_array(&f.env, [worker.clone()]),
+        &soroban_sdk::Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+    assert_eq!(c.get_owed_asset(&worker, &x), AMOUNT * 4 / 5);
+
+    c.set_asset_allowed(&x, &false);
+
+    // Inflows are rejected.
+    assert_eq!(
+        c.try_submit_asset(&f.payer, &x, &203, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+    assert_eq!(
+        c.try_deposit_asset(&f.payer, &x, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+    assert_eq!(
+        c.try_stake_asset(&worker, &x, &AMOUNT),
+        Err(Ok(ContractError::AssetNotAllowed))
+    );
+
+    // Exits still work.
+    let payer_before = x_token.balance(&f.payer);
+    c.withdraw_balance_asset(&f.payer, &x, &AMOUNT);
+    assert_eq!(x_token.balance(&f.payer), payer_before + AMOUNT);
+
+    let worker_before = x_token.balance(&worker);
+    c.withdraw_asset(&worker, &x, &(AMOUNT * 4 / 5));
+    assert_eq!(x_token.balance(&worker), worker_before + AMOUNT * 4 / 5);
+
+    let release_at = c.begin_unstake_asset(&worker, &x, &AMOUNT);
+    f.env.ledger().set_sequence_number(release_at);
+    assert_eq!(c.complete_unstake_asset(&worker, &x), AMOUNT);
+
+    let payer_before = x_token.balance(&f.payer);
+    c.refund(&202);
+    assert_eq!(x_token.balance(&f.payer), payer_before + AMOUNT);
+}
+
+#[test]
 fn six_decimal_asset_uses_native_units_without_seven_decimal_scaling() {
     let f = setup();
     let c = client(&f);
@@ -705,6 +767,33 @@ fn begin_unstake_moves_stake_to_unbonding_without_paying_out() {
     let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
     assert_eq!(data.get(Symbol::new(&f.env, "amount")).unwrap().into_val(&f.env), -150_000i128);
     assert_eq!(data.get(Symbol::new(&f.env, "new_total")).unwrap().into_val(&f.env), 250_000i128);
+}
+
+#[test]
+fn begin_unstake_drains_the_newest_warming_tranche_first() {
+    let f = setup();
+    let c = client(&f);
+    let w1 = Address::generate(&f.env);
+    fund_worker(&f, &w1, 1_000_000);
+    let l = f.env.ledger().sequence();
+    c.stake(&w1, &100);
+    f.env.ledger().set_sequence_number(l + 100);
+    c.stake(&w1, &50);
+
+    c.begin_unstake(&w1, &50);
+
+    let tranches = c.get_stake_info(&w1).warming_tranches.unwrap();
+    assert_eq!(tranches.len(), 1);
+    assert_eq!(
+        tranches.get(0).unwrap(),
+        WarmingTranche { amount: 100, since: l }
+    );
+
+    // The surviving oldest tranche keeps its original maturity.
+    f.env.ledger().set_sequence_number(l + STAKE_WARMUP_LEDGERS - 1);
+    assert_eq!(c.get_matured_stake(&w1), 0);
+    f.env.ledger().set_sequence_number(l + STAKE_WARMUP_LEDGERS);
+    assert_eq!(c.get_matured_stake(&w1), 100);
 }
 
 #[test]
@@ -1191,6 +1280,31 @@ fn partial_withdrawal_leaves_the_remainder_claimable_later() {
 }
 
 #[test]
+fn withdraw_to_rejects_the_contract_itself_as_beneficiary() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    let w1 = Address::generate(&f.env);
+    c.resolve(
+        &1,
+        &Vec::from_array(&f.env, [w1.clone()]),
+        &Vec::new(&f.env),
+        &BytesN::from_array(&f.env, &[0u8; 32]),
+    );
+    let owed = c.get_owed(&w1);
+
+    assert_eq!(
+        c.try_withdraw_to(&w1, &f.contract_id, &owed),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(
+        c.try_withdraw_to_asset(&w1, &f.contract_id, &f.token_address, &owed),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+    assert_eq!(c.get_owed(&w1), owed);
+}
+
+#[test]
 fn withdraw_to_sends_funds_to_the_beneficiary_not_the_caller() {
     let f = setup();
     let c = client(&f);
@@ -1668,4 +1782,39 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
 
     assert_eq!(c.get_owed_asset(&worker1, &f.token_address), amount_a * 4 / 5);
     assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
+}
+
+// --- set_public_goods_config() bps bounds (#535)
+
+#[test]
+fn set_public_goods_config_rejects_bps_above_denominator() {
+    let f = setup();
+    let c = client(&f);
+    let pg_addr = Address::generate(&f.env);
+
+    let res = c.try_set_public_goods_config(&pg_addr, &10_001u32);
+    assert_eq!(res, Err(Ok(ContractError::InvalidPublicGoodsBps)));
+    assert_eq!(c.get_public_goods_config(), None);
+}
+
+#[test]
+fn public_goods_bps_10000_routes_entire_platform_take() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+    let pg_addr = Address::generate(&f.env);
+    let worker = Address::generate(&f.env);
+
+    c.set_public_goods_config(&pg_addr, &10_000u32);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let platform_before = tc.balance(&f.platform);
+    let pg_before = tc.balance(&pg_addr);
+
+    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+
+    // One worker takes the whole pool, so platform_take = fee (dust = 0).
+    let fee = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
+    assert_eq!(tc.balance(&f.platform) - platform_before, 0);
+    assert_eq!(tc.balance(&pg_addr) - pg_before, fee);
 }

@@ -63,6 +63,10 @@ actually matches this tag's source, rather than trusting the tag name alone.
   `migrate_pending`, `reopen_question` and `preview_resolve` with the new
   `BasketNotSupported` (312) error. New `InvalidBasket` (313) error and
   `basket_leg_settled` event.
+- `preview_resolve` now returns a `public_goods_take` field, and its
+  `platform_take` is net of that share, so the preview matches the actual
+  platform/public-goods transfers made by `resolve()` when
+  `set_public_goods_config()` is active (#430).
 
 ## [0.4.0] — allowlisted multi-asset settlement and delayed admin rotation
 
