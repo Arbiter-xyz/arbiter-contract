@@ -31,7 +31,7 @@ use proptest::prelude::*;
 use super::{BPS_DENOM, PLATFORM_FEE_BPS, SLASH_BPS, SLASH_CAP_BPS_OF_AMOUNT};
 
 fn mul_bps(amount: i128, bps: i128) -> i128 {
-    amount * bps / BPS_DENOM
+    (amount / BPS_DENOM) * bps + (amount % BPS_DENOM) * bps / BPS_DENOM
 }
 
 /// Reproduces the exact integer arithmetic from `settle_resolution()`:

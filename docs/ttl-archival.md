@@ -106,11 +106,16 @@ keep-alive path, or could it archive with no caller ever touching it again?
 | `EscalatedQuestion` | Written on escalation; read by the escalation-resolution path. | Fine as-is: read on the path that resolves it. |
 | `QuestionTemplate` | Written by the template-authoring call; read when a question is created from it. | Fine as-is: read on the create path, and auto-restore covers a cold read. |
 
-Conclusion: no new TTL gap. The keys that need to outlive a quiet period
-(`Stake`/`StakeSnapshot`, prepaid `Balance`) are already reached by
-`touch(address)`; the rest are read on the path that consumes them, and
-protocol 23 auto-restore makes a cold read correct, just costlier. The
-backend sweep below is the operational backstop for the former.
+Conclusion: there is no fund-safety gap, but three of these keys have no
+keep-alive path: `PasskeyPubkey`, `KycAttestation` and `StakeSnapshot`. None
+holds funds or gates settlement, so archival cannot strand money. The earlier
+claim that `touch(address)` protects `StakeSnapshot` was wrong: it extends only
+Owed/Stake/Balance (and `touch_asset()` the asset-scoped equivalents), not
+snapshots. Protocol 23 auto-restore keeps a cold read of all three correct, just
+costlier. `ChallengerBond`, `PendingResolution`, `EscalatedQuestion` and
+`QuestionTemplate` are read on the path that consumes them, with the same
+cold-read trade-off. The backend sweep below is the operational backstop for
+Owed/Stake/Balance only.
 
 ## Operational guidance
 

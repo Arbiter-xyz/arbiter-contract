@@ -469,6 +469,20 @@ fn nobody_but_the_named_source_contract_can_import() {
 }
 
 #[test]
+fn import_rejects_a_created_at_in_the_future() {
+    let p = pair(1);
+    p.env.mock_all_auths();
+    let new_c = OracleEscrowClient::new(&p.env, &p.new);
+    let future = p.env.ledger().sequence() + 1;
+    let payer = p.payers[0].clone();
+    assert_eq!(
+        new_c.try_import_question(&p.old, &p.token, &50, &payer, &AMOUNT, &future, &TIMEOUT),
+        Err(Ok(ContractError::InvalidTimeout))
+    );
+    assert!(new_c.try_get_question(&50).is_err());
+}
+
+#[test]
 fn import_cannot_mint_a_question_without_funds_actually_arriving() {
     // Even if the attacker gets the source's auth for import_question
     // itself, the target PULLS the amount — so without the source also

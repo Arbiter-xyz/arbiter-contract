@@ -44,8 +44,15 @@ a public, cancellable announcement with an exit window:
   `open_question()`, so their deadline lands no later than
   `executable_at - 1`. Once no window is left, `submit()`/`charge()` fail
   with `UpgradeInProgress` until the upgrade executes or is cancelled.
-- **Stakes, owed earnings and prepaid balances** can be withdrawn at any
-  time anyway.
+- **Prepaid balances** can be withdrawn at any time via `withdraw_balance()`.
+- **Owed earnings** are withdrawable via `withdraw_owed()`, except for any
+  portion currently locked by a lending authority with `lock_owed()`; locked
+  owed cannot be released until the authority calls `unlock_owed()`.
+- **Stake** is not immediately withdrawable: a worker must call
+  `begin_unstake()` to start the unbonding period, then wait
+  `max(MIN_UNBONDING_LEDGERS, timeout_ledgers)` ledgers before
+  `complete_unstake()` releases the funds. Plan ahead if you need to exit
+  before an upgrade executes.
 
 So at the moment new code starts running, every question still pending
 has already had its refund deadline pass under the old code. Nobody's

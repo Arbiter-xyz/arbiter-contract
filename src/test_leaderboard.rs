@@ -44,6 +44,47 @@ fn leaderboard_stays_capped_at_the_configured_size() {
 }
 
 #[test]
+fn worker_outside_a_full_leaderboard_is_admitted_only_when_exceeding_the_last_count() {
+    let f = setup();
+    let c = client(&f);
+    let no_losers = Vec::new(&f.env);
+    let proof = BytesN::from_array(&f.env, &[0u8; 32]);
+    let mut next_id = 0u64;
+
+    // Credit `w` once via a fresh escrow.
+    let mut credit = |w: &Address| {
+        next_id += 1;
+        c.submit(&f.payer, &next_id, &AMOUNT);
+        c.resolve(&next_id, &Vec::from_array(&f.env, [w.clone()]), &no_losers, &proof);
+    };
+
+    // Fill the board with LEADERBOARD_CAP workers at count 1.
+    let mut early: std::vec::Vec<Address> = std::vec::Vec::new();
+    for _ in 0..LEADERBOARD_CAP {
+        let w = Address::generate(&f.env);
+        credit(&w);
+        early.push(w);
+    }
+
+    // A tie at the last count does not displace anyone: the newcomer is dropped.
+    let newcomer = Address::generate(&f.env);
+    credit(&newcomer);
+    let board = c.get_leaderboard();
+    assert_eq!(board.len(), LEADERBOARD_CAP);
+    assert!(!board.iter().any(|(w, _)| w == newcomer));
+    assert_eq!(board.get(LEADERBOARD_CAP - 1).unwrap(), (early[LEADERBOARD_CAP as usize - 1].clone(), 1));
+
+    // Exceeding the last count admits them at the top; the last count-1 entry is evicted.
+    credit(&newcomer);
+    let board = c.get_leaderboard();
+    assert_eq!(board.len(), LEADERBOARD_CAP);
+    assert_eq!(board.get(0).unwrap(), (newcomer, 2));
+    assert_eq!(board.get(1).unwrap(), (early[0].clone(), 1));
+    let evicted = &early[LEADERBOARD_CAP as usize - 1];
+    assert!(!board.iter().any(|(w, _)| w == *evicted));
+}
+
+#[test]
 fn get_leaderboard_returns_entries_sorted_by_resolved_count_descending() {
     let f = setup();
     let c = client(&f);
