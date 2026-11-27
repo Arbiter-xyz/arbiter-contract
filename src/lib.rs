@@ -3568,6 +3568,13 @@ impl OracleEscrow {
             left -= take;
         }
         Self::set_persistent(env, &key, &info);
+        StakeChanged {
+            worker: worker.clone(),
+            token: token.clone(),
+            amount: -amount,
+            new_total: info.settled + info.warming,
+        }
+        .publish(env);
         amount
     }
 
