@@ -20,6 +20,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const USAGE = `usage: migrate.mjs <plan|run|verify> --source <contract> --target <contract> --admin <stellar key alias>
   [--network testnet] [--batch 10] [--journal migration-journal.jsonl] [--json]
@@ -88,6 +89,7 @@ function parseJson(s) {
 }
 
 function makeClient(o) {
+  const decimalsCache = new Map();
   const base = (id, send) => ["contract", "invoke", "--id", id, "--source-account", o.admin, "--network", o.network, `--send=${send}`, "--"];
   const call = (id, fn, args = {}, send = "no") => {
     const flat = Object.entries(args).flatMap(([k, v]) => [`--${k}`, typeof v === "string" ? v : JSON.stringify(v)]);
@@ -112,6 +114,9 @@ function makeClient(o) {
     },
     tokenOf(id) {
       return call(id, "get_token");
+    },
+    questionToken(id, qid) {
+      return call(id, "get_question_token", { question_id: String(qid) });
     },
     balance(token, who) {
       return BigInt(call(token, "balance", { id: who }));
@@ -166,7 +171,17 @@ function enumerateLegacy(o, c) {
 
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const chunk = (xs, n) => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, i * n + n));
-const fmtAmount = (x) => `${(Number(x) / 1e7).toFixed(7)}`;
+// x is in the token's smallest units; decimals comes from get_asset_decimals().
+const fmtAmount = (x, decimals) => {
+  const unit = 10n ** BigInt(decimals);
+  const abs = x < 0n ? -x : x;
+  const frac = decimals ? `.${(abs % unit).toString().padStart(decimals, "0")}` : "";
+  return `${x < 0n ? "-" : ""}${abs / unit}${frac}`;
+};
+// Amounts of different tokens are not summable, so totals are kept per token.
+const sumByToken = (qs) => qs.reduce((m, q) => ({ ...m, [q.token]: (m[q.token] ?? 0n) + BigInt(q.amount) }), {});
+const fmtTotals = (totals, decimalsOf) =>
+  Object.entries(totals).map(([t, v]) => `${fmtAmount(v, decimalsOf(t))} (${t})`).join(" + ") || "0";
 
 // ---------------------------------------------------------------------------
 // plan (dry run)
@@ -175,36 +190,48 @@ const fmtAmount = (x) => `${(Number(x) / 1e7).toFixed(7)}`;
 function plan(o, c) {
   const ledger = c.latestLedger();
   const { ids, legacy } = enumeratePending(o, c);
-  const questions = ids.map((id) => ({ id, ...c.question(o.source, id) }));
+  const questions = ids.map((id) => ({ id, ...c.question(o.source, id), token: legacy ? null : c.questionToken(o.source, id) }));
   const problems = [];
+  const blockers = [];
+  const addProblem = (message, blocking = true) => {
+    problems.push(message);
+    if (blocking) blockers.push(message);
+  };
   let targetSource = null;
   if (!legacy) {
     targetSource = c.migrationSource(o.target);
     if (targetSource !== o.source)
-      problems.push(`target's migration source is ${targetSource ?? "unset"}; run set_migration_source(${o.source}) on the target as its admin first`);
+      addProblem(`target's migration source is ${targetSource ?? "unset"}; run set_migration_source(${o.source}) on the target as its admin first`);
   }
   for (const q of questions) {
-    if (c.question(o.target, q.id)) problems.push(`question ${q.id} already exists on the target; migrate_pending would revert its batch`);
+    if (q.status !== "Pending") addProblem(`question ${q.id} is ${q.status}; it remains indexed but will not be migrated`, false);
+    if (q.status === "Pending" && c.question(o.target, q.id))
+      addProblem(`question ${q.id} already exists on the target; migrate_pending would revert its batch`);
   }
-  const total = questions.reduce((s, q) => s + q.amount, 0n);
+  const pendingQuestions = questions.filter((q) => q.status === "Pending");
   const report = {
     mode: legacy ? "legacy-refund" : "migrate",
     network: o.network,
     ledger,
     source: o.source,
     target: o.target,
-    pending: questions.length,
-    total_amount: total.toString(),
-    batches: chunk(questions.map((q) => q.id.toString()), o.batch),
+    pending: pendingQuestions.length,
+    totals: sumByToken(pendingQuestions),
+    batches: chunk(pendingQuestions.map((q) => q.id.toString()), o.batch),
     questions: questions.map((q) => ({
       id: q.id.toString(),
+      status: q.status,
       payer: q.payer,
+      token: q.token,
+      decimals: q.decimals,
       amount: q.amount.toString(),
       created_at: q.created_at,
       refund_timeout_from: q.created_at + q.timeout_ledgers,
       past_deadline: ledger >= q.created_at + q.timeout_ledgers,
+      token: q.token,
     })),
     problems,
+    blockers,
   };
   return report;
 }
@@ -216,14 +243,24 @@ function printPlan(r) {
     console.log("source is a v0.2.0 contract (no migrate_pending): the only fund-safe move is an admin refund() of each");
     console.log("question back to its payer, who re-submits on the target. `run` would do exactly that.");
   }
-  console.log(`\n${r.pending} pending question(s), ${fmtAmount(r.total_amount)} total, in ${r.batches.length} batch(es):`);
-  for (const q of r.questions)
-    console.log(`  #${q.id.padEnd(8)} ${fmtAmount(q.amount).padStart(14)}  payer ${q.payer}  refundable from ledger ${q.refund_timeout_from}${q.past_deadline ? "  (already past deadline: anyone may refund it)" : ""}`);
+  const decimalsOf = (t) => r.questions.find((q) => q.token === t).decimals;
+  console.log(`\n${r.pending} pending question(s), ${fmtTotals(r.totals, decimalsOf)} total, in ${r.batches.length} batch(es):`);
+  for (const q of r.questions.filter((q) => q.status === "Pending"))
+    console.log(`  #${q.id.padEnd(8)} ${fmtAmount(BigInt(q.amount), q.decimals).padStart(14)}  payer ${q.payer}  refundable from ledger ${q.refund_timeout_from}${q.past_deadline ? "  (already past deadline: anyone may refund it)" : ""}`);
+  const notPending = r.questions.filter((q) => q.status !== "Pending");
+  if (notPending.length)
+    console.log(`\n${notPending.length} indexed question(s) are not Pending and will not be migrated: ${notPending.map((q) => `#${q.id} (${q.status})`).join(", ")}`);
   r.batches.forEach((b, i) => console.log(`  batch ${i + 1}: [${b.join(", ")}]`));
-  if (r.problems.length) {
+  const notices = r.problems.filter((p) => !r.blockers.includes(p));
+  if (r.blockers.length) {
     console.log("\nWOULD FAIL:");
-    for (const p of r.problems) console.log(`  - ${p}`);
-  } else {
+    for (const p of r.blockers) console.log(`  - ${p}`);
+  }
+  if (notices.length) {
+    console.log("\nNOT MIGRATED:");
+    for (const p of notices) console.log(`  - ${p}`);
+  }
+  if (!r.problems.length) {
     console.log("\nno problems found");
   }
 }
@@ -253,20 +290,22 @@ function die(msg) {
 
 function run(o, c) {
   const r = plan(o, c);
-  if (r.problems.length) {
+  if (r.blockers.length) {
     printPlan(r);
     throw new Error("refusing to run: fix the problems above (or they would just revert on-chain)");
   }
   // The first run records a baseline; re-runs after a crash keep the
   // original one so `verify` can check the whole migration, not just the
-  // tail end of it.
+  // tail end of it. Each question moves in its own asset, so balances are
+  // recorded per token: the default one plus every question's bound token.
   if (!readJournal(o).some((e) => e.kind === "baseline")) {
-    const token = c.tokenOf(o.source);
-    journal(o, {
-      kind: "baseline", ledger: r.ledger, source: o.source, target: o.target, token,
-      source_balance: c.balance(token, o.source), target_balance: c.balance(token, o.target),
-      questions: r.questions,
-    });
+    const pendingQuestions = r.questions.filter((q) => q.status === "Pending");
+    const tokens = new Set([c.tokenOf(o.source), ...pendingQuestions.map((q) => q.token).filter(Boolean)]);
+    const balances = {};
+    for (const token of tokens) {
+      balances[token] = { source_balance: c.balance(token, o.source), target_balance: c.balance(token, o.target) };
+    }
+    journal(o, { kind: "baseline", ledger: r.ledger, source: o.source, target: o.target, balances, questions: pendingQuestions });
   }
   journal(o, { kind: "run-start", pending: r.pending });
 
@@ -274,11 +313,18 @@ function run(o, c) {
   let sent = 0;
   let failures = 0;
   for (;;) {
-    // Always re-read the head of the live pending set instead of walking a
-    // precomputed list: whatever a crashed run (or a still-in-flight tx)
-    // already moved is simply no longer there.
-    const ids = r.mode === "legacy-refund" ? enumerateLegacy(o, c).ids.slice(0, o.batch) : c.pendingPage(o.source, 0, o.batch);
-    if (ids.length === 0) break;
+    // Re-read the live index: it can retain non-Pending obligations such as
+    // disputed questions, which migrate_pending() deliberately rejects.
+    const indexed = r.mode === "legacy-refund"
+      ? enumerateLegacy(o, c).ids.map((id) => ({ id, status: "Pending" }))
+      : enumeratePending(o, c).ids.map((id) => ({ id, status: c.question(o.source, id)?.status }));
+    const notPending = indexed.filter((q) => q.status !== "Pending");
+    const ids = indexed.filter((q) => q.status === "Pending").slice(0, o.batch).map((q) => q.id);
+    if (ids.length === 0) {
+      if (notPending.length)
+        console.log(`source has no migratable Pending questions left; not migrated: ${notPending.map((q) => `#${q.id} (${q.status})`).join(", ")}`);
+      break;
+    }
     sent++;
     journal(o, { kind: "batch-intent", n: sent, ids });
     if (crash?.when === "before-send" && crash.n === sent) die(`before sending batch ${sent}`);
@@ -294,7 +340,9 @@ function run(o, c) {
       }
       if (crash?.when === "after-send" && crash.n === sent) die(`after batch ${sent} landed, before journaling it`);
       journal(o, { kind: "batch-done", n: sent, ids, moved });
-      console.log(`batch ${sent}: [${ids.join(", ")}] -> ${typeof moved === "string" ? moved : fmtAmount(moved)}`);
+      // migrate_pending() returns one raw sum across tokens, so re-derive per-token totals from the questions.
+      const batch = ids.map((id) => r.questions.find((q) => q.id === id.toString()) ?? c.question(o.source, id));
+      console.log(`batch ${sent}: [${ids.join(", ")}] -> ${typeof moved === "string" ? moved : fmtTotals(sumByToken(batch), (t) => c.decimals(o.source, t))}`);
     } catch (e) {
       if (!(e instanceof ContractError)) throw e;
       // A reverted batch changed nothing. The usual cause is racing another
@@ -308,7 +356,7 @@ function run(o, c) {
     failures = 0;
   }
   journal(o, { kind: "run-done" });
-  console.log("source has no pending questions left");
+  console.log("source has no migratable Pending questions left");
 }
 
 // ---------------------------------------------------------------------------
@@ -322,10 +370,15 @@ function verify(o, c) {
   const ok = (name, pass, detail = "") => checks.push({ name, pass, detail });
 
   const legacy = !!(o.legacyIds || o.legacyIdsFile);
-  let moved = 0n;
-  let settledElsewhere = 0n;
+  const moved = new Map(); // token -> migrated amount
+  const settledElsewhere = new Map(); // token -> amount settled on source during the run
+  const add = (m, k, v) => m.set(k, (m.get(k) ?? 0n) + v);
   for (const q of base.questions) {
     const src = c.question(o.source, q.id);
+    if (q.source_only) {
+      if (!src) { ok(`#${q.id} exists on source`, false, "MISSING ON SOURCE"); continue; }
+      Object.assign(q, { payer: src.payer, amount: src.amount.toString(), created_at: src.created_at, refund_timeout_from: src.created_at + src.timeout_ledgers });
+    }
     const dst = legacy ? null : c.question(o.target, q.id);
     const srcPending = src?.status === "Pending";
     const dstExists = !!dst;
@@ -333,7 +386,7 @@ function verify(o, c) {
       ok(`#${q.id} moved exactly once`, !!dst && !srcPending, dst ? `target status ${dst.status}` : "MISSING ON TARGET");
       if (dst) {
         ok(`#${q.id} terms preserved`, dst.payer === q.payer && dst.amount.toString() === q.amount && dst.created_at === q.created_at && dst.created_at + dst.timeout_ledgers === q.refund_timeout_from);
-        moved += BigInt(q.amount);
+        add(moved, q.token, BigInt(q.amount));
       }
     } else if (srcPending) {
       ok(`#${q.id} still only on source`, !dstExists, dstExists ? "ALSO ON TARGET" : "not migrated yet");
@@ -341,17 +394,21 @@ function verify(o, c) {
       // Resolved/refunded on the source while the migration ran: fine, as
       // long as it didn't ALSO get imported.
       ok(`#${q.id} settled on source (${src?.status}), not duplicated`, !dstExists);
-      settledElsewhere += BigInt(q.amount);
+      add(settledElsewhere, q.token, BigInt(q.amount));
     }
   }
   if (!legacy) {
-    const srcNow = c.balance(base.token, o.source);
-    const tgtNow = c.balance(base.token, o.target);
-    const srcDelta = BigInt(base.source_balance) - srcNow;
-    const tgtDelta = tgtNow - BigInt(base.target_balance);
-    ok("target received exactly what was migrated", tgtDelta === moved, `target +${fmtAmount(tgtDelta)}, migrated ${fmtAmount(moved)}`);
-    ok("source released exactly what was migrated (plus any settlements)", srcDelta >= moved && srcDelta <= moved + settledElsewhere,
-      `source -${fmtAmount(srcDelta)}, migrated ${fmtAmount(moved)}, settled on source ${fmtAmount(settledElsewhere)}`);
+    for (const [token, b] of Object.entries(base.balances)) {
+      const migrated = moved.get(token) ?? 0n;
+      const settled = settledElsewhere.get(token) ?? 0n;
+      const srcNow = c.balance(token, o.source);
+      const tgtNow = c.balance(token, o.target);
+      const srcDelta = BigInt(b.source_balance) - srcNow;
+      const tgtDelta = tgtNow - BigInt(b.target_balance);
+      ok(`[${token}] target received exactly what was migrated`, tgtDelta === migrated, `target +${fmtAmount(tgtDelta)}, migrated ${fmtAmount(migrated)}`);
+      ok(`[${token}] source released exactly what was migrated (plus any settlements)`, srcDelta >= migrated && srcDelta <= migrated + settled,
+        `source -${fmtAmount(srcDelta)}, migrated ${fmtAmount(migrated)}, settled on source ${fmtAmount(settled)}`);
+    }
     const srcPending = new Set(enumeratePending(o, c).ids.map(String));
     const tgtPending = new Set();
     const tc = c.pendingCount(o.target);
@@ -367,15 +424,19 @@ function verify(o, c) {
 
 // ---------------------------------------------------------------------------
 
-const o = parseArgs(process.argv.slice(2));
-const c = makeClient(o);
-if (o.cmd === "plan") {
-  const r = plan(o, c);
-  if (o.json) console.log(JSON.stringify(r, null, 2));
-  else printPlan(r);
-  process.exit(r.problems.length ? 1 : 0);
-} else if (o.cmd === "run") {
-  run(o, c);
-} else {
-  process.exit(verify(o, c) ? 0 : 1);
+export { plan, run };
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const o = parseArgs(process.argv.slice(2));
+  const c = makeClient(o);
+  if (o.cmd === "plan") {
+    const r = plan(o, c);
+    if (o.json) console.log(JSON.stringify(r, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+    else printPlan(r);
+    process.exit(r.problems.length ? 1 : 0);
+  } else if (o.cmd === "run") {
+    run(o, c);
+  } else {
+    process.exit(verify(o, c) ? 0 : 1);
+  }
 }

@@ -140,7 +140,9 @@ fn abandoned_escalation_can_be_refunded_via_admin_recovery() {
     let c = client(&f);
 
     c.submit(&f.payer, &1, &AMOUNT);
-    c.escalate(&1);
+    let workers = Vec::from_array(&f.env, [Address::generate(&f.env)]);
+    let losers: Vec<Address> = Vec::new(&f.env);
+    c.escalate(&1, &workers, &losers);
 
     let q = c.get_question(&1);
     assert_eq!(q.status, Status::Disputed);
@@ -149,7 +151,7 @@ fn abandoned_escalation_can_be_refunded_via_admin_recovery() {
     // a Disputed question; the admin override is the only path back.
     assert_eq!(
         c.try_refund(&1),
-        Err(Ok(ContractError::InvalidStatus))
+        Err(Ok(ContractError::QuestionNotPending))
     );
 
     let before = c.get_balance(&f.payer);
