@@ -34,6 +34,8 @@ jobs:
           curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - id: build
+        env:
+          REPRO_BUILD_LABEL: runner
         run: |
           ./scripts/reproducible-build.sh
           echo "hash=$(cat target/wasm-hash.txt)" >> "$GITHUB_OUTPUT"
@@ -59,7 +61,7 @@ jobs:
       - run: docker build -t arbiter-contract-build .
       - id: build
         run: |
-          docker run --rm -v "$PWD:/src" arbiter-contract-build
+          docker run --rm -e REPRO_BUILD_LABEL=docker -v "$PWD:/src" arbiter-contract-build
           echo "hash=$(cat target/wasm-hash.txt)" >> "$GITHUB_OUTPUT"
 
   compare:
