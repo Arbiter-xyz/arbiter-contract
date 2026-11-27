@@ -96,10 +96,9 @@ jobs:
           STELLAR_CLI_VERSION: "27.1.0"
           STELLAR_CLI_DEB_SHA256: "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4"
         run: |
-          DEB="stellar-cli_${STELLAR_CLI_VERSION}_amd64.deb"
-          curl -fLO "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/$DEB"
-          echo "${STELLAR_CLI_DEB_SHA256}  $DEB" | sha256sum --check --strict
-          sudo dpkg -i "$DEB" || sudo apt-get install -f -y
+          curl -fsSLO https://github.com/stellar/stellar-cli/releases/download/v27.1.0/stellar-cli_27.1.0_amd64.deb
+          echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  stellar-cli_27.1.0_amd64.deb" | sha256sum -c -
+          sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - name: Build contract and test fixtures to WASM
         run: scripts/build-wasm.sh
       - name: WASM size budget
@@ -122,14 +121,11 @@ jobs:
             exit 1
           fi
       - name: WASM-hash verification against deployed contract
-        # Only run when explicitly triggered via workflow_dispatch with a
-        # contract_id input.  Regular pushes and pull_request runs build a
-        # fresh WASM whose hash will legitimately differ from whatever is
-        # currently deployed, so running the check there fails every PR that
-        # touches the contract — the exact opposite of useful (issue #495).
-        # On workflow_dispatch the operator explicitly opts in and supplies
-        # the target contract id, so the comparison is intentional.
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.contract_id != '' }}
+        # Runs only on workflow_dispatch so PRs that change the contract are
+        # not blocked by a stale deployed hash. Triggered automatically by
+        # release.yml after a deploy; trigger manually to verify a specific
+        # commit against a named contract id.
+        if: github.event_name == 'workflow_dispatch'
         env:
           CONTRACT_ID: ${{ github.event.inputs.contract_id || 'CDEZRLCBSRMWT5YLJ5UH3SKLNM5GVTL5TGBWDBMMBEBCFKIG3ZSS5W36' }}
           NETWORK: testnet

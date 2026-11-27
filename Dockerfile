@@ -22,6 +22,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && curl -fsSL -o /tmp/stellar-cli.deb \
       "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli_${STELLAR_CLI_VERSION}_amd64.deb" \
+ && echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  /tmp/stellar-cli.deb" | sha256sum -c - \
  && (dpkg -i /tmp/stellar-cli.deb || apt-get install -f -y) \
  && rm -rf /tmp/stellar-cli.deb /var/lib/apt/lists/*
 
