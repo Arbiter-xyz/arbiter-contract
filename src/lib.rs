@@ -294,8 +294,8 @@ pub enum DataKey {
     /// falling out of the bounded top-N.
     ResolvedCount(Address),
     /// Issue #83: bounded `Vec<(Address, u32)>`, capped at LEADERBOARD_CAP,
-    /// sorted descending by resolved count. Instance storage, since it's
-    /// small and read/written on essentially every resolve().
+    /// sorted descending by resolved count. Persistent storage (TTL extended
+    /// on write) so it isn't bloating every instance-storage invocation.
     LeaderboardEntries,
     /// #91: payer-set floor on their own Balance(Address). Checked only by
     /// the new permissionless check_top_up_threshold() — see that fn's docs
@@ -4928,11 +4928,10 @@ impl OracleEscrow {
     }
 
     fn update_leaderboard(env: &Env, worker: &Address, count: u32) {
-        let mut entries: Vec<(Address, u32)> = env
-            .storage()
-            .instance()
-            .get(&DataKey::LeaderboardEntries)
-            .unwrap_or(Vec::new(env));
+        // Pre-upgrade leaderboards still live in instance storage; the first
+        // write after upgrade moves them to persistent and drops the old copy.
+        let migrating = !env.storage().persistent().has(&DataKey::LeaderboardEntries);
+        let mut entries = Self::read_leaderboard(env);
 
         // Remove any existing entry for this worker so it can be
         // re-inserted at its new, correct position.
@@ -4962,19 +4961,25 @@ impl OracleEscrow {
             entries.remove(entries.len() - 1);
         }
 
+        Self::set_persistent(env, &DataKey::LeaderboardEntries, &entries);
+        if migrating {
+            env.storage().instance().remove(&DataKey::LeaderboardEntries);
+        }
+    }
+
+    /// Persistent copy first; instance copy only until the first post-upgrade write.
+    fn read_leaderboard(env: &Env) -> Vec<(Address, u32)> {
         env.storage()
-            .instance()
-            .set(&DataKey::LeaderboardEntries, &entries);
-        Self::bump_instance(env);
+            .persistent()
+            .get(&DataKey::LeaderboardEntries)
+            .or_else(|| env.storage().instance().get(&DataKey::LeaderboardEntries))
+            .unwrap_or(Vec::new(env))
     }
 
     /// Read-only. Returns the bounded top-LEADERBOARD_CAP workers by
     /// resolved_count, sorted descending.
     pub fn get_leaderboard(env: Env) -> Vec<(Address, u32)> {
-        env.storage()
-            .instance()
-            .get(&DataKey::LeaderboardEntries)
-            .unwrap_or(Vec::new(&env))
+        Self::read_leaderboard(&env)
     }
 
     /// Read-only. Returns a worker's full resolved_count, even if they've
