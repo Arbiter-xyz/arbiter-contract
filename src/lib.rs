@@ -408,6 +408,7 @@ pub enum DataKey {
     TotalOpenedCount,
     TotalResolvedCount,
     TotalRefundedCount,
+    TotalMigratedCount,
     /// #128: public-goods fee-routing target (see set_public_goods_config()).
     PublicGoodsAddress,
     /// #128: public-goods fee-routing share in bps, paired with
@@ -828,6 +829,8 @@ pub struct ContractHealth {
     pub total_resolved: u32,
     /// Cumulative questions settled as Refunded (admin + timeout).
     pub total_refunded: u32,
+    /// Cumulative questions closed via migrate_pending() (Migrated exit).
+    pub total_migrated: u32,
     /// The contract's own balance of the default token: escrowed questions
     /// + prepaid balances + stakes + owed-but-unwithdrawn earnings. This is
     /// TVL in the default asset only; other allowlisted assets are readable
@@ -2061,9 +2064,11 @@ impl OracleEscrow {
                 established,
             }
             .publish(&env);
-            if established {
-                losing_workers.push_back(entry.worker);
-            }
+            // Always include the dissenter in losing_workers so their answer
+            // counts toward quorum bounds regardless of established status.
+            // An unestablished dissenter still submitted an answer; dropping
+            // them silently makes the quorum check see one fewer respondent.
+            losing_workers.push_back(entry.worker);
         }
 
         Self::settle_resolution(&env, question_id, workers, losing_workers, None)
@@ -3188,6 +3193,7 @@ impl OracleEscrow {
             total_opened: Self::counter(&env, &DataKey::TotalOpenedCount),
             total_resolved: Self::counter(&env, &DataKey::TotalResolvedCount),
             total_refunded: Self::counter(&env, &DataKey::TotalRefundedCount),
+            total_migrated: Self::counter(&env, &DataKey::TotalMigratedCount),
             token_balance,
             admin,
             token: token_addr,
@@ -4027,6 +4033,7 @@ impl OracleEscrow {
         match status {
             Status::Resolved => Self::bump_counter(env, &DataKey::TotalResolvedCount),
             Status::Refunded => Self::bump_counter(env, &DataKey::TotalRefundedCount),
+            Status::Migrated => Self::bump_counter(env, &DataKey::TotalMigratedCount),
             _ => {}
         }
         Self::bump_instance(env);
@@ -5656,6 +5663,13 @@ impl OracleEscrow {
         // Bond must be posted before the dispute window closes. Ledger == dispute_deadline is
         // the dead ledger: refused here and by finalize_resolve(), so neither can run at it.
         if env.ledger().sequence() >= pending_res.dispute_deadline {
+            return Err(ContractError::NoChallengeableResolution);
+        }
+
+        // Reject if dispute_resolve() has already flagged this resolution.
+        // finalize_resolve() will refuse a disputed resolution forever (#184),
+        // so a bond posted after the flag can never be returned or forfeited.
+        if pending_res.disputed {
             return Err(ContractError::NoChallengeableResolution);
         }
 
