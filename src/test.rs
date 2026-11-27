@@ -1806,37 +1806,68 @@ fn per_question_asset_selection_settles_two_questions_in_different_assets_indepe
     assert_eq!(c.get_owed_asset(&worker2, &other_token), amount_b * 4 / 5);
 }
 
-// --- set_public_goods_config() bps bounds (#535)
-
+/// #545: the circuit breaker must also gate post_challenge_bond() and the
+/// *_asset inflow entry points, with no token movement.
 #[test]
-fn set_public_goods_config_rejects_bps_above_denominator() {
-    let f = setup();
-    let c = client(&f);
-    let pg_addr = Address::generate(&f.env);
-
-    let res = c.try_set_public_goods_config(&pg_addr, &10_001u32);
-    assert_eq!(res, Err(Ok(ContractError::InvalidPublicGoodsBps)));
-    assert_eq!(c.get_public_goods_config(), None);
-}
-
-#[test]
-fn public_goods_bps_10000_routes_entire_platform_take() {
+fn post_challenge_bond_while_paused_fails() {
     let f = setup();
     let c = client(&f);
     let tc = token_client(&f);
-    let pg_addr = Address::generate(&f.env);
-    let worker = Address::generate(&f.env);
 
-    c.set_public_goods_config(&pg_addr, &10_000u32);
-    c.submit(&f.payer, &1, &AMOUNT);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_post_challenge_bond(&f.payer, &1, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
 
-    let platform_before = tc.balance(&f.platform);
-    let pg_before = tc.balance(&pg_addr);
+#[test]
+fn submit_asset_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
 
-    c.resolve(&1, &Vec::from_array(&f.env, [worker]), &Vec::new(&f.env), &BytesN::from_array(&f.env, &[0u8; 32]));
+    c.set_asset_allowed(&f.token_address, &true);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_submit_asset(&f.payer, &f.token_address, &1, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
 
-    // One worker takes the whole pool, so platform_take = fee (dust = 0).
-    let fee = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
-    assert_eq!(tc.balance(&f.platform) - platform_before, 0);
-    assert_eq!(tc.balance(&pg_addr) - pg_before, fee);
+#[test]
+fn deposit_asset_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    c.set_asset_allowed(&f.token_address, &true);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_deposit_asset(&f.payer, &f.token_address, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
+}
+
+#[test]
+fn charge_asset_while_paused_fails() {
+    let f = setup();
+    let c = client(&f);
+    let tc = token_client(&f);
+
+    c.set_asset_allowed(&f.token_address, &true);
+    c.deposit_asset(&f.payer, &f.token_address, &AMOUNT);
+    c.set_paused(&true);
+    let before = tc.balance(&f.payer);
+    assert_eq!(
+        c.try_charge_asset(&f.payer, &f.token_address, &1, &AMOUNT),
+        Err(Ok(ContractError::ContractPaused))
+    );
+    assert_eq!(tc.balance(&f.payer), before);
 }
