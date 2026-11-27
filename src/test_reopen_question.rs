@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::test::{client, setup, AMOUNT, TIMEOUT_LEDGERS};
+use crate::test::{client, setup, token_admin_client, token_client, AMOUNT, TIMEOUT_LEDGERS};
 use crate::{ContractError, Status};
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::BytesN;
@@ -65,4 +65,23 @@ fn reopen_after_the_original_refund_already_paid_out_requires_a_new_deposit() {
     let q = c.get_question(&3);
     assert_eq!(q.status, Status::Pending);
     assert_eq!(q.amount, AMOUNT);
+}
+
+#[test]
+fn reopen_by_a_different_payer_is_rejected() {
+    let f = setup();
+    let c = client(&f);
+    let other = soroban_sdk::Address::generate(&f.env);
+    token_admin_client(&f).mint(&other, &AMOUNT);
+
+    c.submit(&f.payer, &f.token_address, &4, &AMOUNT);
+    f.env.ledger().with_mut(|li| {
+        li.sequence_number += TIMEOUT_LEDGERS as u32 + 1;
+    });
+    c.refund_timeout(&4);
+
+    let res = c.try_reopen_question(&other, &4, &AMOUNT);
+    assert_eq!(res, Err(Ok(ContractError::QuestionNotRefunded)));
+    assert_eq!(c.get_question(&4).status, Status::Refunded);
+    assert_eq!(token_client(&f).balance(&other), AMOUNT);
 }
