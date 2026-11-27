@@ -88,7 +88,9 @@ fn preview_resolve_does_not_overflow_for_a_large_amount() {
     // Must not panic; matches resolve()'s divide-first behavior.
     let preview = c.preview_resolve(&1, &workers, &no_losers);
 
-    assert_eq!(preview.fee, mul_bps(large_amount, FEE_BPS));
+    let expected_fee = (large_amount / BPS_DENOM) * PLATFORM_FEE_BPS
+        + (large_amount % BPS_DENOM) * PLATFORM_FEE_BPS / BPS_DENOM;
+    assert_eq!(preview.fee, expected_fee);
     assert_eq!(preview.platform_take, preview.fee);
     assert_eq!(preview.share_per_worker, (large_amount - preview.fee) / 2);
 }
