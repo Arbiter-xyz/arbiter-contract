@@ -1,186 +1,146 @@
 #![cfg(test)]
 
-extern crate std;
-
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
-    token, Address, Env,
+    testutils::{Address as _, Ledger as _},
+    token::{Client as TokenClient, StellarAssetClient},
+    Address, Env,
 };
 
-fn create_token<'a>(env: &Env, admin: &Address) -> (token::Client<'a>, token::StellarAssetClient<'a>) {
-    let contract = env.register_stellar_asset_contract_v2(admin.clone());
-    let address = contract.address();
-    (
-        token::Client::new(env, &address),
-        token::StellarAssetClient::new(env, &address),
-    )
+fn setup(
+    env: &Env,
+    start: u64,
+    cliff: u64,
+    end: u64,
+    total: i128,
+) -> (Address, Address, Address) {
+    env.mock_all_auths();
+
+    let admin = Address::generate(env);
+    let beneficiary = Address::generate(env);
+
+    let token_admin = Address::generate(env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let asset = StellarAssetClient::new(env, &token);
+    asset.mint(&admin, &total);
+
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(env, &contract_id);
+    client.initialize(&admin, &beneficiary, &token, &start, &cliff, &end, &total);
+
+    // Fund the vesting contract with the total amount.
+    TokenClient::new(env, &token).transfer(&admin, &contract_id, &total);
+
+    (contract_id, beneficiary, token)
 }
 
-fn set_time(env: &Env, timestamp: u64) {
-    env.ledger().set(LedgerInfo {
-        timestamp,
-        protocol_version: 22,
-        sequence_number: 0,
-        network_id: Default::default(),
-        base_reserve: 0,
-        min_temp_entry_ttl: 0,
-        min_persistent_entry_ttl: 0,
-        max_entry_ttl: 0,
-    });
+#[test]
+fn vested_amount_is_zero_before_cliff() {
+    let env = Env::default();
+    let (contract_id, _beneficiary, _token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    env.ledger().set_timestamp(150);
+    assert_eq!(client.vested_amount(), 0);
 }
 
-struct Setup<'a> {
-    env: Env,
-    client: FeeVestingClient<'a>,
-    token: token::Client<'a>,
-    token_admin: token::StellarAssetClient<'a>,
-    beneficiary: Address,
-    admin: Address,
+#[test]
+fn vested_amount_is_linear_between_cliff_and_end() {
+    let env = Env::default();
+    let (contract_id, _beneficiary, _token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Halfway through the linear phase (start=100, end=400).
+    env.ledger().set_timestamp(250);
+    assert_eq!(client.vested_amount(), 500);
 }
 
-fn setup<'a>(start: u64, cliff: u64, duration: u64, total: i128) -> Setup<'a> {
+#[test]
+fn vested_amount_is_full_at_and_after_end() {
+    let env = Env::default();
+    let (contract_id, _beneficiary, _token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.vested_amount(), 1_000);
+
+    env.ledger().set_timestamp(500);
+    assert_eq!(client.vested_amount(), 1_000);
+}
+
+#[test]
+fn cliff_equal_to_end_unlocks_instantly() {
+    let env = Env::default();
+    // cliff == end: no linear phase, full unlock at a single timestamp.
+    let (contract_id, _beneficiary, _token) = setup(&env, 100, 400, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Before the cliff/end boundary nothing is vested.
+    env.ledger().set_timestamp(399);
+    assert_eq!(client.vested_amount(), 0);
+
+    // At the boundary the full amount unlocks at once.
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.vested_amount(), 1_000);
+
+    // And it stays fully vested afterwards.
+    env.ledger().set_timestamp(500);
+    assert_eq!(client.vested_amount(), 1_000);
+}
+
+#[test]
+fn cliff_equal_to_end_claim_transfers_full_amount() {
+    let env = Env::default();
+    let (contract_id, beneficiary, token) = setup(&env, 100, 400, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.claimable_amount(), 1_000);
+    assert_eq!(client.claim_vested(), 1_000);
+    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 1_000);
+    assert_eq!(client.claimable_amount(), 0);
+}
+
+// Issue #233: the beneficiary is fixed at initialization and there is no
+// rotation setter. This test documents that accepted limitation: the
+// beneficiary recorded at init is the only address that can claim, and no
+// admin-gated rotation entrypoint exists on the contract.
+#[test]
+fn beneficiary_is_fixed_at_initialization() {
+    let env = Env::default();
+    let (contract_id, beneficiary, token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // The configured beneficiary is the one that receives vested funds.
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.claim_vested(), 1_000);
+    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 1_000);
+}
+
+#[test]
+fn initialize_requires_admin_auth() {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
     let beneficiary = Address::generate(&env);
-
-    let (token, token_admin) = create_token(&env, &admin);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let contract_id = env.register(FeeVesting, ());
     let client = FeeVestingClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &beneficiary, &token.address, &start, &cliff, &duration, &total);
-
-    token_admin.mint(&contract_id, &total);
-
-    Setup {
-        env,
-        client,
-        token,
-        token_admin,
-        beneficiary,
-        admin,
-    }
-}
-
-#[test]
-fn nothing_is_vested_before_the_cliff() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 1_000);
-    assert_eq!(s.client.vested_amount(), 0);
-    assert_eq!(s.client.claimable_amount(), 0);
-
-    set_time(&s.env, 1_499);
-    assert_eq!(s.client.vested_amount(), 0);
-    assert_eq!(s.client.claimable_amount(), 0);
-}
-
-#[test]
-fn cliff_unlocks_the_cliff_portion_at_once() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 1_500);
-    assert_eq!(s.client.vested_amount(), 5_000);
-    assert_eq!(s.client.claimable_amount(), 5_000);
-}
-
-#[test]
-fn vesting_is_linear_after_the_cliff() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 1_750);
-    assert_eq!(s.client.vested_amount(), 7_500);
-
-    set_time(&s.env, 2_000);
-    assert_eq!(s.client.vested_amount(), 10_000);
-}
-
-#[test]
-fn everything_is_vested_at_and_after_the_end() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 2_000);
-    assert_eq!(s.client.vested_amount(), 10_000);
-
-    set_time(&s.env, 9_999);
-    assert_eq!(s.client.vested_amount(), 10_000);
-}
-
-#[test]
-fn claim_transfers_only_the_unlocked_amount() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 1_500);
-    let claimed = s.client.claim_vested();
-    assert_eq!(claimed, 5_000);
-    assert_eq!(s.token.balance(&s.beneficiary), 5_000);
-    assert_eq!(s.client.claimable_amount(), 0);
-
-    set_time(&s.env, 1_750);
-    let claimed = s.client.claim_vested();
-    assert_eq!(claimed, 2_500);
-    assert_eq!(s.token.balance(&s.beneficiary), 7_500);
-
-    set_time(&s.env, 2_000);
-    let claimed = s.client.claim_vested();
-    assert_eq!(claimed, 2_500);
-    assert_eq!(s.token.balance(&s.beneficiary), 10_000);
-}
-
-#[test]
-#[should_panic]
-fn claim_reverts_when_nothing_is_claimable() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 1_200);
-    s.client.claim_vested();
-}
-
-#[test]
-#[should_panic]
-fn claim_reverts_when_already_fully_claimed() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 2_000);
-    s.client.claim_vested();
-    s.client.claim_vested();
-}
-
-#[test]
-fn claimable_amount_tracks_claimed_balance() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    set_time(&s.env, 1_500);
-    assert_eq!(s.client.claimable_amount(), 5_000);
-    s.client.claim_vested();
-    assert_eq!(s.client.claimable_amount(), 0);
-
-    set_time(&s.env, 1_750);
-    assert_eq!(s.client.claimable_amount(), 2_500);
-}
-
-#[test]
-fn zero_cliff_vests_linearly_from_start() {
-    let s = setup(1_000, 0, 1_000, 10_000);
-
-    set_time(&s.env, 1_000);
-    assert_eq!(s.client.vested_amount(), 0);
-
-    set_time(&s.env, 1_500);
-    assert_eq!(s.client.vested_amount(), 5_000);
-}
-
-#[test]
-fn schedule_is_immutable_after_initialize() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-
-    let result = s.client.try_initialize(
-        &s.admin,
-        &s.beneficiary,
-        &s.token.address,
+    // Without mocking auth, a caller that is not the admin must be rejected
+    // by the `admin.require_auth()` gate in `initialize()`, preventing a
+    // front-runner from initializing with attacker-controlled parameters.
+    env.set_auths(&[]);
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token,
         &1_000,
         &500,
         &1_000,
@@ -190,11 +150,224 @@ fn schedule_is_immutable_after_initialize() {
 }
 
 #[test]
-fn only_beneficiary_can_claim() {
-    let s = setup(1_000, 500, 1_000, 10_000);
-    set_time(&s.env, 1_500);
+fn zero_total_schedule_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-    let stranger = Address::generate(&s.env);
-    let result = s.client.try_claim_vested_as(&stranger);
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let contract_id = env.register(FeeVesting, ());
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let result = client.try_initialize(
+        &admin,
+        &beneficiary,
+        &token,
+        &1_000,
+        &500,
+        &1_000,
+        &0,
+    );
     assert!(result.is_err());
+}
+
+#[test]
+fn near_i128_max_total_does_not_overflow_vested_amount() {
+    // Total close to i128::MAX with a multi-year span. The vested computation
+    // multiplies total by elapsed time, so this exercises the near-overflow
+    // path and asserts a sane partial amount is returned instead of panicking.
+    let env = Env::default();
+    let total: i128 = i128::MAX - 1;
+    let start: u64 = 1_000;
+    let duration: u64 = 4 * 365 * 24 * 60 * 60; // ~4 years
+    let end = start + duration;
+    let (contract_id, _beneficiary, _token) = setup(&env, start, start, end, total);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Halfway through the schedule: expect roughly half of total vested.
+    env.ledger().set_timestamp(start + duration / 2);
+    let vested = client.vested_amount();
+    assert!(vested > 0, "vested amount should be positive mid-schedule");
+    assert!(vested <= total, "vested amount must not exceed total");
+    // Allow a small rounding tolerance around the expected half.
+    let expected = total / 2;
+    let diff = if vested > expected { vested - expected } else { expected - vested };
+    assert!(diff <= 2, "vested amount should be ~half of total");
+
+    // At the end of the schedule everything is vested, capped at total.
+    env.ledger().set_timestamp(end);
+    assert_eq!(client.vested_amount(), total);
+}
+
+#[test]
+fn rescue_stray_token_transfers_balance_to_admin() {
+    // A stray token (not the vesting token) sent to the contract can be swept
+    // by the admin to a recipient, without touching the vesting token balance.
+    let env = Env::default();
+    let (contract_id, _beneficiary, token) = setup(&env, 500, 1_000, 1_000, 10_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let stray_admin = Address::generate(&env);
+    let stray = env
+        .register_stellar_asset_contract_v2(stray_admin.clone())
+        .address();
+    StellarAssetClient::new(&env, &stray).mint(&contract_id, &4_242);
+    let stray_client = TokenClient::new(&env, &stray);
+
+    let recipient = Address::generate(&env);
+    client.rescue_token(&stray, &recipient);
+
+    assert_eq!(stray_client.balance(&recipient), 4_242);
+    assert_eq!(stray_client.balance(&contract_id), 0);
+    // Vesting token balance is untouched by the rescue.
+    assert_eq!(TokenClient::new(&env, &token).balance(&contract_id), 10_000);
+}
+
+#[test]
+#[should_panic]
+fn rescue_reverts_when_targeting_the_vesting_token() {
+    // The rescue path must never be able to drain the vesting token balance.
+    let env = Env::default();
+    let (contract_id, _beneficiary, token) = setup(&env, 500, 1_000, 1_000, 10_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    let recipient = Address::generate(&env);
+    client.rescue_token(&token, &recipient);
+}
+
+#[test]
+fn multiple_claims_accumulate_correctly() {
+    // Test that multiple partial claims work correctly and the beneficiary
+    // receives the cumulative vested amount minus what was already claimed.
+    let env = Env::default();
+    let (contract_id, beneficiary, token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+
+    // First claim at 25% vested (time=175, halfway between start=100 and cliff=200).
+    env.ledger().set_timestamp(250);
+    let first_claim = client.claim_vested();
+    assert_eq!(first_claim, 500);
+    assert_eq!(token_client.balance(&beneficiary), 500);
+    assert_eq!(client.claimable_amount(), 0);
+
+    // Second claim at 75% vested (time=325).
+    env.ledger().set_timestamp(325);
+    let second_claim = client.claim_vested();
+    assert_eq!(second_claim, 250); // 750 total vested - 500 already claimed
+    assert_eq!(token_client.balance(&beneficiary), 750);
+
+    // Final claim after full vesting.
+    env.ledger().set_timestamp(400);
+    let third_claim = client.claim_vested();
+    assert_eq!(third_claim, 250); // 1000 total - 750 already claimed
+    assert_eq!(token_client.balance(&beneficiary), 1_000);
+    assert_eq!(client.claimable_amount(), 0);
+}
+
+#[test]
+fn claimable_amount_reflects_unclaimed_vested_tokens() {
+    // Verify that claimable_amount() correctly shows the difference between
+    // vested and already-claimed amounts.
+    let env = Env::default();
+    let (contract_id, beneficiary, token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Before cliff: nothing is claimable.
+    env.ledger().set_timestamp(150);
+    assert_eq!(client.claimable_amount(), 0);
+
+    // At 50% vested: full amount is claimable.
+    env.ledger().set_timestamp(250);
+    assert_eq!(client.claimable_amount(), 500);
+
+    // Claim 500 tokens.
+    client.claim_vested();
+    assert_eq!(client.claimable_amount(), 0);
+    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 500);
+
+    // Move to 75% vested: 250 more tokens become claimable.
+    env.ledger().set_timestamp(325);
+    assert_eq!(client.claimable_amount(), 250);
+
+    // At 100% vested: remaining 250 tokens are claimable.
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.claimable_amount(), 500);
+}
+
+#[test]
+fn start_equal_to_cliff_vests_linearly_from_start() {
+    // When start == cliff, vesting begins immediately without a waiting period.
+    let env = Env::default();
+    let (contract_id, _beneficiary, _token) = setup(&env, 100, 100, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Before start: nothing vested.
+    env.ledger().set_timestamp(50);
+    assert_eq!(client.vested_amount(), 0);
+
+    // At start (which equals cliff): vesting begins immediately.
+    env.ledger().set_timestamp(100);
+    assert_eq!(client.vested_amount(), 0);
+
+    // 25% through the vesting period.
+    env.ledger().set_timestamp(175);
+    assert_eq!(client.vested_amount(), 250);
+
+    // 50% through the vesting period.
+    env.ledger().set_timestamp(250);
+    assert_eq!(client.vested_amount(), 500);
+
+    // At end: fully vested.
+    env.ledger().set_timestamp(400);
+    assert_eq!(client.vested_amount(), 1_000);
+}
+
+#[test]
+fn claim_vested_requires_beneficiary_auth() {
+    // Only the beneficiary should be able to claim vested tokens.
+    let env = Env::default();
+    let (contract_id, beneficiary, _token) = setup(&env, 100, 200, 400, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    env.ledger().set_timestamp(400);
+    
+    // Clear all auths to test authorization.
+    env.set_auths(&[]);
+    
+    // Attempt to claim without proper auth should fail.
+    let result = client.try_claim_vested();
+    assert!(result.is_err());
+
+    // With beneficiary auth, claim should succeed.
+    env.mock_all_auths();
+    assert_eq!(client.claim_vested(), 1_000);
+}
+
+#[test]
+fn vesting_with_very_short_duration() {
+    // Test edge case with a very short vesting duration (1 second).
+    let env = Env::default();
+    let (contract_id, beneficiary, token) = setup(&env, 1_000, 1_000, 1_001, 1_000);
+    let client = FeeVestingClient::new(&env, &contract_id);
+
+    // Before start: nothing vested.
+    env.ledger().set_timestamp(999);
+    assert_eq!(client.vested_amount(), 0);
+
+    // At start: vesting begins.
+    env.ledger().set_timestamp(1_000);
+    assert_eq!(client.vested_amount(), 0);
+
+    // At end (1 second later): fully vested.
+    env.ledger().set_timestamp(1_001);
+    assert_eq!(client.vested_amount(), 1_000);
+
+    // Claim should transfer full amount.
+    client.claim_vested();
+    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 1_000);
 }

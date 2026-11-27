@@ -9,7 +9,7 @@
 //! - the timelock works and every payer gets an exit before new code runs;
 //! - a failed or abandoned upgrade leaves the running contract untouched;
 //! - storage written by one version decodes identically in the next
-    assert_eq!(c.version(), 2);
+//!   (golden XDR pins below);
 //! - end to end with real WASM: v2 with pending questions, upgrade to v3,
 //!   everything settles exactly once with exact accounting.
 
@@ -324,12 +324,13 @@ fn hex(b: &Bytes) -> String {
 fn storage_layout_is_pinned() {
     let env = Env::default();
     let addr = Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
-    let q = StoredQuestion {
+    let q = Question {
         payer: addr.clone(),
         amount: 2_500_000,
         status: Status::Pending,
         created_at: 1_000,
         timeout_ledgers: 100,
+        token: addr.clone(),
     };
     let pending = PendingUpgrade {
         wasm_hash: fake_hash(&env, 0xab),
@@ -375,7 +376,7 @@ fn storage_layout_is_pinned() {
         (
             "Question",
             q.to_xdr(&env),
-            "0000001100000001000000050000000f00000006616d6f756e7400000000000a000000000000000000000000002625a00000000f0000000a637265617465645f6174000000000003000003e80000000f00000005706179657200000000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000673746174757300000000001000000001000000010000000f0000000750656e64696e67000000000f0000000f74696d656f75745f6c656467657273000000000300000064",
+            "0000001100000001000000060000000f00000006616d6f756e7400000000000a000000000000000000000000002625a00000000f0000000a637265617465645f6174000000000003000003e80000000f00000005706179657200000000000012000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f0000000673746174757300000000001000000001000000010000000f0000000750656e64696e67000000000f0000000f74696d656f75745f6c6564676572730000000003000000640000000f00000005746f6b656e000000000000120000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
         ),
         ("PendingUpgrade", pending.to_xdr(&env), "0000001100000001000000020000000f0000000d65786563757461626c655f61740000000000000300021fe80000000f000000097761736d5f686173680000000000000d00000020abababababababababababababababababababababababababababababababab"),
     ];
@@ -394,7 +395,6 @@ fn storage_layout_is_pinned() {
 /// place to v3 (the upgrade-test-v3 build), then everything settled and
 /// drained. Every stroop is accounted for.
 #[test]
-#[ignore = "needs WASM artifacts: scripts/build-wasm.sh"]
 fn worked_example_v2_to_v3_with_pending_questions() {
     let v2 = test_wasm::load(test_wasm::RELEASE);
     let v3 = test_wasm::load(test_wasm::UPGRADE_V3);
@@ -462,7 +462,7 @@ fn worked_example_v2_to_v3_with_pending_questions() {
     // --- v3: settle everything still pending. ---
     c.resolve(&1, &Vec::from_array(env, [w1.clone(), w3.clone()]), &Vec::from_array(env, [loser.clone()]), &BytesN::from_array(&env, &[0u8; 32]));
     c.refund(&2);
-    c.resolve(&4, &Vec::from_array(env, [w2.clone()]), &Vec::new(env));
+    c.resolve(&4, &Vec::from_array(env, [w2.clone()]), &Vec::new(env), &BytesN::from_array(&env, &[0u8; 32]));
     c.refund_timeout(&5);
 
     // Nothing settles twice, under either version.
@@ -484,10 +484,13 @@ fn worked_example_v2_to_v3_with_pending_questions() {
     assert_eq!(tc.balance(&fx.contract_id), 0, "nothing left stuck in the contract");
     assert_eq!(total(), minted, "nothing created or destroyed");
     let slash = 1_000_000 * 500 / 10_000;
-    assert_eq!(tc.balance(&fx.platform), 500_000 * 3 + slash);
-    assert_eq!(tc.balance(&w1), 1_000_000 + 1_000_000); // q10 half + q1 half
+    let worker_slash_portion = slash * SLASH_REDISTRIBUTE_BPS / BPS_DENOM;
+    let platform_slash_portion = slash - worker_slash_portion;
+    let redist_per_winner = worker_slash_portion / 2;
+    assert_eq!(tc.balance(&fx.platform), 500_000 * 3 + platform_slash_portion);
+    assert_eq!(tc.balance(&w1), 1_000_000 + 1_000_000 + redist_per_winner); // q10 half + q1 half + slash redist
     assert_eq!(tc.balance(&w2), 1_000_000 + 2_000_000); // q10 half + q4 whole pool
-    assert_eq!(tc.balance(&w3), 1_000_000); // q1 half
+    assert_eq!(tc.balance(&w3), 1_000_000 + redist_per_winner); // q1 half + slash redist
     assert_eq!(tc.balance(&loser), 1_000_000 - slash);
     assert_eq!(tc.balance(&payer_b), AMOUNT * 2, "charged then refunded, rest withdrawn");
     assert_eq!(tc.balance(&fx.payer), AMOUNT * 100 - AMOUNT * 3, "paid for q10, q1, q4; q3 and q5 refunded");

@@ -43,7 +43,8 @@ README used to carry are no longer in it.)
 | 6 | Reconciling 4 + 5 on `main` (later merges) | Codes 15–18 collided. `QuorumTooLarge` moved to `200`; 15–19 kept #4's meaning. A client built against #5 would misread 15–18. | **D** |
 | 7 | Feature batches `#141`–`#152` | `AssetKey` enum added so multi-asset keys don't reshape `DataKey`; many new `DataKey` variants; errors in 20s/30s/100s/300s; `set_admin` now schedules a rotation instead of applying it (behavioral C) | A (+C for `set_admin`) |
 | 8 | Schema hash / category counts (`1d69e7a`) | `Question` gained `schema_hash`, but storage kept the frozen `StoredQuestion` + `+QuestionSchemaHash(u64)`; `+CategoryCount(Symbol)` | A for storage, C for `Question` return shape |
-| 9 | Circuit breaker + health view (#109/#110, this PR) | `+Paused`, `+OpenQuestionCount`, `+TotalOpenedCount`, `+TotalResolvedCount`, `+TotalRefundedCount` (instance); `+set_paused`, `+is_paused`, `+get_health`; `+ContractPaused = 400`; `+PausedChanged` event | A |
+| 9 | Circuit breaker + health view (#109/#110, this PR) | `+Paused`, `+OpenQuestionCount`, `+TotalOpenedCount`, `+TotalResolvedCount`, `+TotalRefundedCount` (instance); `+set_paused`, `+is_paused`, `+get_health`; `+ContractPaused = 403`; `+PausedChanged` event | A |
+| 10 | `ContractPaused` code correction (#427) | This table and `docs/circuit-breaker.md` previously recorded `ContractPaused = 400`, but `400` is `NoUnanimousConsensus` (per `src/lib.rs` and `CHANGELOG.md`) and `ContractPaused` is `403`. Code is canonical; docs corrected. Release note: clients matching `400` as "paused" must match `403` instead; `400` means only `NoUnanimousConsensus`. | **D** (docs) |
 
 Deployment history: every release up to v0.3.0 shipped as a **fresh
 deployment**, because the contract had no way to replace its own code. Since
@@ -51,10 +52,11 @@ deployment**, because the contract had no way to replace its own code. Since
 Class A changes can use that path; B and D should still go through a
 migration or a fresh deployment.
 
-**Known issue:** `src/lib.rs` still references `NoUpgradePending` and
-`UpgradeNotReady`, but neither variant is currently defined in
-`ContractError`. The merge in row 6 dropped them. When they are restored, give
-them **new** codes (not 16/17), for the class-D reason above.
+**Note on upgrade error codes:** the upgrade entry points reference
+`NoUpgradePending` and `UpgradeNotReady`, which are defined in
+`ContractError` as `401` and `402` respectively (see `src/lib.rs`). These
+codes were assigned in the 400s range to avoid the 15–18 collision described
+in row 6; do not renumber or reuse them (class D).
 
 ## PR checklist (copy into the PR description)
 

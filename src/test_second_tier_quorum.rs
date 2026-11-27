@@ -147,6 +147,18 @@ fn second_tier_quorum_can_overturn_the_first_quorums_consensus() {
     let q = c.get_question(&1);
     assert_eq!(q.status, Status::Resolved, "question must be Resolved after escalate_resolve");
 
+    let (_, topics, data) = f.env.events().all().last().unwrap();
+    assert_eq!(
+        topics.get(0).unwrap().into_val(&f.env),
+        Symbol::new(&f.env, "escalation_resolved")
+    );
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = data.into_val(&f.env);
+    let overturned: bool = data
+        .get(Symbol::new(&f.env, "overturned"))
+        .unwrap()
+        .into_val(&f.env);
+    assert!(overturned, "EscalationResolved must report the overturn");
+
     let fee = AMOUNT * 2000 / 10_000;
     // w2 is now the winner — must be credited.
     assert_eq!(c.get_owed(&w2), AMOUNT - fee, "winner not credited after second quorum overturn");
@@ -169,4 +181,55 @@ fn escalate_resolve_rejects_non_disputed_question() {
     // Question is still Pending — escalate_resolve must fail.
     let res = c.try_escalate_resolve(&1, &wv, &lv);
     assert_eq!(res, Err(Ok(ContractError::QuestionNotDisputed)));
+}
+
+#[test]
+fn escalate_resolve_redistributes_slashed_stake_to_winners() {
+    let f = setup();
+    let c = client(&f);
+
+    f.env.mock_all_auths();
+    let w1 = Address::generate(&f.env);
+    let w2 = Address::generate(&f.env);
+    let w3 = Address::generate(&f.env);
+    let loser = Address::generate(&f.env);
+
+    let stake_amount: i128 = 500_000;
+    soroban_sdk::token::StellarAssetClient::new(&f.env, &f.token_address)
+        .mint(&loser, &stake_amount);
+    c.stake(&loser, &stake_amount);
+
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    let winners = Vec::from_array(&f.env, [w1.clone(), w2.clone(), w3.clone()]);
+    let losers = Vec::from_array(&f.env, [loser]);
+
+    let tok = soroban_sdk::token::Client::new(&f.env, &f.token_address);
+    let platform_before = tok.balance(&f.platform);
+
+    c.escalate(&1, &winners, &losers);
+    c.escalate_resolve(&1, &winners, &losers);
+
+    let fee = AMOUNT * PLATFORM_FEE_BPS / BPS_DENOM;
+    let pool = AMOUNT - fee;
+    let share = pool / 3;
+    let dust = pool - share * 3;
+    let slashed = (AMOUNT * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM).min(stake_amount);
+    let worker_portion = slashed * SLASH_REDISTRIBUTE_BPS / BPS_DENOM;
+    let platform_portion = slashed - worker_portion;
+    let redist_share = worker_portion / 3;
+    let redist_dust = worker_portion - redist_share * 3;
+
+    for w in [&w1, &w2, &w3] {
+        assert_eq!(
+            c.get_owed(w),
+            share + redist_share,
+            "each matching worker must receive base share + redistributed slash share"
+        );
+    }
+    assert_eq!(
+        tok.balance(&f.platform) - platform_before,
+        fee + dust + platform_portion + redist_dust,
+        "platform must receive fee + dust + platform slash portion + redistribution dust"
+    );
 }

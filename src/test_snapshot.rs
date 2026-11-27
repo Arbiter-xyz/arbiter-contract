@@ -53,6 +53,36 @@ fn get_historical_stake_returns_the_correct_value_for_a_past_snapshot() {
 }
 
 #[test]
+fn snapshot_stake_records_settled_plus_warming_and_excludes_unbonding() {
+    let fx = setup();
+    let client = OracleEscrowClient::new(&fx.env, &fx.contract_id);
+    let worker = Address::generate(&fx.env);
+    token::StellarAssetClient::new(&fx.env, &fx.token_address).mint(&worker, &(AMOUNT * 2));
+
+    // AMOUNT becomes settled once the warmup has elapsed; a second AMOUNT is
+    // still warming.
+    client.stake(&worker, &AMOUNT);
+    fx.env
+        .ledger()
+        .with_mut(|li| li.sequence_number += STAKE_WARMUP_LEDGERS);
+    client.stake(&worker, &AMOUNT);
+    // Unbonding draws from warming first, so half of the warming amount is
+    // left warming and the other half moves into the slashable bucket.
+    client.begin_unstake(&worker, &(AMOUNT / 2));
+
+    let info = client.get_stake_info(&worker);
+    assert_eq!(info.settled, AMOUNT);
+    assert_eq!(info.warming, AMOUNT / 2);
+    assert_eq!(info.unbonding, AMOUNT / 2);
+
+    let ledger = client.snapshot_stake(&worker);
+    let snapshot = client.get_historical_stake(&worker, &ledger);
+    assert_eq!(snapshot, client.get_stake(&worker));
+    // settled + warming, with the unbonding AMOUNT / 2 excluded.
+    assert_eq!(snapshot, AMOUNT + AMOUNT / 2);
+}
+
+#[test]
 fn get_historical_stake_fails_when_no_snapshot_exists_at_that_ledger() {
     let fx = setup();
     let client = OracleEscrowClient::new(&fx.env, &fx.contract_id);

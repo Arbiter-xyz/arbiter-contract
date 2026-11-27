@@ -90,6 +90,33 @@ under testnet's settings:
 | `touch_question(id)`, permissionless | Keep-alive for a question whose timeout exceeds `max_entry_ttl`, or for a settled record someone wants readable. Needs no signature. | `touch_question_is_permissionless_and_re_extends_a_decayed_entry` |
 | `touch(address)` now also covers the prepaid `Balance` | A payer who deposits once and goes quiet was in the same position as a worker who earns once. | `touch_now_also_covers_a_payers_prepaid_balance` |
 
+## Coverage of the newer persistent keys (#283)
+
+#28's TTL audit named only `Balance`, `Stake` and `Owed`. The keys added
+since then were reviewed against the same question — does each have a
+keep-alive path, or could it archive with no caller ever touching it again?
+
+| key | keep-alive path | verdict |
+|---|---|---|
+| `PasskeyPubkey` | Written by `register_passkey()`, which extends that entry; read only by `verify_passkey_auth()` and `get_passkey_pubkey()`. Neither read re-extends the TTL, and `verify_passkey_auth()` does not bump the instance/code either. | No keep-alive path after registration: an unused key eventually archives. Auto-restore keeps a later verification correct, just costlier; re-registering is the only explicit refresh. |
+| `KycAttestation` | Written by `attest_kyc()` via `set_persistent()`; read only by `is_kyc_verified()`, which is informational — no settlement path reads or gates on it. | No keep-alive path and no consumer that needs it live. It can archive untouched; auto-restore keeps a cold `is_kyc_verified()` correct, and the stored `expiry_ledger` is checked independently. |
+| `StakeSnapshot` | Written by `snapshot_stake()` under `StakeSnapshot(worker, ledger)` via `set_persistent()`; read only by `get_historical_stake()` at that exact ledger. `touch(address)`/`touch_asset()` extend only Owed/Stake/Balance, never this key. | No keep-alive path: snapshots archive on their own TTL and cannot be refreshed in place (`snapshot_stake()` only writes at the current ledger). Auto-restore keeps a historical lookup correct, just costlier. |
+| `ChallengerBond` | Written when a challenge is opened; read by the resolution path that settles or slashes it. | Fine as-is: the resolution path reads it, and auto-restore covers a cold read. |
+| `PendingResolution` | Written when a question enters resolution; read by the finalize path. | Fine as-is: read on the path that finalizes it. |
+| `EscalatedQuestion` | Written on escalation; read by the escalation-resolution path. | Fine as-is: read on the path that resolves it. |
+| `QuestionTemplate` | Written by the template-authoring call; read when a question is created from it. | Fine as-is: read on the create path, and auto-restore covers a cold read. |
+
+Conclusion: there is no fund-safety gap, but three of these keys have no
+keep-alive path: `PasskeyPubkey`, `KycAttestation` and `StakeSnapshot`. None
+holds funds or gates settlement, so archival cannot strand money. The earlier
+claim that `touch(address)` protects `StakeSnapshot` was wrong: it extends only
+Owed/Stake/Balance (and `touch_asset()` the asset-scoped equivalents), not
+snapshots. Protocol 23 auto-restore keeps a cold read of all three correct, just
+costlier. `ChallengerBond`, `PendingResolution`, `EscalatedQuestion` and
+`QuestionTemplate` are read on the path that consumes them, with the same
+cold-read trade-off. The backend sweep below is the operational backstop for
+Owed/Stake/Balance only.
+
 ## Operational guidance
 
 - **Backend sweep:** once a day, call `touch_question` on questions older than

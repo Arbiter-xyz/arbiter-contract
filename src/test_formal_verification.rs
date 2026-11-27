@@ -32,7 +32,7 @@
 //! For all `amount: i128` ≥ 1 and `n: i128` ∈ [1, MAX_QUORUM_SIZE]:
 //!
 //! ```text
-//! let fee  = amount * PLATFORM_FEE_BPS / BPS_DENOM
+//! let fee  = mul_bps(amount, PLATFORM_FEE_BPS)
 //! let pool = amount - fee
 //! let share = pool / n
 //! let dust  = pool - share * n
@@ -46,7 +46,7 @@
 
 extern crate std;
 
-use super::{BPS_DENOM, PLATFORM_FEE_BPS, MAX_QUORUM_SIZE};
+use super::{PLATFORM_FEE_BPS, MAX_QUORUM_SIZE};
 
 /// Expresses the fee/pool/share/dust arithmetic as a pure Rust function that
 /// a future Kani harness can `kani::verify` over all i128 inputs without
@@ -58,7 +58,7 @@ pub fn resolve_arithmetic_invariant(amount: i128, n: i128) -> bool {
     if amount < 1 || n < 1 || n > MAX_QUORUM_SIZE as i128 {
         return true; // out of domain — vacuously true
     }
-    let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+    let fee = OracleEscrow::mul_bps(amount, PLATFORM_FEE_BPS);
     let pool = amount - fee;
     if pool < 0 {
         return false; // fee > amount: arithmetic error
@@ -112,7 +112,7 @@ fn resolve_arithmetic_invariant_at_max_quorum() {
 #[test]
 fn resolve_arithmetic_invariant_single_worker_has_no_dust() {
     for amount in [1i128, 2_500_000, 1_000_000_000] {
-        let fee = amount * PLATFORM_FEE_BPS / BPS_DENOM;
+        let fee = OracleEscrow::mul_bps(amount, PLATFORM_FEE_BPS);
         let pool = amount - fee;
         let share = pool / 1;
         let dust = pool - share * 1;

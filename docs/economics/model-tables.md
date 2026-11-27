@@ -44,6 +44,8 @@ balances usable from contract code, so the work below is a spike only.
 | `resolve()` — pool | `pool = amount - fee` | `C_pool = C - C_fee` (homomorphic subtraction); no plaintext `pool` is ever materialized on-chain. |
 | `resolve()` — share | `share = pool / n` | Division is **not** linear over commitments. Needs either a per-recipient commitment with a proof of correct split, or a confidential-transfer primitive that supports `pool / n` directly. This is the hardest gap. |
 | `resolve()` — dust | `dust = pool - share * n` | `C_dust = C_pool - n * C_share`; requires the same proof machinery as `share`, plus a proof that `dust < n`. |
+| `distribute_slashes()` | `slash_cap = amount * SLASH_CAP_BPS_OF_AMOUNT / BPS_DENOM`, then splitting slashed stakes into worker redistribution shares and platform portions | Homomorphic scaling of `amount` to derive `C_slash_cap`, plus confidential splitting of slashed stakes into worker redistribution shares and platform portions with division and remainder proofs. |
+| `route_platform_take()` | `public_goods_share = platform_take * public_goods_bps / BPS_DENOM`, `platform_remainder = platform_take - public_goods_share` (where `platform_take` is derived from plaintext `fee`, `dust`, and slash amounts) | Homomorphic scaling and subtraction over the `platform_take` commitment (`C_platform_take`) to produce confidential shares for public goods and platform remainder, plus range proofs for well-formedness. |
 | `do_refund()` | Refunds plaintext `amount` to the asker | Refund the original commitment `C` (or a re-blinded equivalent) with a proof that the refunded value equals the escrowed value. |
 
 ### Open questions / tradeoffs

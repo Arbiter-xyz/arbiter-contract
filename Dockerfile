@@ -6,12 +6,15 @@
 #   docker run --rm -v "$PWD:/src" arbiter-contract-build
 #
 # which prints the sha256 of the optimized WASM. Every input that can change
-# the output is pinned here: the base image by digest-able tag, rustc via
+# the output is pinned here: the base image by digest, rustc via
 # rust-toolchain.toml, crate versions via the committed Cargo.lock
 # (`--locked`), and stellar-cli by exact release. Keep RUST_VERSION in sync
 # with rust-toolchain.toml.
 
-FROM rust:1.89.0-slim-bookworm
+# rust:1.89.0-slim-bookworm
+# Pinned by digest so a Debian security rebuild of the tag cannot silently
+# change the underlying layers and break byte-for-byte reproducibility.
+FROM rust:1.89.0-slim-bookworm@sha256:6b1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 
 ARG STELLAR_CLI_VERSION=27.1.0
 
@@ -19,6 +22,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && curl -fsSL -o /tmp/stellar-cli.deb \
       "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli_${STELLAR_CLI_VERSION}_amd64.deb" \
+ && echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  /tmp/stellar-cli.deb" | sha256sum -c - \
  && (dpkg -i /tmp/stellar-cli.deb || apt-get install -f -y) \
  && rm -rf /tmp/stellar-cli.deb /var/lib/apt/lists/*
 

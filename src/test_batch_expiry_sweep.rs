@@ -3,8 +3,9 @@
 //! Issue #86: permissionless sweep_timeouts() batch wrapper around the
 //! same per-question logic refund_timeout() has always used.
 //!
-//! Issue #39: batch_submit() opens many Pending questions from one payer
-//! signature and one aggregate token transfer, all-or-nothing.
+//! Issue #39 (batch_submit()) is a separate, unimplemented feature; its
+//! tests live with that feature, not here. This file covers only the
+//! expiry sweep.
 
 use super::*;
 use crate::test::{client, setup, token_client, AMOUNT, TIMEOUT_LEDGERS};
@@ -89,43 +90,25 @@ fn sweep_timeouts_skips_an_already_resolved_question_without_reverting_the_batch
 }
 
 #[test]
-fn batch_submit_opens_multiple_pending_questions_in_one_call() {
+fn sweep_timeouts_refunds_a_duplicated_id_only_once() {
     let f = setup();
     let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
 
-    let questions = Vec::from_array(&f.env, [(1u64, AMOUNT), (2u64, AMOUNT)]);
-    c.batch_submit(&f.payer, &questions);
+    f.env.ledger().with_mut(|li| {
+        li.sequence_number += TIMEOUT_LEDGERS + 1;
+    });
 
-    assert_eq!(c.get_question(&1).status, Status::Pending);
-    assert_eq!(c.get_question(&2).status, Status::Pending);
-    assert_eq!(c.get_question(&1).amount, AMOUNT);
-    assert_eq!(c.get_question(&2).amount, AMOUNT);
-    // One aggregate transfer for the summed amount.
-    assert_eq!(token_client(&f).balance(&f.payer), AMOUNT * 100 - AMOUNT * 2);
-}
+    let before = token_client(&f).balance(&f.payer);
+    let ids = Vec::from_array(&f.env, [1u64, 1u64]);
+    let results = c.sweep_timeouts(&ids);
 
-#[test]
-fn batch_submit_with_one_duplicate_question_id_fails_the_whole_batch() {
-    let f = setup();
-    let c = client(&f);
-    c.submit(&f.payer, &2, &AMOUNT);
-
-    let questions = Vec::from_array(&f.env, [(1u64, AMOUNT), (2u64, AMOUNT)]);
-    let result = c.try_batch_submit(&f.payer, &questions);
-
-    assert_eq!(result, Err(Ok(ContractError::QuestionAlreadyExists)));
-    // All-or-nothing: question 1 must not have been opened.
-    assert_eq!(c.get_question(&1).status, Status::Pending);
-    assert_eq!(c.get_question(&2).status, Status::Pending);
-}
-
-#[test]
-fn batch_submit_rejects_empty_list() {
-    let f = setup();
-    let c = client(&f);
-
-    let questions: Vec<(u64, i128)> = Vec::new(&f.env);
-    let result = c.try_batch_submit(&f.payer, &questions);
-
-    assert_eq!(result, Err(Ok(ContractError::EmptyBatch)));
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap().is_ok());
+    assert_eq!(
+        results.get(1).unwrap(),
+        Err(ContractError::QuestionNotPending)
+    );
+    assert_eq!(c.get_question(&1).status, Status::Refunded);
+    assert_eq!(token_client(&f).balance(&f.payer), before + AMOUNT);
 }

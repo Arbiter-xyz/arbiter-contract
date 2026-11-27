@@ -18,19 +18,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WASM_OUT="${ROOT_DIR}/target/wasm32-unknown-unknown/release/oracle_escrow.wasm"
+# Keep the target in lockstep with rust-toolchain.toml, ci.yml and release.yml.
+WASM_TARGET="wasm32v1-none"
+WASM_OUT="${ROOT_DIR}/target/${WASM_TARGET}/release/oracle_escrow.wasm"
 BINDINGS_DIR="${ROOT_DIR}/bindings"
 
 # Languages we ship raw call/type bindings for. Each entry is a directory under
-# `bindings/` containing a generator that maps the contract's 14 entry points
-# (initialize, submit, deposit, withdraw_balance, charge, resolve, stake,
-# unstake, withdraw, withdraw_to, touch, refund, refund_timeout, set_admin,
-# set_timeout_ledgers) plus the `get_*` reads and the Question/Status/
-# ContractError types to that language's native shapes.
+# `bindings/` containing a generator that maps the contract's full XDR spec —
+# every public entry point, the `get_*` reads and the Question/Status/
+# ContractError types — to that language's native shapes.
 BINDING_LANGS=("python" "go")
 
 BUILD_WASM=1
-BUILD_BINDINGS=1
+# Default to wasm-only: binding generators (bindings/*/generate.sh) are not
+# committed to this repo, so running with BUILD_BINDINGS=1 would fail on a
+# clean checkout. Pass --bindings-only or omit --wasm-only to regenerate.
+BUILD_BINDINGS=0
 for arg in "$@"; do
   case "$arg" in
     --wasm-only) BUILD_BINDINGS=0 ;;
@@ -47,8 +50,12 @@ for arg in "$@"; do
 done
 
 if [[ "$BUILD_WASM" -eq 1 ]]; then
-  echo "==> building contract wasm"
-  (cd "$ROOT_DIR" && cargo build --target wasm32-unknown-unknown --release)
+  echo "==> building contract wasm (${WASM_TARGET})"
+  (cd "$ROOT_DIR" && stellar contract build)
+  echo "==> building upgrade-test-v3 fixture"
+  (cd "$ROOT_DIR" && stellar contract build --features upgrade-test-v3 --out-dir target/wasm32v1-none/release-upgrade-test-v3)
+  echo "==> building bench-uncapped-quorum fixture"
+  (cd "$ROOT_DIR" && stellar contract build --features bench-uncapped-quorum --out-dir target/wasm32v1-none/release-bench-uncapped-quorum)
 fi
 
 if [[ "$BUILD_BINDINGS" -eq 1 ]]; then

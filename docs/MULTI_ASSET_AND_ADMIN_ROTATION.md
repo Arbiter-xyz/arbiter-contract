@@ -2,7 +2,7 @@
 
 ## Asset trust boundary
 
-`initialize()` allowlists the configured token as the default asset. The
+The constructor (`__constructor`) allowlists the configured token as the default asset. The
 admin must call `set_asset_allowed(token, true)` before any other token can
 be used. `submit_asset`, `deposit_asset`, `charge_asset`, and `stake_asset`
 reject every token not on that list. The allowlist is the trust boundary:
@@ -119,7 +119,7 @@ entrypoints first.
 
 Existing single-token integrations need no migration. `submit`, `deposit`,
 `charge`, `stake`, `withdraw`, and `refund` keep their signatures and target
-the token set at `initialize()`, which is allowlisted automatically. Only
+the token set in the constructor, which is allowlisted automatically. Only
 callers that want a second asset call the `*_asset` variants, after the admin
 has run `set_asset_allowed(token, true)`; an unlisted token fails with
 `ContractError::AssetNotAllowed`. Settlement (`resolve`, `refund`,
