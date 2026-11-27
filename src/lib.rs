@@ -1314,6 +1314,22 @@ pub struct BalanceMigrated {
     pub target: Address,
 }
 
+/// Emitted on the target by import_balances() for each (address, token) it
+/// credits, so an indexer watching the target sees balances arrive and can
+/// match them to the source's BalanceMigrated event.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BalanceImported {
+    #[topic]
+    pub address: Address,
+    #[topic]
+    pub token: Address,
+    pub stake: i128,
+    pub owed: i128,
+    pub balance: i128,
+    pub source: Address,
+}
+
 /// #49: emitted when escalate() moves a question to the Disputed state.
 #[contractevent]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5415,6 +5431,16 @@ impl OracleEscrow {
             Self::set_persistent(&env, &bal_key, &updated);
             Self::track_participant(&env, &address);
         }
+
+        BalanceImported {
+            address,
+            token,
+            stake: stake_amount,
+            owed: owed_amount,
+            balance: balance_amount,
+            source,
+        }
+        .publish(&env);
 
         Self::bump_instance(&env);
         Ok(())
