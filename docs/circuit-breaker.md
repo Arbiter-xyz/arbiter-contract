@@ -27,8 +27,8 @@ original payers and cannot be redirected. What does protect payers is that
 
 | Entry point | Paused? |
 |---|---|
-| `submit`, `submit_with_schema_hash`, `submit_with_category`, `submit_asset` | **rejected** with `ContractPaused` (400) |
-| `deposit`, `deposit_asset` | **rejected** (new prepaid funds from the payer) |
+| `submit`, `submit_with_schema_hash`, `submit_with_category`, `submit_asset` | **rejected** with `ContractPaused` (403) |
+| `deposit`, `deposit_asset` | **rejected** |
 | `charge`, `charge_asset` | **rejected** (checked in `charge_for_token`) |
 | `stake`, `stake_asset` | **rejected** (worker posts a new bond) |
 | `post_challenge_bond` | **rejected** (challenger posts a new bond) |
