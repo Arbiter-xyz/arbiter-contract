@@ -19,6 +19,9 @@ on:
       - ".github/workflows/reproducible-build.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   runner:
     name: build on runner
@@ -26,7 +29,7 @@ jobs:
     outputs:
       hash: ${{ steps.build.outputs.hash }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       # rustup reads rust-toolchain.toml, so this installs the pinned rustc.
       - run: rustup show
       - name: Install pinned Stellar CLI
@@ -35,6 +38,8 @@ jobs:
           echo "d059dd037c386edc396ea81b109cc533f0be146ec1e2241a8210f1cbd07887ff  stellar-cli_27.1.0_amd64.deb" | sha256sum -c -
           sudo dpkg -i stellar-cli_27.1.0_amd64.deb || sudo apt-get install -f -y
       - id: build
+        env:
+          REPRO_BUILD_LABEL: runner
         run: |
           ./scripts/reproducible-build.sh
           echo "hash=$(cat target/wasm-hash.txt)" >> "$GITHUB_OUTPUT"
@@ -45,7 +50,7 @@ jobs:
     outputs:
       hash: ${{ steps.build.outputs.hash }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       # #268: the Dockerfile pins its base image by tag only, so a Debian
       # security rebuild of that tag can silently change the underlying layers
       # and break byte-for-byte reproducibility. Resolve the tag to its current
@@ -60,7 +65,7 @@ jobs:
       - run: docker build -t arbiter-contract-build .
       - id: build
         run: |
-          docker run --rm -v "$PWD:/src" arbiter-contract-build
+          docker run --rm -e REPRO_BUILD_LABEL=docker -v "$PWD:/src" arbiter-contract-build
           echo "hash=$(cat target/wasm-hash.txt)" >> "$GITHUB_OUTPUT"
 
   compare:

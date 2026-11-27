@@ -44,8 +44,15 @@ a public, cancellable announcement with an exit window:
   `open_question()`, so their deadline lands no later than
   `executable_at - 1`. Once no window is left, `submit()`/`charge()` fail
   with `UpgradeInProgress` until the upgrade executes or is cancelled.
-- **Stakes, owed earnings and prepaid balances** can be withdrawn at any
-  time anyway.
+- **Prepaid balances** can be withdrawn at any time via `withdraw_balance()`.
+- **Owed earnings** are withdrawable via `withdraw_owed()`, except for any
+  portion currently locked by a lending authority with `lock_owed()`; locked
+  owed cannot be released until the authority calls `unlock_owed()`.
+- **Stake** is not immediately withdrawable: a worker must call
+  `begin_unstake()` to start the unbonding period, then wait
+  `max(MIN_UNBONDING_LEDGERS, timeout_ledgers)` ledgers before
+  `complete_unstake()` releases the funds. Plan ahead if you need to exit
+  before an upgrade executes.
 
 So at the moment new code starts running, every question still pending
 has already had its refund deadline pass under the old code. Nobody's
@@ -146,9 +153,10 @@ stellar contract build
 shasum -a 256 target/wasm32v1-none/release/oracle_escrow.wasm   # == the wasm hash
 
 # 2. Pre-flight: the full suite, WASM tests included, must be green.
-#    Run each step separately and stop on the first failure. Do not chain
-#    with `&&`: a broken `cargo test` compile (e.g. the known 194 compile
-#    errors on some branches) must fail the gate loudly, not be masked by
+#    CI runs these steps automatically on every push; a green CI run on the
+#    release tag is the pre-flight gate (issue #501). To verify locally, run
+#    each step separately and stop on the first failure. Do not chain with
+#    `&&`: a broken `cargo test` compile must fail loudly, not be masked by
 #    an earlier step's exit code. The `--ignored` run is the WASM upgrade
 #    suite and only makes sense once the plain suite compiles and passes.
 scripts/build-wasm.sh

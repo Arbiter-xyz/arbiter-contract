@@ -56,14 +56,14 @@ required.
 
 ### Option A — Single-token instance (simplest)
 
-Deploy a fresh `OracleEscrow` instance with `initialize(token = ITS_TOKEN_ADDR)`.
+Deploy a fresh `OracleEscrow` instance with `__constructor(admin, token = ITS_TOKEN_ADDR, platform, timeout_ledgers)`.
 All questions in that instance are priced in the bridged token. Workers and
 payers interact exactly as with any other asset.
 
 ### Option B — Multi-asset instance (already supported)
 
 In an existing multi-asset-enabled instance, register the ITS token via
-`set_allowed_asset(ITS_TOKEN_ADDR, true)`. Payers can then open questions
+`set_asset_allowed(ITS_TOKEN_ADDR, true)`. Payers can then open questions
 in either the default asset or the ITS token. Arbiters receive whichever
 asset was escrowed for each question.
 

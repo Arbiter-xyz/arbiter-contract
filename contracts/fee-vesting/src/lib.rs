@@ -11,7 +11,7 @@
 //! ## Who deploys and funds it
 //!
 //! - **Deployer / admin**: the protocol deployer deploys the contract and
-//!   calls [`FeeVesting::initialize`] exactly once, passing the `admin`
+//!   it is initialized via `__constructor`, passing the `admin`
 //!   (allowed to `rescue_token`), the `beneficiary` (receives unlocked
 //!   revenue), the `token` used for payouts, and the `start`/`cliff`/`end`
 //!   schedule plus the `total` amount subject to vesting.
@@ -29,11 +29,25 @@
 //! Stray tokens sent by mistake can be recovered by the admin via
 //! [`FeeVesting::rescue_token`]; the vesting token itself cannot be swept.
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracterror, contractevent, contracttype, token, Address, Env};
+
+/// Error codes for the fee-vesting treasury.
+#[contracterror]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VestingError {
+    AlreadyInitialized = 1,
+    InvalidSchedule = 2,
+    InvalidTotal = 3,
+    NothingToClaim = 4,
+    NotBeneficiary = 5,
+    CannotRescueVestingToken = 6,
+    NothingToRescue = 7,
+    NotInitialized = 8,
+}
 
 /// Storage keys for the fee-vesting treasury contract.
 ///
-/// The schedule is fixed at `initialize()` time and cannot be mutated
+/// The schedule is fixed at constructor time and cannot be mutated
 /// afterwards: there is no governance entry point that rewrites it.
 /// The only mutable piece of configuration is the beneficiary, which the
 /// admin may rotate via `set_beneficiary` (key rotation / treasury
@@ -41,7 +55,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Add
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Address allowed to (re)initialize the schedule. Set once.
+    /// Address allowed to rotate the beneficiary via `set_beneficiary` and
+    /// recover stray tokens via `rescue_token`. Set once at `initialize()`;
+    /// the vesting schedule cannot be re-initialized.
     Admin,
     /// Address that receives unlocked fee revenue (DAO treasury / multisig).
     Beneficiary,
@@ -83,12 +99,25 @@ pub struct VestingSchedule {
     pub claimed: i128,
 }
 
+/// `vested_claimed` topics: beneficiary; data: amount paid out.
+#[contractevent]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VestedClaimed {
+    #[topic]
+    pub beneficiary: Address,
+    pub amount: i128,
+}
+
 #[contract]
 pub struct FeeVesting;
 
 #[contractimpl]
 impl FeeVesting {
-    /// Configure the vesting schedule. Callable once by the deployer.
+    /// Configure the vesting schedule atomically at deploy time.
+    ///
+    /// Using `__constructor` prevents front-running: a fresh instance cannot
+    /// be initialized by an attacker before the deployer's transaction lands
+    /// (same class of bug as arbiter-contract#23/#188).
     ///
     /// `start` is the vesting start timestamp, `cliff` the timestamp at
     /// which the first tokens unlock, and `end` the timestamp at which
@@ -96,11 +125,8 @@ impl FeeVesting {
     ///
     /// # Authorization
     ///
-    /// Requires the auth of `admin` (and `beneficiary`). This prevents a
-    /// front-runner from initializing a freshly deployed instance with
-    /// attacker-controlled parameters before the real deployer's call lands
-    /// (same class of bug as arbiter-contract#23/#188).
-    pub fn initialize(
+    /// Requires the auth of `admin` and `beneficiary`.
+    pub fn __constructor(
         env: Env,
         admin: Address,
         beneficiary: Address,
@@ -109,15 +135,12 @@ impl FeeVesting {
         cliff: u64,
         end: u64,
         total: i128,
-    ) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
-        }
+    ) -> Result<(), VestingError> {
         if start > cliff || cliff > end {
-            panic!("invalid schedule");
+            return Err(VestingError::InvalidSchedule);
         }
         if total <= 0 {
-            panic!("invalid total");
+            return Err(VestingError::InvalidTotal);
         }
 
         admin.require_auth();
@@ -131,6 +154,7 @@ impl FeeVesting {
         env.storage().instance().set(&DataKey::End, &end);
         env.storage().instance().set(&DataKey::Total, &total);
         env.storage().instance().set(&DataKey::Claimed, &0i128);
+        Ok(())
     }
 
     /// Rotate the beneficiary that receives unlocked fee revenue.
@@ -138,17 +162,18 @@ impl FeeVesting {
     /// Only the admin may call this. The vesting schedule, token, and
     /// already-claimed amount are untouched, so a key rotation or treasury
     /// migration does not disturb the unlock curve.
-    pub fn set_beneficiary(env: Env, new_beneficiary: Address) {
+    pub fn set_beneficiary(env: Env, new_beneficiary: Address) -> Result<(), VestingError> {
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("not initialized");
+            .ok_or(VestingError::NotInitialized)?;
         admin.require_auth();
 
         env.storage()
             .instance()
             .set(&DataKey::Beneficiary, &new_beneficiary);
+        Ok(())
     }
 
     /// Current beneficiary that receives unlocked fee revenue.
@@ -205,22 +230,19 @@ impl FeeVesting {
     }
 
     /// Transfer the currently-unlocked amount to the beneficiary.
-    /// Reverts when nothing is claimable.
+    /// Returns an error when nothing is claimable.
     ///
     /// # Authorization
     ///
     /// This entry point is intentionally permissionless: it does not call
     /// `require_auth()` on any address. The payout destination is always the
-    /// fixed `Beneficiary` stored at `initialize()` time, never the caller, so
+    /// fixed `Beneficiary` stored at constructor time, never the caller, so
     /// an arbitrary third party can only trigger a transfer that the
-    /// beneficiary is entitled to receive anyway. There is no fund-safety
-    /// issue — the worst a caller can do is accelerate a payout to the correct
-    /// address. Callers that want to prove beneficiary identity should use
-    /// `claim_vested_as`, which requires the beneficiary's auth.
-    pub fn claim_vested(env: Env) -> i128 {
+    /// beneficiary is entitled to receive anyway.
+    pub fn claim_vested(env: Env) -> Result<i128, VestingError> {
         let amount = Self::claimable_amount(env.clone());
         if amount <= 0 {
-            panic!("nothing to claim");
+            return Err(VestingError::NothingToClaim);
         }
 
         let beneficiary: Address = env
@@ -245,14 +267,17 @@ impl FeeVesting {
             &amount,
         );
 
-        env.events()
-            .publish((symbol_short!("vested"), beneficiary), amount);
+        VestedClaimed {
+            beneficiary,
+            amount,
+        }
+        .publish(&env);
 
-        amount
+        Ok(amount)
     }
 
     /// Same as `claim_vested`, but the caller must be the beneficiary.
-    pub fn claim_vested_as(env: Env, caller: Address) -> i128 {
+    pub fn claim_vested_as(env: Env, caller: Address) -> Result<i128, VestingError> {
         caller.require_auth();
 
         let beneficiary: Address = env
@@ -261,7 +286,7 @@ impl FeeVesting {
             .get(&DataKey::Beneficiary)
             .unwrap();
         if caller != beneficiary {
-            panic!("not beneficiary");
+            return Err(VestingError::NotBeneficiary);
         }
 
         Self::claim_vested(env)
@@ -273,24 +298,24 @@ impl FeeVesting {
     /// The vesting token itself cannot be swept: its balance backs the
     /// outstanding (unclaimed) vesting obligation, so rescuing it would
     /// strand the beneficiary. Use `claim_vested` for the vesting token.
-    pub fn rescue_token(env: Env, token: Address, to: Address) -> i128 {
+    pub fn rescue_token(env: Env, token: Address, to: Address) -> Result<i128, VestingError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
         let vesting_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         if token == vesting_token {
-            panic!("cannot rescue vesting token");
+            return Err(VestingError::CannotRescueVestingToken);
         }
 
         let client = token::Client::new(&env, &token);
         let balance = client.balance(&env.current_contract_address());
         if balance <= 0 {
-            panic!("nothing to rescue");
+            return Err(VestingError::NothingToRescue);
         }
 
         client.transfer(&env.current_contract_address(), &to, &balance);
 
-        balance
+        Ok(balance)
     }
 }
 
@@ -319,13 +344,10 @@ fn mul_wide(a: i128, b: i128) -> (u128, u128) {
 /// quotient truncated to i128. The caller guarantees the quotient fits.
 fn div_wide_by_i128((hi, lo): (u128, u128), divisor: i128) -> i128 {
     let d = divisor as u128;
-    // Long division over 128-bit limbs: process the high limb first, then the
-    // low limb, carrying the remainder between steps.
     let mut rem: u128 = 0;
     let mut quotient_hi: u128 = 0;
     let mut quotient_lo: u128 = 0;
 
-    // Divide the high limb.
     let mut i = 128;
     while i > 0 {
         i -= 1;
@@ -339,7 +361,6 @@ fn div_wide_by_i128((hi, lo): (u128, u128), divisor: i128) -> i128 {
         }
     }
 
-    // Divide the low limb, carrying the remainder from the high limb.
     let mut j = 128;
     while j > 0 {
         j -= 1;
@@ -353,8 +374,6 @@ fn div_wide_by_i128((hi, lo): (u128, u128), divisor: i128) -> i128 {
         }
     }
 
-    // The quotient is `(quotient_hi, quotient_lo)`; since the true result is
-    // `<= total <= i128::MAX`, the high limb must be zero.
     debug_assert!(quotient_hi == 0);
     quotient_lo as i128
 }

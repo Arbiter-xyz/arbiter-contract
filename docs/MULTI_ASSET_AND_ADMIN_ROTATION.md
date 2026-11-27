@@ -2,7 +2,7 @@
 
 ## Asset trust boundary
 
-`initialize()` allowlists the configured token as the default asset. The
+The constructor (`__constructor`) allowlists the configured token as the default asset. The
 admin must call `set_asset_allowed(token, true)` before any other token can
 be used. `submit_asset`, `deposit_asset`, `charge_asset`, and `stake_asset`
 reject every token not on that list. The allowlist is the trust boundary:
@@ -82,15 +82,19 @@ those actions is required.
 ## Fee-vesting beneficiary rotation
 
 The fee-vesting contract's beneficiary (the multisig/DAO address that
-receives vested fees) is fixed at `initialize()` and has no setter. This is
-an intentional limitation, not an oversight: the beneficiary is expected to
-be a contract account or multisig, so key rotation and treasury migration
-are handled at that address rather than by mutating contract state. Adding
-an on-chain setter would introduce a privileged path that could redirect
-all future vested fees, which is a larger trust surface than the rotation
-problem it solves. If a deployment ever needs to change the beneficiary,
-the supported path is to deploy a new fee-vesting instance pointing at the
-new beneficiary and let the old instance finish vesting to the old address.
+receives vested fees) is set at `initialize()` and can be rotated by the
+admin via `set_beneficiary(new_beneficiary)`. The call requires the admin's
+auth and only changes where future payouts go: the vesting schedule, token,
+and `Claimed` amount are untouched, so already-vested-and-claimed funds are
+not affected and the unlock curve continues unchanged.
+
+Trust model: the admin key is the trust root for redirecting all future
+vested fees. A compromised admin key can point the beneficiary at an
+attacker-controlled address and drain every subsequent claim. Deployments
+should therefore use a contract account or multisig as the admin address so
+that rotation requires threshold authorization. Hardening of
+`set_beneficiary()` is tracked separately; this section describes its current
+behaviour only.
 
 ## Testnet adoption
 
@@ -121,7 +125,7 @@ entrypoints first.
 
 Existing single-token integrations need no migration. `submit`, `deposit`,
 `charge`, `stake`, `withdraw`, and `refund` keep their signatures and target
-the token set at `initialize()`, which is allowlisted automatically. Only
+the token set in the constructor, which is allowlisted automatically. Only
 callers that want a second asset call the `*_asset` variants, after the admin
 has run `set_asset_allowed(token, true)`; an unlisted token fails with
 `ContractError::AssetNotAllowed`. Settlement (`resolve`, `refund`,
