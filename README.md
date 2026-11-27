@@ -505,5 +505,5 @@ number; a PR that reg
 <!-- handsoff-issue-235 -->
 - #235: test.rs's own resolve() helpers use the stale 3-arg signature
 
-<!-- handsoff-issue-407 -->
-- #407: PR #213's admin_override_resolution() transfers before flipping question status — same CEI/reentrancy pattern as #378, in the new recovery function
+<!-- handsoff-issue-429 -->
+- #429: Make preview_resolve() round slash redistribution per loser like resolve()
