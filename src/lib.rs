@@ -864,8 +864,12 @@ pub struct ResolvePreview {
     /// worker with no stake contributes 0, same as the real resolve()).
     pub total_slashed: i128,
     /// What the platform address would end up with: fee + dust +
-    /// platform half of total_slashed + any redistribution remainder dust.
+    /// platform half of total_slashed + any redistribution remainder dust,
+    /// minus the public-goods share below.
     pub platform_take: i128,
+    /// Share of the gross platform take routed to the public-goods address
+    /// configured by `set_public_goods_config()`; 0 when routing is inactive.
+    pub public_goods_take: i128,
 }
 
 /// Emitted on the SOURCE contract for each question migrate_pending() moves.
@@ -4331,12 +4335,18 @@ impl OracleEscrow {
         let redist_share = worker_portion / n;
         let redist_dust = worker_portion - redist_share * n;
 
+        let gross_platform_take = fee + dust + platform_portion + redist_dust;
+        let public_goods_take = Self::get_public_goods_config(env.clone())
+            .map(|(_, bps)| Self::mul_bps(gross_platform_take, bps as i128))
+            .unwrap_or(0);
+
         Ok(ResolvePreview {
             fee,
             dust,
             share_per_worker: share_per_worker + redist_share,
             total_slashed,
-            platform_take: fee + dust + platform_portion + redist_dust,
+            platform_take: gross_platform_take - public_goods_take,
+            public_goods_take,
         })
     }
 
