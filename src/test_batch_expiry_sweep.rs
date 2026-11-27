@@ -88,3 +88,27 @@ fn sweep_timeouts_skips_an_already_resolved_question_without_reverting_the_batch
     assert_eq!(c.get_question(&1).status, Status::Refunded);
     assert_eq!(c.get_question(&2).status, Status::Resolved);
 }
+
+#[test]
+fn sweep_timeouts_refunds_a_duplicated_id_only_once() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+
+    f.env.ledger().with_mut(|li| {
+        li.sequence_number += TIMEOUT_LEDGERS + 1;
+    });
+
+    let before = token_client(&f).balance(&f.payer);
+    let ids = Vec::from_array(&f.env, [1u64, 1u64]);
+    let results = c.sweep_timeouts(&ids);
+
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap().is_ok());
+    assert_eq!(
+        results.get(1).unwrap(),
+        Err(ContractError::QuestionNotPending)
+    );
+    assert_eq!(c.get_question(&1).status, Status::Refunded);
+    assert_eq!(token_client(&f).balance(&f.payer), before + AMOUNT);
+}

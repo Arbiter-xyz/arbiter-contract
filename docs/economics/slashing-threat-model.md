@@ -202,10 +202,20 @@ cache made this worse: the gate saw the stake, and the slash didn't.
 Fix: unstaking is two-step. `begin_unstake(amount)` removes stake from
 the active amount at once, so the backend stops dispatching against it.
 The amount sits in an unbonding bucket that **remains slashable** until
-`release_at = now + max(3 days, timeout_ledgers)`. After that,
-`complete_unstake()` pays out whatever wasn't slashed. The delay is at
-least the question timeout, so any question the worker answered is
-resolved or refundable before the stake can leave.
+`release_at = now + max(3 days, MAX_TIMEOUT_LEDGERS + MAX_DISPUTE_WINDOW_LEDGERS)`.
+After that, `complete_unstake()` pays out whatever wasn't slashed. The bound
+uses fixed maxima, not the current `timeout_ledgers`, so `set_timeout_ledgers()`
+cannot shorten unbonding below a pending question's timeout. The delay covers
+the challengeable path: `resolve_challengeable()` lands within the question
+timeout, and `finalize_resolve()` (where the slash applies) lands within the
+dispute window after that. A worker who answered a challengeable question
+therefore cannot leave before its slash.
+
+**Limits.** An `escalate()`d question has no deadline, so no fixed window
+covers it. Slashing on escalation is out of scope for this guarantee. The
+guarantee also holds only while `dispute_window_ledgers` stays at or below
+`MAX_DISPUTE_WINDOW_LEDGERS`. Enforcing that bound on `resolve_challengeable()`
+is tracked separately (#422).
 
 **A3′, flash-staking for credibility.** Where stake gates dispatch or
 weights trust, v0.2.0 let a fresh sybil stake the minimum, get
