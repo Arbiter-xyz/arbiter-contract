@@ -2011,10 +2011,6 @@ impl OracleEscrow {
 
         env.storage().persistent().set(&key, &question);
         Self::extend_question_ttl(env, &key, &question);
-        env.storage()
-            .persistent()
-            .set(&AssetKey::QuestionToken(question_id), &token);
-        Self::extend_asset_ttl(env, &AssetKey::QuestionToken(question_id));
         Self::index_add(env, question_id);
         Self::bump_counter(env, &DataKey::OpenQuestionCount);
         Self::bump_counter(env, &DataKey::TotalOpenedCount);
@@ -2906,10 +2902,6 @@ impl OracleEscrow {
             .get(&key)
             .ok_or(ContractError::QuestionNotFound)?;
         Self::extend_question_ttl(&env, &key, &question);
-        let token_key = AssetKey::QuestionToken(question_id);
-        if env.storage().persistent().has(&token_key) {
-            Self::extend_asset_ttl(&env, &token_key);
-        }
         let basket_key = AssetKey::QuestionBasket(question_id);
         if env.storage().persistent().has(&basket_key) {
             Self::extend_asset_ttl(&env, &basket_key);
@@ -3905,6 +3897,17 @@ impl OracleEscrow {
     }
 
     fn question_token(env: &Env, question_id: u64) -> Result<Address, ContractError> {
+        // The token is stored on the Question struct itself; no separate
+        // AssetKey::QuestionToken entry is written (see record_question).
+        // For questions that pre-date this change and still have a legacy
+        // QuestionToken entry, fall back to reading it.
+        if let Some(q) = env
+            .storage()
+            .persistent()
+            .get::<_, crate::Question>(&DataKey::Question(question_id))
+        {
+            return Ok(q.token);
+        }
         if let Some(token) = env
             .storage()
             .persistent()
