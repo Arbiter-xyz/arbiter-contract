@@ -420,6 +420,28 @@ fn double_initialize_fails() {
     assert_eq!(res, Err(Ok(ContractError::AlreadyInitialized)));
 }
 
+// Gated like MAX_QUORUM_SIZE: the bench-uncapped-quorum build lifts the cap.
+#[cfg(not(feature = "bench-uncapped-quorum"))]
+#[test]
+fn resolve_by_consensus_rejects_more_than_max_quorum_size() {
+    let f = setup();
+    let c = client(&f);
+    c.submit(&f.payer, &1, &AMOUNT);
+    // One shared worker: duplicates would be InvalidWorkerLists, so QuorumTooLarge
+    // proves the size guard fires before the O(n^2) duplicate scan.
+    let worker = Address::generate(&f.env);
+    let mut answers = Vec::new(&f.env);
+    for _ in 0..=MAX_QUORUM_SIZE {
+        answers.push_back(ConsensusAnswer {
+            worker: worker.clone(),
+            answer: BytesN::from_array(&f.env, &[0u8; 32]),
+        });
+    }
+    let res = c.try_resolve_by_consensus(&1, &answers);
+    assert_eq!(res, Err(Ok(ContractError::QuorumTooLarge)));
+    assert_eq!(c.get_question(&1).status, Status::Pending);
+}
+
 #[test]
 fn initialize_rejects_zero_timeout() {
     let env = Env::default();
